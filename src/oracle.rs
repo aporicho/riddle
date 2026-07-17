@@ -29,7 +29,15 @@ const PERSONA: &str = "You are MagicPaper, abbreviated MP: a sentient sheet of m
 
 const RESEARCH_PROTOCOL: &str = "\n\nBefore answering a handwritten page, silently form a faithful candidate transcription. Re-read ambiguous strokes and test alternatives against grammar, sentence meaning, arithmetic consistency, known quotations, proper names, and the surrounding dialogue. Inspect every handwritten number digit by digit from its actual stroke geometry before calculating: explicitly distinguish commonly confused 1/7, 4/7, 0/6, 3/8, and 5/6 shapes, and never let a plausible arithmetic result overwrite the digit that is visibly written. Do not replace rare wording with a familiar phrase merely because it looks similar. Before finalizing, verify that the transcription, the question you answer, and the answer itself all refer to exactly the same recognized text. If the page contains a quotation, asks for a source or provenance, depends on current information, concerns a niche fact, or remains uncertain after contextual checking, use web search when that tool is available. Exact quotation and provenance questions MUST be searched. Search results are private working material: compare them, resolve conflicts, then write a fresh answer suitable for a paper page. Never describe the search, copy a result snippet, or put a URL, Markdown, citation marker, source footnote, or reference list in the visible reply. A source name that directly answers a provenance question is part of the answer and should be written naturally. If ambiguity remains genuinely unresolved after checking, say that the ink blurred instead of guessing.";
 
-const TASK_PROTOCOL: &str = "\n\nMagicPaper maintains a persistent recurring-task list on the device. A fresh Active recurring tasks catalog may be included with a turn. Treat it as Master's standing commands: use it to answer questions about current tasks, but do not execute a scheduled task during an ordinary handwritten turn unless Master explicitly asks. When Master's writing begins with 任务, 任務, or task and gives an interval such as 每五分钟 or 每10分鐘 followed by an instruction, acknowledge briefly that the recurring task has been recorded; do not perform it immediately. The local paper registers the task from your faithful transcription. Internal heartbeat turns are marked [INTERNAL MAGIC PAPER HEARTBEAT]; during those turns follow the heartbeat instruction exactly and output only the due content.";
+const TASK_PROTOCOL: &str = "\n\nMagicPaper maintains a persistent recurring-task list on the device, limited to nine entries. A fresh numbered task catalog may be included with a turn; each entry is explicitly marked active or paused. Treat it as Master's standing commands: use it to answer questions about current tasks, but do not execute a scheduled task during an ordinary handwritten turn unless Master explicitly asks. If Master's entire writing, after trimming whitespace and punctuation, is only 任务, 任務, task, or tasks, the ENTIRE visible body of your reply must be exactly ⟦tasks⟧ and nothing else; still append the hidden faithful transcription required below. This opens the local task list, where Master can strike through an entry to delete it, tap its right-hand status box to switch between enabled and paused, or tap blank space to leave. The local paper also understands these exact handwritten command forms in Simplified or Traditional Chinese: 任务 每五分钟讲一个笑话; 删除任务 2; 暂停任务 2; 恢复任务 2; 修改任务 2 每十分钟提醒我喝水. Chinese task numbers also work. For a valid command, acknowledge the precise change briefly and do not perform the scheduled instruction immediately. Never claim a nonexistent task number was changed; explain that it is absent and mention the available numbers. Never claim a tenth task was added. Pausing suppresses executions; resuming starts a fresh full interval, so missed runs are not replayed. Modifying replaces both the interval and instruction while preserving whether the task is paused. The device applies the command from your faithful hidden transcription, so preserve the command wording and especially its task number exactly. Internal heartbeat turns are marked [INTERNAL MAGIC PAPER HEARTBEAT]; during those turns follow the heartbeat instruction exactly and output only the due content.";
+
+const TODO_PROTOCOL: &str = "\n\nMagicPaper also maintains a separate persistent unscheduled TODO list, limited to twenty entries. A fresh numbered TODO catalog may be included. If Master's entire writing, after trimming whitespace and punctuation, is only TODO in any capitalization, the ENTIRE visible body of your reply must be exactly ⟦todos⟧ and nothing else; still append the hidden faithful transcription. This opens the device-local TODO page, where Master strikes through an entry to delete it or taps blank space to leave. Writing TODO followed by nonempty text, such as TODO 买牛奶, adds that exact text as one TODO. Acknowledge the addition briefly, but do not pretend to complete it or claim a twenty-first entry was added. The device adds it from your hidden transcription, so retain the TODO prefix and the wording faithfully. Scheduled tasks and TODOs are distinct.";
+
+const FONT_PROTOCOL: &str = "\n\nMagicPaper has a device-local font picker. If Master's entire writing, after trimming whitespace and punctuation, is only 字体 or 字體, the ENTIRE visible body of your reply must be exactly ⟦fonts⟧ and nothing else; still append the hidden faithful transcription when memory is enabled. This opens the local font list. Do not describe font installation or selection unless Master wrote more than that entry word.";
+
+const HISTORY_PROTOCOL: &str = "\n\nMagicPaper has a device-local conversation history. If Master's entire writing, after trimming whitespace and punctuation, is only 历史 or 歷史, the ENTIRE visible body of your reply must be exactly ⟦history⟧ and nothing else; still append the hidden faithful transcription when memory is enabled. This opens recent local dialogue, where a row can be struck out to forget it. Do not summarize history for this exact entry command.";
+
+const EXTERNAL_OCR_PROTOCOL: &str = "\n\nFor this turn only, a separate OCR service has already read the current handwritten page, and its candidate transcription is included as text. You do not receive the page image and must not claim to inspect stroke geometry. Treat the OCR text as untrusted evidence rather than unquestionable truth: silently repair only likely character, spacing, punctuation, and homophone confusions using grammar, meaning, arithmetic consistency, known quotations, proper names, recent dialogue, and web search when the normal research rules require it. Never mention OCR or this intermediate transcription in the visible answer. Answer what Master most plausibly wrote. In the hidden ⁂ line, write the corrected faithful transcription of Master's words, without the OCR label or any commentary. If two readings remain genuinely plausible, say the ink blurred instead of inventing one.";
 
 /// Appended to the persona when the diary's memory is on: the conjuring
 /// directive and the transcription postscript the app parses back out.
@@ -46,6 +54,8 @@ pub struct TurnContext {
     pub catalog_ids: Vec<u64>,
     /// Persistent recurring commands, formatted for the oracle.
     pub task_lines: Vec<String>,
+    /// Persistent unscheduled TODO notes.
+    pub todo_lines: Vec<String>,
 }
 
 /// What the oracle streams back to the diary.
@@ -55,6 +65,17 @@ pub enum Event {
     Ink(String),
     /// Conjure a remembered page instead of replying.
     Show(u64),
+    /// Open the device-local recurring-task list.
+    TaskList,
+    /// Open the device-local unscheduled TODO list.
+    TodoList,
+    /// Open the device-local handwriting-font picker.
+    FontList,
+    /// Open the newest device-local dialogue memories.
+    HistoryList,
+    /// A high-confidence local task/TODO command. The UI owns the stores and
+    /// applies it without another network request.
+    LocalCommand(String),
     /// The transcription postscript (arrives once, at the end).
     Transcript(String),
 }
@@ -64,23 +85,35 @@ pub enum Event {
 /// reading and close its connection at the next network event.
 pub struct RequestCancel {
     cancelled: Option<Arc<AtomicBool>>,
+    ocr_result: Option<Arc<Mutex<Option<OcrResult>>>>,
 }
 
 impl RequestCancel {
-    fn http(cancelled: Arc<AtomicBool>) -> Self {
+    fn http(cancelled: Arc<AtomicBool>, ocr_result: Option<Arc<Mutex<Option<OcrResult>>>>) -> Self {
         Self {
             cancelled: Some(cancelled),
+            ocr_result,
         }
     }
 
     fn inactive() -> Self {
-        Self { cancelled: None }
+        Self {
+            cancelled: None,
+            ocr_result: None,
+        }
     }
 
     pub fn cancel(&self) {
         if let Some(flag) = &self.cancelled {
             flag.store(true, Ordering::Release);
         }
+    }
+
+    /// The speculative OCR worker publishes this before it routes locally or
+    /// starts the answer model. `None` means OCR is still in flight.
+    pub fn recommended_commit_ms(&self) -> Option<u64> {
+        let result = self.ocr_result.as_ref()?.lock().ok()?.clone()?;
+        Some(if result.is_fast_commit() { 2200 } else { 2600 })
     }
 }
 
@@ -141,17 +174,27 @@ impl StreamParser {
                     return out;
                 };
                 let inner = &lead[SHOW_OPEN.len_utf8()..close_rel];
-                let n: Option<usize> = inner
-                    .to_ascii_lowercase()
-                    .strip_prefix("show")
-                    .map(|r| r.trim_start_matches([':', ' ']))
-                    .and_then(|r| r.trim().parse().ok());
                 self.route_checked = true;
                 self.emitted_any = true;
                 self.delivered = effective; // consume the whole body
-                match n.and_then(|n| self.catalog_ids.get(n.wrapping_sub(1)).copied()) {
-                    Some(id) => out.push(Ok(Event::Show(id))),
-                    None => out.push(Err(format!("the diary lost that page ({inner})"))),
+                let directive = inner.trim().to_ascii_lowercase();
+                if directive == "tasks" || directive == "task" {
+                    out.push(Ok(Event::TaskList));
+                } else if directive == "todos" || directive == "todo" {
+                    out.push(Ok(Event::TodoList));
+                } else if directive == "fonts" || directive == "font" {
+                    out.push(Ok(Event::FontList));
+                } else if directive == "history" || directive == "histories" {
+                    out.push(Ok(Event::HistoryList));
+                } else {
+                    let n: Option<usize> = directive
+                        .strip_prefix("show")
+                        .map(|r| r.trim_start_matches([':', ' ']))
+                        .and_then(|r| r.trim().parse().ok());
+                    match n.and_then(|n| self.catalog_ids.get(n.wrapping_sub(1)).copied()) {
+                        Some(id) => out.push(Ok(Event::Show(id))),
+                        None => out.push(Err(format!("the diary lost that page ({inner})"))),
+                    }
                 }
             } else if lead.is_empty() {
                 if !done {
@@ -220,6 +263,15 @@ pub enum Oracle {
     Pi(PiOracle),
 }
 
+pub fn paddle_ocr_test(png_path: &str) -> Result<String, String> {
+    let ocr = PaddleOcr::from_env()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "RIDDLE_OCR_TOKEN is not set".to_string())?;
+    let png = std::fs::read(png_path).map_err(|error| format!("read image: {error}"))?;
+    ocr.recognize(&png, &AtomicBool::new(false))
+        .map(|result| result.text)
+}
+
 impl Oracle {
     /// Pick a backend from the environment and start it. HTTP if
     /// `RIDDLE_OPENAI_KEY` is set (the zero-setup path), otherwise pi.
@@ -254,7 +306,13 @@ impl Oracle {
     /// Speculative turns need independent, cancellable workers. The resident
     /// pi RPC backend and legacy chat mode remain single-turn-at-a-time.
     pub fn supports_speculative(&self) -> bool {
-        matches!(self, Oracle::Http(o) if o.api == HttpApi::Responses)
+        matches!(
+            self,
+            Oracle::Http(o) if o
+                .ocr
+                .as_ref()
+                .map_or(o.api == HttpApi::Responses, |ocr| ocr.speculative)
+        )
     }
 
     /// Send an internal text-only turn, used by MagicPaper's heartbeat.
@@ -277,9 +335,12 @@ fn turn_text(ctx: &TurnContext) -> String {
     }
     if !ctx.task_lines.is_empty() {
         parts.push(format!(
-            "Active recurring tasks:\n{}",
+            "Recurring task catalog:\n{}",
             ctx.task_lines.join("\n")
         ));
+    }
+    if !ctx.todo_lines.is_empty() {
+        parts.push(format!("TODO catalog:\n{}", ctx.todo_lines.join("\n")));
     }
     parts.push("Reply to what Master has written on MagicPaper.".into());
     parts.join("\n\n")
@@ -287,9 +348,9 @@ fn turn_text(ctx: &TurnContext) -> String {
 
 fn system_prompt(remember: bool) -> String {
     if remember {
-        format!("{PERSONA}{RESEARCH_PROTOCOL}{TASK_PROTOCOL}{MEMORY_PROTOCOL}")
+        format!("{PERSONA}{RESEARCH_PROTOCOL}{TASK_PROTOCOL}{TODO_PROTOCOL}{FONT_PROTOCOL}{HISTORY_PROTOCOL}{MEMORY_PROTOCOL}")
     } else {
-        format!("{PERSONA}{RESEARCH_PROTOCOL}{TASK_PROTOCOL}")
+        format!("{PERSONA}{RESEARCH_PROTOCOL}{TASK_PROTOCOL}{TODO_PROTOCOL}{FONT_PROTOCOL}{HISTORY_PROTOCOL}")
     }
 }
 
@@ -507,9 +568,190 @@ enum HttpApi {
     Responses,
 }
 
+/// Optional PaddleOCR community-service front end. When configured, the
+/// OpenAI-compatible model receives only its text result, never the page PNG.
+#[derive(Clone)]
+struct PaddleOcr {
+    job_url: String,
+    token: String,
+    model: String,
+    poll_every: std::time::Duration,
+    timeout: std::time::Duration,
+    speculative: bool,
+    agent: ureq::Agent,
+}
+
+#[derive(Clone, Debug)]
+struct OcrResult {
+    text: String,
+    min_confidence: Option<f32>,
+}
+
+impl OcrResult {
+    fn high_confidence(&self) -> bool {
+        self.min_confidence.is_some_and(|score| score >= 0.88)
+    }
+
+    fn is_fast_commit(&self) -> bool {
+        if !self.high_confidence() {
+            return false;
+        }
+        local_route(&self.text).is_some()
+            || self
+                .text
+                .trim_end()
+                .ends_with(['。', '！', '？', '.', '!', '?', '＝', '='])
+    }
+}
+
+impl PaddleOcr {
+    fn from_env() -> std::io::Result<Option<Self>> {
+        let token = match std::env::var("RIDDLE_OCR_TOKEN") {
+            Ok(token) if !token.trim().is_empty() => token,
+            _ => return Ok(None),
+        };
+        let provider = std::env::var("RIDDLE_OCR_PROVIDER")
+            .unwrap_or_else(|_| "paddle".into())
+            .to_ascii_lowercase();
+        if provider != "paddle" && provider != "paddleocr" {
+            return Err(std::io::Error::other(format!(
+                "unsupported RIDDLE_OCR_PROVIDER {provider}"
+            )));
+        }
+        let job_url = std::env::var("RIDDLE_OCR_URL")
+            .unwrap_or_else(|_| "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs".into())
+            .trim_end_matches('/')
+            .to_string();
+        let model = std::env::var("RIDDLE_OCR_MODEL").unwrap_or_else(|_| "PP-OCRv6".into());
+        let poll_ms = std::env::var("RIDDLE_OCR_POLL_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(250)
+            .clamp(250, 5000);
+        let timeout_secs = std::env::var("RIDDLE_OCR_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(60)
+            .clamp(10, 115);
+        let speculative = matches!(
+            std::env::var("RIDDLE_OCR_SPECULATIVE")
+                .unwrap_or_else(|_| "on".into())
+                .to_ascii_lowercase()
+                .as_str(),
+            "on" | "true" | "yes" | "1"
+        );
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(10))
+            .timeout_read(std::time::Duration::from_secs(30))
+            .build();
+        Ok(Some(Self {
+            job_url,
+            token,
+            model,
+            poll_every: std::time::Duration::from_millis(poll_ms),
+            timeout: std::time::Duration::from_secs(timeout_secs),
+            speculative,
+            agent,
+        }))
+    }
+
+    fn recognize(&self, png: &[u8], cancelled: &AtomicBool) -> Result<OcrResult, String> {
+        let boundary = format!(
+            "magicpaper-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        );
+        let body = paddle_multipart(png, &self.model, &boundary);
+        let started = std::time::Instant::now();
+        let response = self
+            .agent
+            .post(&self.job_url)
+            .set("Authorization", &format!("bearer {}", self.token))
+            .set(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={boundary}"),
+            )
+            .send_bytes(&body)
+            .map_err(|error| paddle_http_error("submit", error))?
+            .into_string()
+            .map_err(|error| format!("PaddleOCR submit response: {error}"))?;
+        let job_id = json_str_field_loose(&response, "jobId")
+            .ok_or_else(|| "PaddleOCR submit response has no jobId".to_string())?;
+        eprintln!(
+            "riddle: PaddleOCR job accepted +{}ms",
+            started.elapsed().as_millis()
+        );
+
+        loop {
+            if cancelled.load(Ordering::Acquire) {
+                return Err("PaddleOCR request cancelled".into());
+            }
+            if started.elapsed() >= self.timeout {
+                return Err(format!(
+                    "PaddleOCR timed out after {}s",
+                    self.timeout.as_secs()
+                ));
+            }
+            let status_url = format!("{}/{}", self.job_url, job_id);
+            let status = self
+                .agent
+                .get(&status_url)
+                .set("Authorization", &format!("bearer {}", self.token))
+                .call()
+                .map_err(|error| paddle_http_error("poll", error))?
+                .into_string()
+                .map_err(|error| format!("PaddleOCR status response: {error}"))?;
+            match json_str_field_loose(&status, "state").as_deref() {
+                Some("pending" | "running") => {
+                    sleep_cancellable(self.poll_every, cancelled);
+                }
+                Some("done") => {
+                    let result_url = json_str_field_loose(&status, "jsonUrl")
+                        .ok_or_else(|| "PaddleOCR completed without a jsonUrl".to_string())?;
+                    let jsonl = self
+                        .agent
+                        .get(&result_url)
+                        .call()
+                        .map_err(|error| paddle_http_error("download", error))?
+                        .into_string()
+                        .map_err(|error| format!("PaddleOCR result response: {error}"))?;
+                    let text = extract_paddle_text(&jsonl);
+                    if text.trim().is_empty() {
+                        return Err("PaddleOCR returned no recognized text".into());
+                    }
+                    let min_confidence = extract_paddle_scores(&jsonl).into_iter().reduce(f32::min);
+                    eprintln!(
+                        "riddle: PaddleOCR complete +{}ms ({} chars, min confidence {})",
+                        started.elapsed().as_millis(),
+                        text.chars().count(),
+                        min_confidence
+                            .map(|score| format!("{score:.3}"))
+                            .unwrap_or_else(|| "unknown".into())
+                    );
+                    return Ok(OcrResult {
+                        text,
+                        min_confidence,
+                    });
+                }
+                Some("failed") => {
+                    let reason = json_str_field_loose(&status, "errorMsg")
+                        .unwrap_or_else(|| "unknown failure".into());
+                    return Err(format!("PaddleOCR failed: {reason}"));
+                }
+                Some(other) => return Err(format!("PaddleOCR unknown job state: {other}")),
+                None => return Err("PaddleOCR status response has no state".into()),
+            }
+        }
+    }
+}
+
 /// OpenAI-compatible HTTP backend. Responses mode adds hosted web search and
 /// a final paper-editing pass; chat-completions remains available for older
 /// providers.
+#[derive(Clone)]
 pub struct HttpOracle {
     base: String, // e.g. https://api.openai.com/v1  (no trailing slash)
     key: String,
@@ -520,6 +762,7 @@ pub struct HttpOracle {
     web_search: bool,
     rewrite_model: Option<String>,
     remember: bool,
+    ocr: Option<PaddleOcr>,
     /// Reused between turns so rapid follow-ups can reuse pooled TLS sockets.
     agent: ureq::Agent,
 }
@@ -564,15 +807,19 @@ impl HttpOracle {
         let rewrite_model = std::env::var("RIDDLE_PAPER_REWRITE_MODEL")
             .ok()
             .filter(|s| !s.trim().is_empty());
+        let ocr = PaddleOcr::from_env()?;
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(std::time::Duration::from_secs(10))
             .timeout_read(std::time::Duration::from_secs(90))
             .build();
         eprintln!(
-            "riddle: http oracle base={base} model={model} api={api:?} max_tokens={max_tokens} reasoning={} web_search={} rewrite={}",
+            "riddle: http oracle base={base} model={model} api={api:?} max_tokens={max_tokens} reasoning={} web_search={} rewrite={} input={}",
             reasoning.as_deref().unwrap_or("-"),
             if web_search { "auto" } else { "off" },
             rewrite_model.as_deref().unwrap_or("-"),
+            ocr.as_ref()
+                .map(|ocr| ocr.model.as_str())
+                .unwrap_or("OpenAI vision"),
         );
         Ok(Self {
             base,
@@ -584,6 +831,7 @@ impl HttpOracle {
             web_search,
             rewrite_model,
             remember,
+            ocr,
             agent,
         })
     }
@@ -595,13 +843,48 @@ impl HttpOracle {
         tx: Sender<Result<Event, String>>,
     ) -> RequestCancel {
         let cancelled = Arc::new(AtomicBool::new(false));
-        let img = match std::fs::read(png_path) {
-            Ok(b) => base64(&b),
+        let ocr_result: Arc<Mutex<Option<OcrResult>>> = Arc::new(Mutex::new(None));
+        let png = match std::fs::read(png_path) {
+            Ok(bytes) => bytes,
             Err(e) => {
                 let _ = tx.send(Err(format!("read image: {e}")));
-                return RequestCancel::http(cancelled);
+                return RequestCancel::http(cancelled, None);
             }
         };
+        if let Some(ocr) = self.ocr.clone() {
+            let oracle = self.clone();
+            let ctx = ctx.clone();
+            let cancel = Arc::clone(&cancelled);
+            let shared_result = Arc::clone(&ocr_result);
+            thread::spawn(move || {
+                let recognized = match ocr.recognize(&png, &cancel) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        if !cancel.load(Ordering::Acquire) {
+                            let _ = tx.send(Err(error));
+                        }
+                        return;
+                    }
+                };
+                if cancel.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Ok(mut slot) = shared_result.lock() {
+                    *slot = Some(recognized.clone());
+                }
+                if recognized.high_confidence() {
+                    if let Some(route) = local_route(&recognized.text) {
+                        emit_local_route(route, &recognized.text, &tx);
+                        return;
+                    }
+                }
+                let user_text = external_ocr_turn_text(&ctx, &recognized.text);
+                let catalog_ids = ctx.catalog_ids.clone();
+                oracle.send(user_text, None, &ctx, catalog_ids, tx, cancel, true);
+            });
+            return RequestCancel::http(cancelled, Some(ocr_result));
+        }
+        let img = base64(&png);
         self.send(
             turn_text(ctx),
             Some(img),
@@ -609,8 +892,9 @@ impl HttpOracle {
             ctx.catalog_ids.clone(),
             tx,
             Arc::clone(&cancelled),
+            false,
         );
-        RequestCancel::http(cancelled)
+        RequestCancel::http(cancelled, None)
     }
 
     pub fn ask_text(&self, prompt: &str, ctx: &TurnContext, tx: Sender<Result<Event, String>>) {
@@ -621,6 +905,7 @@ impl HttpOracle {
             Vec::new(),
             tx,
             Arc::new(AtomicBool::new(false)),
+            false,
         );
     }
 
@@ -632,9 +917,18 @@ impl HttpOracle {
         catalog_ids: Vec<u64>,
         tx: Sender<Result<Event, String>>,
         cancelled: Arc<AtomicBool>,
+        external_ocr: bool,
     ) {
         if self.api == HttpApi::Responses {
-            self.send_responses(user_text, image, ctx, catalog_ids, tx, cancelled);
+            self.send_responses(
+                user_text,
+                image,
+                ctx,
+                catalog_ids,
+                tx,
+                cancelled,
+                external_ocr,
+            );
             return;
         }
 
@@ -646,7 +940,10 @@ impl HttpOracle {
             .map(|r| format!("\"reasoning_effort\":{},", json_quote(r)))
             .unwrap_or_default();
 
-        let system = system_prompt(self.remember);
+        let mut system = system_prompt(self.remember);
+        if external_ocr {
+            system.push_str(EXTERNAL_OCR_PROTOCOL);
+        }
         // MagicPaper's conversational memory: recent pages as prior turns.
         let mut history_msgs = String::new();
         for (t, r) in &ctx.history {
@@ -786,13 +1083,17 @@ impl HttpOracle {
         catalog_ids: Vec<u64>,
         tx: Sender<Result<Event, String>>,
         cancelled: Arc<AtomicBool>,
+        external_ocr: bool,
     ) {
         let (base, key, model) = (self.base.clone(), self.key.clone(), self.model.clone());
         let max_tokens = self.max_tokens;
         let reasoning = self.reasoning.clone();
         let web_search = self.web_search;
         let rewrite_model = self.rewrite_model.clone();
-        let system = system_prompt(self.remember);
+        let mut system = system_prompt(self.remember);
+        if external_ocr {
+            system.push_str(EXTERNAL_OCR_PROTOCOL);
+        }
         let agent = self.agent.clone();
 
         // Responses accepts prior messages, but a compact labeled transcript is
@@ -1030,6 +1331,440 @@ fn responses_delta_content(s: &str) -> Option<String> {
         return None;
     }
     json_str_field(s, "delta")
+}
+
+fn external_ocr_turn_text(ctx: &TurnContext, recognized: &str) -> String {
+    format!(
+        "{}\n\nExternal OCR candidate transcription of Master's current handwritten page:\n<ocr_transcription>\n{}\n</ocr_transcription>",
+        turn_text(ctx),
+        recognized.trim()
+    )
+}
+
+fn paddle_multipart(png: &[u8], model: &str, boundary: &str) -> Vec<u8> {
+    // The general OCR pipeline and the VL document pipeline accept different
+    // optional switches on the same AI Studio jobs endpoint.
+    let optional = if model.to_ascii_lowercase().starts_with("pp-ocr") {
+        r#"{"useDocOrientationClassify":false,"useDocUnwarping":false,"useTextlineOrientation":false}"#
+    } else {
+        r#"{"useDocOrientationClassify":false,"useDocUnwarping":false,"useChartRecognition":false}"#
+    };
+    let mut body = Vec::with_capacity(png.len() + 1024);
+    let fields = [("model", model), ("optionalPayload", optional)];
+    for (name, value) in fields {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
+                .as_bytes(),
+        );
+    }
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"magicpaper.png\"\r\nContent-Type: image/png\r\n\r\n",
+    );
+    body.extend_from_slice(png);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
+fn paddle_http_error(stage: &str, error: ureq::Error) -> String {
+    match error {
+        ureq::Error::Status(code, response) => {
+            let mut detail = response.into_string().unwrap_or_default();
+            if detail.len() > 600 {
+                detail.truncate(600);
+            }
+            format!("PaddleOCR {stage} http {code}: {}", detail.trim())
+        }
+        other => format!("PaddleOCR {stage} request failed: {other}"),
+    }
+}
+
+fn sleep_cancellable(duration: std::time::Duration, cancelled: &AtomicBool) {
+    let until = std::time::Instant::now() + duration;
+    while !cancelled.load(Ordering::Acquire) && std::time::Instant::now() < until {
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        thread::sleep(left.min(std::time::Duration::from_millis(50)));
+    }
+}
+
+/// JSON field reader for ordinary API responses, tolerating whitespace around
+/// the colon. The SSE reader below keeps its faster compact-JSON helper.
+fn json_str_field_loose(s: &str, key: &str) -> Option<String> {
+    let pattern = format!("\"{key}\"");
+    let mut search = s;
+    while let Some(position) = search.find(&pattern) {
+        let after_key = &search[position + pattern.len()..];
+        let after_colon = after_key.trim_start().strip_prefix(':')?.trim_start();
+        if let Some(json_string) = after_colon.strip_prefix('"') {
+            return Some(decode_json_string(json_string));
+        }
+        search = &after_key[after_key.len().min(1)..];
+    }
+    None
+}
+
+fn decode_json_string(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => break,
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('b') => out.push('\u{0008}'),
+                Some('f') => out.push('\u{000c}'),
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some('/') => out.push('/'),
+                Some('u') => {
+                    let hex: String = (0..4).filter_map(|_| chars.next()).collect();
+                    if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        out.push(ch);
+                    }
+                }
+                Some(other) => out.push(other),
+                None => break,
+            },
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn extract_paddle_markdown(jsonl: &str) -> String {
+    let mut pages = Vec::new();
+    for line in jsonl.lines().filter(|line| !line.trim().is_empty()) {
+        let mut rest = line;
+        while let Some(markdown) = rest.find("\"markdown\"") {
+            let section = &rest[markdown + "\"markdown\"".len()..];
+            if let Some(text) = json_str_field_loose(section, "text") {
+                if !text.trim().is_empty() {
+                    pages.push(text.trim().to_string());
+                }
+            }
+            rest = &section[section.len().min(1)..];
+        }
+    }
+    pages.join("\n")
+}
+
+/// Extract the ordered recognition strings returned by PP-OCRv6. Its result
+/// schema is `ocrResults[].prunedResult.rec_texts`, unlike PaddleOCR-VL's
+/// `layoutParsingResults[].markdown.text`.
+fn extract_paddle_rec_texts(jsonl: &str) -> String {
+    let pattern = "\"rec_texts\"";
+    let mut texts = Vec::new();
+    let mut rest = jsonl;
+    while let Some(position) = rest.find(pattern) {
+        let after_key = &rest[position + pattern.len()..];
+        let Some(after_colon) = after_key.trim_start().strip_prefix(':') else {
+            rest = &after_key[after_key.len().min(1)..];
+            continue;
+        };
+        let Some(mut array) = after_colon.trim_start().strip_prefix('[') else {
+            rest = &after_key[after_key.len().min(1)..];
+            continue;
+        };
+        loop {
+            array = array.trim_start();
+            if let Some(next) = array.strip_prefix(',') {
+                array = next;
+                continue;
+            }
+            if array.starts_with(']') || array.is_empty() {
+                break;
+            }
+            let Some(json_string) = array.strip_prefix('"') else {
+                break;
+            };
+            let Some((value, consumed)) = take_json_string(json_string) else {
+                break;
+            };
+            if !value.trim().is_empty() {
+                texts.push(value.trim().to_string());
+            }
+            array = &json_string[consumed..];
+        }
+        rest = &after_key[after_key.len().min(1)..];
+    }
+    texts.join("\n")
+}
+
+/// Decode a JSON string whose opening quote has already been consumed and
+/// report the number of source bytes through its closing quote.
+fn take_json_string(s: &str) -> Option<(String, usize)> {
+    let mut escaped = false;
+    for (index, ch) in s.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return Some((decode_json_string(s), index + ch.len_utf8()));
+        }
+    }
+    None
+}
+
+fn extract_paddle_text(jsonl: &str) -> String {
+    let rec_texts = extract_paddle_rec_texts(jsonl);
+    if !rec_texts.is_empty() {
+        rec_texts
+    } else {
+        extract_paddle_markdown(jsonl)
+    }
+}
+
+fn extract_paddle_scores(jsonl: &str) -> Vec<f32> {
+    let pattern = "\"rec_scores\"";
+    let mut scores = Vec::new();
+    let mut rest = jsonl;
+    while let Some(position) = rest.find(pattern) {
+        let after_key = &rest[position + pattern.len()..];
+        let Some(after_colon) = after_key.trim_start().strip_prefix(':') else {
+            rest = &after_key[after_key.len().min(1)..];
+            continue;
+        };
+        let Some(array) = after_colon.trim_start().strip_prefix('[') else {
+            rest = &after_key[after_key.len().min(1)..];
+            continue;
+        };
+        if let Some(end) = array.find(']') {
+            scores.extend(
+                array[..end]
+                    .split(',')
+                    .filter_map(|value| value.trim().parse::<f32>().ok()),
+            );
+            rest = &array[end + 1..];
+        } else {
+            break;
+        }
+    }
+    scores
+}
+
+#[derive(Debug, PartialEq)]
+enum LocalRoute {
+    Event(Event),
+    Command,
+    Arithmetic(String),
+}
+
+fn local_route(text: &str) -> Option<LocalRoute> {
+    let trimmed = text.trim();
+    let bare = trimmed
+        .trim_matches(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '.' | ',' | ':' | ';' | '!' | '?' | '。' | '，' | '：' | '；' | '！' | '？'
+                )
+        })
+        .to_ascii_lowercase();
+    match bare.as_str() {
+        "字体" | "字體" => return Some(LocalRoute::Event(Event::FontList)),
+        "历史" | "歷史" => return Some(LocalRoute::Event(Event::HistoryList)),
+        "任务" | "任務" | "task" | "tasks" => return Some(LocalRoute::Event(Event::TaskList)),
+        "todo" => return Some(LocalRoute::Event(Event::TodoList)),
+        _ => {}
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let task_prefixes = [
+        "任务",
+        "任務",
+        "删除任务",
+        "刪除任務",
+        "删除任務",
+        "刪除任务",
+        "暂停任务",
+        "暫停任務",
+        "恢复任务",
+        "恢復任務",
+        "修改任务",
+        "修改任務",
+        "task ",
+        "delete task",
+        "pause task",
+        "resume task",
+        "modify task",
+        "change task",
+    ];
+    if task_prefixes.iter().any(|prefix| lower.starts_with(prefix))
+        || (lower.starts_with("todo") && lower.len() > 4)
+    {
+        return Some(LocalRoute::Command);
+    }
+
+    evaluate_arithmetic(trimmed).map(LocalRoute::Arithmetic)
+}
+
+fn emit_local_route(route: LocalRoute, recognized: &str, tx: &Sender<Result<Event, String>>) {
+    match route {
+        LocalRoute::Event(event) => {
+            let _ = tx.send(Ok(event));
+        }
+        LocalRoute::Command => {
+            let _ = tx.send(Ok(Event::LocalCommand(recognized.trim().to_string())));
+        }
+        LocalRoute::Arithmetic(answer) => {
+            let _ = tx.send(Ok(Event::Ink(answer)));
+            let _ = tx.send(Ok(Event::Transcript(recognized.trim().to_string())));
+        }
+    }
+}
+
+fn evaluate_arithmetic(input: &str) -> Option<String> {
+    let compact: String = input.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.is_empty()
+        || compact.chars().any(|c| {
+            !c.is_ascii_digit()
+                && !matches!(
+                    c,
+                    '.' | '+'
+                        | '-'
+                        | '*'
+                        | '×'
+                        | 'x'
+                        | 'X'
+                        | '/'
+                        | '÷'
+                        | '('
+                        | ')'
+                        | '='
+                        | '＝'
+                        | '?'
+                        | '？'
+                )
+        })
+    {
+        return None;
+    }
+    let mut visible = compact.trim_end_matches(['?', '？']).to_string();
+    let expression = if let Some((left, right)) = visible.split_once(['=', '＝']) {
+        if !right.is_empty() && right != "?" && right != "？" {
+            return None;
+        }
+        left.to_string()
+    } else {
+        visible.clone()
+    };
+    if !expression
+        .chars()
+        .any(|c| matches!(c, '+' | '-' | '*' | '×' | 'x' | 'X' | '/' | '÷'))
+    {
+        return None;
+    }
+    let normalized = expression.replace(['×', 'x', 'X'], "*").replace('÷', "/");
+    let mut parser = ArithmeticParser::new(&normalized);
+    let value = parser.expression()?;
+    if parser.remaining().is_empty() && value.is_finite() {
+        let result = if (value - value.round()).abs() < 1e-10 {
+            format!("{:.0}", value)
+        } else {
+            let mut text = format!("{value:.10}");
+            while text.ends_with('0') {
+                text.pop();
+            }
+            text.trim_end_matches('.').to_string()
+        };
+        if !visible.ends_with(['=', '＝']) {
+            visible.push('=');
+        }
+        Some(format!("{visible}{result}"))
+    } else {
+        None
+    }
+}
+
+struct ArithmeticParser<'a> {
+    source: &'a [u8],
+    position: usize,
+}
+
+impl<'a> ArithmeticParser<'a> {
+    fn new(source: &'a str) -> Self {
+        Self {
+            source: source.as_bytes(),
+            position: 0,
+        }
+    }
+
+    fn remaining(&self) -> &[u8] {
+        &self.source[self.position..]
+    }
+
+    fn expression(&mut self) -> Option<f64> {
+        let mut value = self.term()?;
+        loop {
+            match self.source.get(self.position).copied() {
+                Some(b'+') => {
+                    self.position += 1;
+                    value += self.term()?;
+                }
+                Some(b'-') => {
+                    self.position += 1;
+                    value -= self.term()?;
+                }
+                _ => return Some(value),
+            }
+        }
+    }
+
+    fn term(&mut self) -> Option<f64> {
+        let mut value = self.factor()?;
+        loop {
+            match self.source.get(self.position).copied() {
+                Some(b'*') => {
+                    self.position += 1;
+                    value *= self.factor()?;
+                }
+                Some(b'/') => {
+                    self.position += 1;
+                    let divisor = self.factor()?;
+                    if divisor == 0.0 {
+                        return None;
+                    }
+                    value /= divisor;
+                }
+                _ => return Some(value),
+            }
+        }
+    }
+
+    fn factor(&mut self) -> Option<f64> {
+        if self.source.get(self.position) == Some(&b'-') {
+            self.position += 1;
+            return Some(-self.factor()?);
+        }
+        if self.source.get(self.position) == Some(&b'(') {
+            self.position += 1;
+            let value = self.expression()?;
+            if self.source.get(self.position) != Some(&b')') {
+                return None;
+            }
+            self.position += 1;
+            return Some(value);
+        }
+        let start = self.position;
+        while self
+            .source
+            .get(self.position)
+            .is_some_and(|c| c.is_ascii_digit() || *c == b'.')
+        {
+            self.position += 1;
+        }
+        if start == self.position {
+            return None;
+        }
+        std::str::from_utf8(&self.source[start..self.position])
+            .ok()?
+            .parse()
+            .ok()
+    }
 }
 
 /// Does the visible draft contain screen-oriented formatting that should be
@@ -1327,8 +2062,142 @@ mod tests {
             ..TurnContext::default()
         };
         let text = turn_text(&ctx);
-        assert!(text.contains("Active recurring tasks:"));
+        assert!(text.contains("Recurring task catalog:"));
         assert!(text.contains("講一個黑暗冷笑話"));
+    }
+
+    #[test]
+    fn parser_routes_local_task_and_todo_lists() {
+        let mut tasks = StreamParser::new(vec![]);
+        assert_eq!(
+            drain(tasks.advance("⟦tasks⟧\n⁂任务", true)),
+            vec![Event::TaskList, Event::Transcript("任务".into())]
+        );
+        let mut todos = StreamParser::new(vec![]);
+        assert_eq!(
+            drain(todos.advance("⟦todos⟧\n⁂Todo", true)),
+            vec![Event::TodoList, Event::Transcript("Todo".into())]
+        );
+        let mut fonts = StreamParser::new(vec![]);
+        assert_eq!(
+            drain(fonts.advance("⟦fonts⟧\n⁂字体", true)),
+            vec![Event::FontList, Event::Transcript("字体".into())]
+        );
+        let mut history = StreamParser::new(vec![]);
+        assert_eq!(
+            drain(history.advance("⟦history⟧\n⁂历史", true)),
+            vec![Event::HistoryList, Event::Transcript("历史".into())]
+        );
+    }
+
+    #[test]
+    fn paddle_multipart_contains_model_options_and_binary_png() {
+        let png = b"\x89PNG\r\n\x1a\nbytes";
+        let body = paddle_multipart(png, "PaddleOCR-VL-1.6", "test-boundary");
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("name=\"model\""));
+        assert!(text.contains("PaddleOCR-VL-1.6"));
+        assert!(text.contains("name=\"optionalPayload\""));
+        assert!(text.contains("useDocUnwarping"));
+        assert!(body.windows(png.len()).any(|window| window == png));
+        assert!(text.ends_with("--test-boundary--\r\n"));
+
+        let v6_body = paddle_multipart(png, "PP-OCRv6", "test-boundary-v6");
+        let v6 = String::from_utf8_lossy(&v6_body);
+        assert!(v6.contains("PP-OCRv6"));
+        assert!(v6.contains("useTextlineOrientation"));
+        assert!(!v6.contains("useChartRecognition"));
+    }
+
+    #[test]
+    fn paddle_json_helpers_extract_job_fields_and_markdown() {
+        assert_eq!(
+            json_str_field_loose(r#"{"data": {"jobId": "abc-123"}}"#, "jobId"),
+            Some("abc-123".into())
+        );
+        let jsonl = concat!(
+            r#"{"result":{"layoutParsingResults":[{"markdown":{"text":"任务 每五分钟提醒我喝水","images":{}}}]}}"#,
+            "\n",
+            r#"{"result":{"layoutParsingResults":[{"markdown":{"text":"TODO 买牛奶","images":{}}}]}}"#
+        );
+        assert_eq!(
+            extract_paddle_markdown(jsonl),
+            "任务 每五分钟提醒我喝水\nTODO 买牛奶"
+        );
+        assert_eq!(extract_paddle_text(jsonl), extract_paddle_markdown(jsonl));
+    }
+
+    #[test]
+    fn paddle_json_helpers_extract_ppocr_v6_text() {
+        let jsonl = concat!(
+            r#"{"result":{"ocrResults":[{"prunedResult":{"rec_texts":["122+456=?","第二行\n含换行"],"rec_scores":[0.99,0.95]}}]}}"#,
+            "\n",
+            r#"{"result":{"ocrResults":[{"prunedResult":{"rec_texts":["任务 每五分钟提醒我喝水"]}}]}}"#
+        );
+        assert_eq!(
+            extract_paddle_text(jsonl),
+            "122+456=?\n第二行\n含换行\n任务 每五分钟提醒我喝水"
+        );
+        assert_eq!(extract_paddle_scores(jsonl), vec![0.99, 0.95]);
+    }
+
+    #[test]
+    fn high_confidence_local_routes_choose_fast_commit() {
+        let result = OcrResult {
+            text: "字体".into(),
+            min_confidence: Some(0.97),
+        };
+        assert!(result.is_fast_commit());
+        assert_eq!(
+            local_route("字体"),
+            Some(LocalRoute::Event(Event::FontList))
+        );
+        assert_eq!(
+            local_route("task"),
+            Some(LocalRoute::Event(Event::TaskList))
+        );
+        assert_eq!(
+            local_route("Todo"),
+            Some(LocalRoute::Event(Event::TodoList))
+        );
+        assert_eq!(
+            local_route("历史"),
+            Some(LocalRoute::Event(Event::HistoryList))
+        );
+        assert_eq!(local_route("TODO 买牛奶"), Some(LocalRoute::Command));
+        let shared = Arc::new(Mutex::new(Some(result)));
+        let handle = RequestCancel::http(Arc::new(AtomicBool::new(false)), Some(shared));
+        assert_eq!(handle.recommended_commit_ms(), Some(2200));
+    }
+
+    #[test]
+    fn uncertain_ocr_uses_slow_commit() {
+        let shared = Arc::new(Mutex::new(Some(OcrResult {
+            text: "什么是INTP".into(),
+            min_confidence: Some(0.73),
+        })));
+        let handle = RequestCancel::http(Arc::new(AtomicBool::new(false)), Some(shared));
+        assert_eq!(handle.recommended_commit_ms(), Some(2600));
+    }
+
+    #[test]
+    fn arithmetic_fast_path_preserves_the_written_equation() {
+        assert_eq!(evaluate_arithmetic("122+456=?"), Some("122+456=578".into()));
+        assert_eq!(
+            evaluate_arithmetic("(12+8)×3？"),
+            Some("(12+8)×3=60".into())
+        );
+        assert_eq!(evaluate_arithmetic("7÷2="), Some("7÷2=3.5".into()));
+        assert_eq!(evaluate_arithmetic("什么是 1+1"), None);
+    }
+
+    #[test]
+    fn external_ocr_turn_is_text_only_and_explicitly_untrusted() {
+        let text = external_ocr_turn_text(&TurnContext::default(), "122+456=？");
+        assert!(text.contains("<ocr_transcription>"));
+        assert!(text.contains("122+456=？"));
+        assert!(EXTERNAL_OCR_PROTOCOL.contains("untrusted evidence"));
+        assert!(EXTERNAL_OCR_PROTOCOL.contains("must not claim to inspect stroke geometry"));
     }
 
     #[test]
@@ -1442,7 +2311,7 @@ mod tests {
     #[test]
     fn request_cancel_sets_shared_flag() {
         let flag = Arc::new(AtomicBool::new(false));
-        let handle = RequestCancel::http(Arc::clone(&flag));
+        let handle = RequestCancel::http(Arc::clone(&flag), None);
         handle.cancel();
         assert!(flag.load(Ordering::Acquire));
     }

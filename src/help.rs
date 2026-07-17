@@ -3,9 +3,9 @@
 //! is local geometry — no oracle — so the guide works even with no network.
 
 use crate::fb::{screen_h, screen_w, BBox};
+use crate::fonts::FontBook;
 use crate::script;
 use crate::surface::{Surface, BLACK, WHITE};
-use ab_glyph::FontRef;
 
 /// Does the committed ink look like a single big "?" (with or without its
 /// dot)? Deliberately forgiving: a false positive only shows the guide.
@@ -107,7 +107,10 @@ const BODY_TAKEOVER: &[&str] = &[
     "and the page will rise again.",
     "",
     "Write: task every 5 minutes...",
-    "MP will perform it on heartbeat.",
+    "Write task or TODO to open its list.",
+    "Task boxes: check=active, cross=paused.",
+    "Write 字体 for fonts; 历史 for dialogue.",
+    "Strike an entry to delete; tap blank to close.",
     "",
     "Flip the marker to erase.",
     "Press power three times to leave.",
@@ -126,7 +129,10 @@ const BODY_WINDOWED: &[&str] = &[
     "and the page will rise again.",
     "",
     "Write: task every 5 minutes...",
-    "MP will perform it on heartbeat.",
+    "Write task or TODO to open its list.",
+    "Task boxes: check=active, cross=paused.",
+    "Write 字体 for fonts; 历史 for dialogue.",
+    "Strike an entry to delete; tap blank to close.",
     "",
     "Flip the marker to erase.",
     "Close MagicPaper from AppLoad.",
@@ -153,7 +159,7 @@ pub struct Help {
 /// Draw the guide panel centered on the page; returns it for later dismissal.
 /// The gesture list depends on the display mode: only takeover owns the
 /// touchscreen (5-finger exit) and the power button.
-pub fn show(surf: &mut Surface, font: &FontRef, takeover: bool) -> Help {
+pub fn show(surf: &mut Surface, font: &FontBook, takeover: bool) -> Help {
     let body = if takeover {
         BODY_TAKEOVER
     } else {
@@ -211,7 +217,7 @@ impl Help {
 
 /// Replace the page with the full-screen sleep card; returns the saved page
 /// pixels so waking can restore them exactly.
-pub fn show_sleep(surf: &mut Surface, font: &FontRef) -> Vec<u8> {
+pub fn show_sleep(surf: &mut Surface, font: &FontBook) -> Vec<u8> {
     let (w, h) = (screen_w(), screen_h());
     let saved = surf.copy_rect(0, 0, w, h);
     surf.fill_rect(0, 0, w, h, WHITE);
@@ -244,7 +250,7 @@ fn frame(surf: &mut Surface, x: usize, y: usize, w: usize, h: usize, t: usize) {
 
 fn blit_centered(
     surf: &mut Surface,
-    font: &FontRef,
+    font: &FontBook,
     text: &str,
     px_size: f32,
     panel_x: usize,
@@ -340,7 +346,11 @@ mod tests {
         let mut buf = vec![0xFFu8; w * h * 4];
         let ptr = buf.as_mut_ptr();
         let mut surf = Surface::new(ptr, buf.len(), w, h, w * 4, crate::surface::PixFmt::Rgb32);
-        let font = FontRef::try_from_slice(include_bytes!("../fonts/DancingScript.ttf")).unwrap();
+        let font = FontBook::for_test(
+            ab_glyph::FontRef::try_from_slice(include_bytes!("../fonts/DancingScript.ttf"))
+                .unwrap(),
+            None,
+        );
 
         // Scribble something under the panel area so restore is observable.
         surf.fill_rect(700, 1000, 200, 200, BLACK);
@@ -387,7 +397,11 @@ mod tests {
         let mut buf = vec![0xFFu8; w * h * 4];
         let ptr = buf.as_mut_ptr();
         let mut surf = Surface::new(ptr, buf.len(), w, h, w * 4, crate::surface::PixFmt::Rgb32);
-        let font = FontRef::try_from_slice(include_bytes!("../fonts/DancingScript.ttf")).unwrap();
+        let font = FontBook::for_test(
+            ab_glyph::FontRef::try_from_slice(include_bytes!("../fonts/DancingScript.ttf"))
+                .unwrap(),
+            None,
+        );
 
         surf.fill_rect(300, 300, 400, 400, BLACK);
         let before = surf.copy_rect(0, 0, w, h);

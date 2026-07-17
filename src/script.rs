@@ -1,8 +1,10 @@
-//! Tom Riddle's hand: rasterize reply text in ChenYuluoyan, thin it to
+//! MagicPaper's hand: rasterize reply text with the selected font, thin it to
 //! single-pixel pen paths (Zhang-Suen), trace them into ordered strokes, and
 //! yield them for stroke-by-stroke animation.
 
-use ab_glyph::{Font, FontRef, Glyph, PxScale, ScaleFont};
+use ab_glyph::{Font, Glyph, PxScale, ScaleFont};
+
+use crate::fonts::{FontBook, FontId};
 
 pub struct Line {
     pub width: usize,
@@ -12,26 +14,47 @@ pub struct Line {
 }
 
 /// Rasterize one line of text at `px` height into a boolean mask.
-pub fn rasterize_line(font: &FontRef, text: &str, px: f32) -> Line {
-    let scaled = font.as_scaled(PxScale::from(px));
-    let mut glyphs: Vec<Glyph> = Vec::new();
+pub fn rasterize_line(fonts: &FontBook, text: &str, px: f32) -> Line {
+    rasterize_line_with(fonts, fonts.selected(), text, px)
+}
+
+pub fn rasterize_line_with(fonts: &FontBook, primary: FontId, text: &str, px: f32) -> Line {
+    let selected: Vec<(FontId, char)> = text
+        .chars()
+        .map(|c| {
+            let (id, _) = fonts.resolve(primary, c);
+            (id, c)
+        })
+        .collect();
+    let baseline = selected
+        .iter()
+        .map(|(id, _)| fonts.font(*id).as_scaled(PxScale::from(px)).ascent())
+        .fold(0.0f32, f32::max);
+    let font_height = selected
+        .iter()
+        .map(|(id, _)| fonts.font(*id).as_scaled(PxScale::from(px)).height())
+        .fold(px, f32::max);
+    let mut glyphs: Vec<(FontId, Glyph)> = Vec::new();
     let mut caret = 0.0f32;
-    let mut prev: Option<ab_glyph::GlyphId> = None;
-    for c in text.chars() {
+    let mut prev: Option<(FontId, ab_glyph::GlyphId)> = None;
+    for (font_id, c) in selected {
+        let font = fonts.font(font_id);
+        let scaled = font.as_scaled(PxScale::from(px));
         let id = scaled.glyph_id(c);
-        if let Some(p) = prev {
+        if let Some((_, p)) = prev.filter(|(previous_font, _)| *previous_font == font_id) {
             caret += scaled.kern(p, id);
         }
         let mut g = id.with_scale(PxScale::from(px));
-        g.position = ab_glyph::point(caret, scaled.ascent());
+        g.position = ab_glyph::point(caret, baseline);
         caret += scaled.h_advance(id);
-        glyphs.push(g);
-        prev = Some(id);
+        glyphs.push((font_id, g));
+        prev = Some((font_id, id));
     }
     let width = (caret.ceil() as usize + 4).max(1);
-    let height = (scaled.height().ceil() as usize + 4).max(1);
+    let height = (font_height.ceil() as usize + 4).max(1);
     let mut mask = vec![false; width * height];
-    for g in glyphs {
+    for (font_id, g) in glyphs {
+        let font = fonts.font(font_id);
         if let Some(outline) = font.outline_glyph(g) {
             let bounds = outline.px_bounds();
             outline.draw(|x, y, cov| {
@@ -54,17 +77,22 @@ pub fn rasterize_line(font: &FontRef, text: &str, px: f32) -> Line {
 }
 
 /// Measure the advance width of text at `px` without rasterizing.
-pub fn measure(font: &FontRef, text: &str, px: f32) -> f32 {
-    let scaled = font.as_scaled(PxScale::from(px));
+pub fn measure(fonts: &FontBook, text: &str, px: f32) -> f32 {
+    measure_with(fonts, fonts.selected(), text, px)
+}
+
+pub fn measure_with(fonts: &FontBook, primary: FontId, text: &str, px: f32) -> f32 {
     let mut caret = 0.0f32;
-    let mut prev: Option<ab_glyph::GlyphId> = None;
+    let mut prev: Option<(FontId, ab_glyph::GlyphId)> = None;
     for c in text.chars() {
+        let (font_id, font) = fonts.resolve(primary, c);
+        let scaled = font.as_scaled(PxScale::from(px));
         let id = scaled.glyph_id(c);
-        if let Some(p) = prev {
+        if let Some((_, p)) = prev.filter(|(previous_font, _)| *previous_font == font_id) {
             caret += scaled.kern(p, id);
         }
         caret += scaled.h_advance(id);
-        prev = Some(id);
+        prev = Some((font_id, id));
     }
     caret
 }
@@ -301,7 +329,7 @@ fn wrap_pieces(text: &str) -> Vec<WrapPiece> {
 /// Latin text keeps word boundaries while CJK text can break between glyphs;
 /// Chinese replies normally contain no spaces, so `split_whitespace` alone
 /// would otherwise render an entire paragraph beyond the screen edge.
-pub fn wrap(font: &FontRef, text: &str, px: f32, max_px: f32) -> Vec<String> {
+pub fn wrap(font: &FontBook, text: &str, px: f32, max_px: f32) -> Vec<String> {
     let mut lines = Vec::new();
     for para in text.lines() {
         let mut cur = String::new();
@@ -332,8 +360,11 @@ mod tests {
 
     #[test]
     fn pipeline_produces_strokes() {
-        let font =
-            FontRef::try_from_slice(include_bytes!("../fonts/ChenYuluoyan-2.0-Thin.ttf")).unwrap();
+        let font = FontBook::for_test(
+            ab_glyph::FontRef::try_from_slice(include_bytes!("../fonts/ChenYuluoyan-2.0-Thin.ttf"))
+                .unwrap(),
+            None,
+        );
         let mut line = rasterize_line(&font, "Yes, Harry?", 96.0);
         assert!(line.width > 100 && line.height > 50);
         let inked_before: usize = line.mask.iter().filter(|&&v| v).count();
@@ -366,12 +397,19 @@ mod tests {
 
     #[test]
     fn wraps_unspaced_chinese_without_orphaning_punctuation() {
-        let font =
-            FontRef::try_from_slice(include_bytes!("../fonts/ChenYuluoyan-2.0-Thin.ttf")).unwrap();
+        let font = FontBook::for_test(
+            ab_glyph::FontRef::try_from_slice(include_bytes!("../fonts/ChenYuluoyan-2.0-Thin.ttf"))
+                .unwrap(),
+            None,
+        );
         // Visible Chinese replies are prompted as Traditional Chinese; the
         // writer's original-script transcript is stored but never rendered.
         for c in "你好世界回答問題這是一段繁體中文已經說話嗎".chars() {
-            assert_ne!(font.glyph_id(c).0, 0, "font is missing Chinese glyph {c}");
+            assert_ne!(
+                font.font(font.selected()).glyph_id(c).0,
+                0,
+                "font is missing Chinese glyph {c}"
+            );
         }
 
         let max = measure(&font, "你好，", 96.0) + 1.0;

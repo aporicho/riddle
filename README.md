@@ -12,7 +12,7 @@ This fork is based on Maxime Rivest's original
 
 ## How this fork differs from upstream
 
-MagicPaper 0.4.2 turns the original Tom Riddle diary into a Chinese-first,
+MagicPaper 0.5.0 turns the original Tom Riddle diary into a Chinese-first,
 Move-tested personal paper assistant while preserving the ink-only interface.
 
 | Area | Upstream riddle | This MagicPaper fork |
@@ -21,11 +21,12 @@ Move-tested personal paper assistant while preserving the ink-only interface.
 | Identity | Tom Riddle's diary | MagicPaper (MP), the writer's concise magical servant |
 | Entry and exit | AppLoad / five-finger exit | Three quick power presses enter or leave MP; one press still sleeps/wakes |
 | AI path | pi or chat-completions | Responses API with vision, low reasoning, automatic background web search, and AI paper-ready editing |
-| Handwriting recognition | Compact vision image | Cropped high-detail input up to 1600 px, ambiguity checks, arithmetic consistency, and digit-by-digit review |
-| Reply appearance | Dancing Script | ChenYuluoyan Chinese handwriting, Traditional Chinese replies, and Chinese-aware wrapping |
+| OCR path | Answer model reads the page image | Optional fast PP-OCRv6 first stage; the answer model then receives corrected text only |
+| Handwriting recognition | Compact vision image | PP-OCRv6 plus contextual correction, optional PaddleOCR-VL fallback, or cropped high-detail vision with ambiguity and arithmetic checks |
+| Reply appearance | Dancing Script | Three switchable Chinese handwriting fonts, per-glyph fallback, Traditional Chinese replies, and Chinese-aware wrapping |
 | Memory | Short recent context plus saved pages | 20 recent dialogue turns, up to 400 saved pages, and a 40-page recall catalog |
-| Automation | Conversation and page recall | Persistent recurring tasks such as `任务 每五分钟……`, checked by a five-minute heartbeat |
-| Perceived latency | Request starts after the 2.8-second commit | Speculative request after one idle second, cancel/restart if writing resumes, then stream the first clean sentence |
+| Automation | Conversation and page recall | Persistent recurring tasks, paper-native task/TODO/history lists, checkbox enable/disable, and due-time-aware smart heartbeat scheduling |
+| Perceived latency | Request starts after the 2.8-second commit | OCR starts speculatively after one idle second; high-confidence complete input commits at 2.2s and uncertain input at 2.6s |
 | E-ink behavior | Thinking indicator and broader refreshes | No pulsing wait dot; reply-region cleanup avoids a distracting full-screen refresh after every answer |
 
 The upstream commit history and MIT attribution are intentionally retained.
@@ -76,13 +77,20 @@ self-contained `dist/riddle` directory.
 ## How it works
 
 ```
- pen (raw evdev, full 4096-level pressure, hardware event rate)
-   │ strokes
+ pen ── raw strokes ──► MagicPaper ── idle 1s ──► speculative PNG request
+                              │
+                              └── idle 2.2/2.6s ─► 14-stage ink drinking
+                              │                         │
+                              │            ┌────────────┴────────────┐
+                              │            ▼                         ▼
+                              │       PP-OCRv6 text          direct vision image
+                              │            └────────────┬────────────┘
+                              │                         ▼
+                              │                  Responses oracle
+                              ▼                         │ answer text
+ reply strokes ◄── selected font + 851 fallback ◄──────┘
+   │
    ▼
- MagicPaper ── idle 1s → speculative PNG request ──► Responses oracle
-   │            └─ writing resumes: cancel and restart
-   │          idle 2.8s → commit and dissolve
-   ▼ strokes (ChenYuluoyan → skeletonized to single-pixel pen paths)
  display backend
    ├── qtfb        — windowed, inside xochitl (build-from-source flavour)
    └── quill       — full takeover: xochitl stopped, vendor e-ink engine
@@ -116,12 +124,40 @@ self-contained `dist/riddle` directory.
 In the windowed (qtfb) flavour, xochitl keeps the touchscreen and the power
 button: close the diary from AppLoad instead.
 
-After one second without pen input, Responses mode begins reading a tentative
-page in the background while the original ink remains visible. The page is
-only committed and dissolved after the existing 2.8-second pause; writing or
-erasing before then discards that tentative answer and restarts the process.
+One second without pen input begins reading a tentative page while the original
+ink remains visible, including when PaddleOCR is enabled. Writing again cancels
+the local wait and starts over with the latest page; the remote service may
+still count the abandoned OCR job. High-confidence complete input and local
+commands commit after 2.2 seconds; uncertain or incomplete input waits 2.6
+seconds. The drink animation then retains all 14 stages at 50ms each.
 Clean completed sentences begin writing as soon as they stream back. The blank
 paper itself is the waiting state — there is no pulsing status dot.
+
+## Tasks and TODOs
+
+Recurring tasks and unscheduled TODOs are separate persistent lists. Write the
+bare word `任务`, `任務`, or `task` to open the recurring-task page. Write the
+bare word `TODO` in any capitalization to open the TODO page. On either page,
+draw a horizontal line through an entry to delete it, or tap outside the rows
+to return to the blank paper. Task rows also have a right-hand status box: a
+check is active, a cross is paused, and tapping it toggles the state locally.
+
+| Handwritten command | Effect |
+|---------------------|--------|
+| `任务 每五分钟讲一个黑暗冷笑话` | Add an active recurring task |
+| `暂停任务 2` | Pause recurring task 2 |
+| `恢复任务 2` | Resume task 2 after one fresh full interval |
+| `修改任务 2 每十分钟提醒我喝水` | Replace task 2's interval and instruction |
+| `删除任务 2` | Delete recurring task 2 without opening the list |
+| `TODO 买牛奶` | Add “买牛奶” to the unscheduled TODO list |
+
+Recurring tasks are limited to nine entries and have a minimum interval of
+five minutes. Paused tasks remain visible but cannot become due. Resuming, or
+modifying an active task, starts a fresh interval; missed runs are never
+replayed. The smart heartbeat computes the nearest active due time and makes
+no oracle/API request until then. Failed delivery retries after 30 seconds.
+TODOs are limited to twenty visible entries and never participate in the
+heartbeat.
 
 ## MagicPaper remembers
 
@@ -158,7 +194,7 @@ answer editing. No extra software runs on the tablet.
 ```sh
 export RIDDLE_OPENAI_KEY="sk-..."                       # required
 export RIDDLE_OPENAI_BASE="https://api.openai.com/v1"   # optional (default)
-export RIDDLE_OPENAI_MODEL="gpt-5.6-terra"              # must see images
+export RIDDLE_OPENAI_MODEL="gpt-5.6-terra"              # vision only needed without separate OCR
 export RIDDLE_OPENAI_API="responses"                    # or chat_completions
 export RIDDLE_OPENAI_REASONING="low"                    # thinking models only
 export RIDDLE_WEB_SEARCH="auto"                         # Responses mode
@@ -167,7 +203,7 @@ export RIDDLE_OPENAI_MAX_TOKENS="2000"                  # runaway guard
 export RIDDLE_MEMORY_TURNS="20"                         # continuous dialogue
 ```
 
-Any vision-capable model works. A standalone install reads
+Without separate OCR, the answer model must be vision-capable. A standalone install reads
 `/home/root/.config/riddle/oracle.env`; legacy AppLoad bundles also accept an
 `oracle.env` next to the binary. See `oracle.env.example`. Example with
 OpenRouter:
@@ -190,10 +226,37 @@ Verify your setup before launching the diary:
 riddle --oracle-test path/to/handwriting.png   # prints the streamed reply
 ```
 
-Latency depends on the selected model and whether search is needed. With the
-tested Terra configuration, a searched quotation began streaming to paper at
-about 7.2 seconds and completed at about 8.7 seconds; the one-second
-speculative start hides 1.8 seconds of the original commit wait. HTTPS is
+### Optional PaddleOCR handwriting stage
+
+Set an AI Studio token to make `PP-OCRv6` read the committed page first.
+MagicPaper submits the PNG as a multipart job, polls until it is ready, reads
+the ordered `rec_texts` strings from the returned JSONL, and sends only that
+text to the OpenAI-compatible answer model. The answer model still performs
+contextual OCR correction, reasoning, background search, and paper-ready
+writing. `PaddleOCR-VL-1.6` remains selectable for document-layout images.
+
+```sh
+export RIDDLE_OCR_TOKEN="your-aistudio-access-token"
+export RIDDLE_OCR_URL="https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+export RIDDLE_OCR_MODEL="PP-OCRv6"
+export RIDDLE_OCR_POLL_MS="250"
+export RIDDLE_OCR_TIMEOUT_SECONDS="60"
+```
+
+Test OCR without spending an answer-model request:
+
+```sh
+riddle --ocr-test path/to/handwriting.png
+```
+
+Speculative OCR is on by default: MP submits after one second of idle time,
+hiding 1.8 seconds of the commit delay. Set `RIDDLE_OCR_SPECULATIVE=off` if
+avoiding possible paid orphan jobs after a mid-sentence pause matters more than
+latency. Never commit a real OCR token to the repository.
+
+Latency depends on OCR job time, the selected answer model, and whether search
+is needed. The earlier direct-vision Terra configuration began a searched
+quotation at about 7.2 seconds and completed at about 8.7 seconds. HTTPS is
 built into riddle (pure Rust, no extra libraries).
 
 ### Option B — pi (the power path)
@@ -249,8 +312,25 @@ cd quill-move
 RM_SDK=~/rm-sdk-chiappa-3.27 ./build.sh
 cd ../riddle
 RM_SDK=~/rm-sdk-chiappa-3.27 QUILL_DIR=../quill-move ./build-takeover.sh
+MAGICPAPER_BUTTER_FONT=/path/to/ButterShiSan.ttf \
+MAGICPAPER_851_FONT=/path/to/851LakeusNightWriting.ttf \
 QUILL_DIR=../quill-move ./scripts/make-bundle.sh
 ```
+
+The two `MAGICPAPER_*_FONT` variables are optional local TTF resources. They
+are copied into `dist/riddle/fonts/` but never committed to this repository.
+With both installed, handwrite **字体** or **字體**, tap a row to preview and
+select it, then tap blank paper to leave. 851 is the default; the selection is
+saved under `/home/root/riddle-data/preferences/font`. Missing glyphs fall
+back to 851 automatically, so Simplified Task/TODO text does not disappear.
+Do not publish a bundle containing fonts unless their licenses permit it.
+
+Handwrite **历史** or **歷史** to open the nine newest local dialogue pages;
+strike through a row to delete that memory and its saved strokes. In the task
+list, the right-hand box is a direct local control: a check means active and a
+cross means paused. User pen events are drained before commit, heartbeat, and
+fade timers; touching an old lingering/fading reply clears it immediately and
+starts the new stroke instead of making the writer wait.
 
 The staged `dist/riddle/` is self-contained (binary, `libquill.so`, launch
 scripts, manifest) — copy it to

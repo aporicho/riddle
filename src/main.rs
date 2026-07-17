@@ -9,6 +9,8 @@
 
 mod display;
 mod fb;
+mod font_panel;
+mod fonts;
 mod help;
 mod ink;
 mod memory;
@@ -18,7 +20,9 @@ mod power;
 mod qtfb;
 mod script;
 mod surface;
+mod task_panel;
 mod tasks;
+mod todos;
 mod touch;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,20 +30,24 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ab_glyph::FontRef;
-
 use fb::{screen_h, screen_w, BBox};
 use oracle::Event;
 use surface::{Surface, BLACK, FADED, WHITE};
 
-const FONT_TTF: &[u8] = include_bytes!("../fonts/ChenYuluoyan-2.0-Thin.ttf");
 const PNG_PATH: &str = "/tmp/riddle-page.png";
 
 /// Begin reading a tentative page while its ink is still visible. The page is
-/// not committed until IDLE_COMMIT; more pen input invalidates this request.
+/// not committed until the adaptive fast/slow deadline; more pen input
+/// invalidates this request.
 const IDLE_PREASK: Duration = Duration::from_millis(1000);
-const IDLE_COMMIT: Duration = Duration::from_millis(2800);
-const HEARTBEAT_DEFAULT: Duration = Duration::from_secs(5 * 60);
+const IDLE_COMMIT_FAST: Duration = Duration::from_millis(2200);
+const IDLE_COMMIT_SLOW: Duration = Duration::from_millis(2600);
+const DRINK_STAGES: u32 = 14;
+const DRINK_STAGE_DELAY: Duration = Duration::from_millis(50);
+const HISTORY_VISIBLE: usize = 9;
+/// Only failed due-task delivery is polled. Normal delivery is scheduled at
+/// the exact nearest due time and an empty/paused list schedules nothing.
+const HEARTBEAT_RETRY_DEFAULT: Duration = Duration::from_secs(30);
 /// How long the diary waits on a silent oracle before giving up on the turn.
 /// Generous: thinking models can lead with a long silence.
 const ORACLE_PATIENCE: Duration = Duration::from_secs(120);
@@ -55,6 +63,8 @@ usage:
   riddle --oracle-test [PNG]  run one oracle turn against PNG (default
                               /tmp/riddle-page.png) and print the streamed
                               reply; verifies key + endpoint + model
+  riddle --ocr-test PNG       send one PNG only to the configured PaddleOCR
+                              service and print its recognized text
   riddle --power-launcher     watch for three quick power-button presses and
                               launch the standalone diary
   riddle --version            print the version
@@ -73,6 +83,16 @@ fn cancel_speculative(pending: &mut Option<SpeculativeRequest>, reason: &str) {
     if let Some(request) = pending.take() {
         request.cancel.cancel();
         eprintln!("riddle: speculative oracle discarded ({reason})");
+    }
+}
+
+fn idle_commit_delay(pending: &Option<SpeculativeRequest>) -> Duration {
+    match pending
+        .as_ref()
+        .and_then(|request| request.cancel.recommended_commit_ms())
+    {
+        Some(2200) => IDLE_COMMIT_FAST,
+        _ => IDLE_COMMIT_SLOW,
     }
 }
 
@@ -124,6 +144,25 @@ enum State {
         until: Instant,
         region: BBox,
     },
+    /// A device-local numbered task page. Horizontal pen strokes delete a
+    /// row; a small tap outside all rows restores the underlying page.
+    TaskList {
+        panel: task_panel::PaperList,
+    },
+    /// The persistent, non-scheduled TODO page uses the same paper gestures.
+    TodoList {
+        panel: task_panel::PaperList,
+    },
+    /// A local three-font picker. Row taps switch immediately and redraw the
+    /// preview; a tap on blank paper restores the page underneath.
+    FontList {
+        panel: font_panel::FontPanel,
+    },
+    /// The newest local dialogue pages; striking a row forgets both its text
+    /// and replay strokes.
+    HistoryList {
+        panel: task_panel::PaperList,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,6 +199,20 @@ fn main() {
             let png = args.get(2).map(String::as_str).unwrap_or(PNG_PATH);
             std::process::exit(oracle_test(png));
         }
+        Some("--ocr-test") => {
+            let Some(png) = args.get(2) else {
+                eprintln!("riddle: --ocr-test needs a PNG path");
+                std::process::exit(2);
+            };
+            match oracle::paddle_ocr_test(png) {
+                Ok(text) => println!("{text}"),
+                Err(error) => {
+                    eprintln!("OCR test failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         Some("--power-launcher") => {
             if let Err(e) = power::launcher_loop() {
                 eprintln!("riddle: power launcher fatal: {e}");
@@ -191,14 +244,17 @@ fn main() {
 fn oracle_test(png: &str) -> i32 {
     let store = memory::MemoryStore::open();
     let task_store = tasks::TaskStore::open();
-    let o = match oracle::Oracle::spawn(store.is_some() || task_store.is_some()) {
+    let todo_store = todos::TodoStore::open();
+    let o = match oracle::Oracle::spawn(
+        store.is_some() || task_store.is_some() || todo_store.is_some(),
+    ) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("oracle spawn failed: {e}");
             return 1;
         }
     };
-    let ctx = build_ctx(&store, &task_store);
+    let ctx = build_ctx(&store, &task_store, &todo_store);
     let (tx, rx) = mpsc::channel();
     let t0 = Instant::now();
     o.ask(png, &ctx, tx);
@@ -217,6 +273,26 @@ fn oracle_test(png: &str) -> i32 {
             Ok(Ok(Event::Show(id))) => {
                 println!("[would conjure memory {id} — {}]", memory::spoken_date(id));
                 got.push_str("(show)");
+            }
+            Ok(Ok(Event::TaskList)) => {
+                println!("[would open recurring-task list]");
+                got.push_str("(tasks)");
+            }
+            Ok(Ok(Event::TodoList)) => {
+                println!("[would open TODO list]");
+                got.push_str("(todos)");
+            }
+            Ok(Ok(Event::FontList)) => {
+                println!("[would open font list]");
+                got.push_str("(fonts)");
+            }
+            Ok(Ok(Event::HistoryList)) => {
+                println!("[would open history list]");
+                got.push_str("(history)");
+            }
+            Ok(Ok(Event::LocalCommand(command))) => {
+                println!("[would apply local command: {command}]");
+                got.push_str("(local-command)");
             }
             Ok(Ok(Event::Transcript(t))) => eprintln!("\n[transcript] {t}"),
             Ok(Err(e)) => {
@@ -243,6 +319,7 @@ fn oracle_test(png: &str) -> i32 {
 fn build_ctx(
     store: &Option<memory::MemoryStore>,
     task_store: &Option<tasks::TaskStore>,
+    todo_store: &Option<todos::TodoStore>,
 ) -> oracle::TurnContext {
     let turns: usize = std::env::var("RIDDLE_MEMORY_TURNS")
         .ok()
@@ -259,16 +336,21 @@ fn build_ctx(
         .as_ref()
         .map(|s| s.catalog_lines())
         .unwrap_or_default();
+    let todo_lines = todo_store
+        .as_ref()
+        .map(|s| s.catalog_lines())
+        .unwrap_or_default();
     oracle::TurnContext {
         history,
         catalog_lines,
         catalog_ids,
         task_lines,
+        todo_lines,
     }
 }
 
 fn run() -> std::io::Result<()> {
-    let font = FontRef::try_from_slice(FONT_TTF).map_err(std::io::Error::other)?;
+    let mut font = fonts::FontBook::open()?;
 
     let (disp, mut surf) = display::Display::open()?;
     fb::init_screen(surf.w, surf.h);
@@ -327,10 +409,16 @@ fn run() -> std::io::Result<()> {
             s.entries.len()
         );
     }
+    let mut todo_store = todos::TodoStore::open();
+    if let Some(ref s) = todo_store {
+        eprintln!("magic-paper: TODO list holds {} entries", s.entries.len());
+    }
 
     // Warm the oracle now: pi loads Node + extensions + codex auth ONCE here,
     // while you're still picking up the pen, so replies pay only model latency.
-    let oracle = match oracle::Oracle::spawn(store.is_some() || task_store.is_some()) {
+    let oracle = match oracle::Oracle::spawn(
+        store.is_some() || task_store.is_some() || todo_store.is_some(),
+    ) {
         Ok(o) => {
             eprintln!("riddle: oracle ready");
             Some(o)
@@ -355,8 +443,7 @@ fn run() -> std::io::Result<()> {
     let mut turn_failed = false;
     let mut turn_kind = TurnKind::User;
     let mut turn_task_ids: Vec<u64> = Vec::new();
-    let heartbeat_every = heartbeat_interval();
-    let mut next_heartbeat = Instant::now() + heartbeat_every;
+    let mut next_heartbeat = heartbeat_deadline(&task_store);
     // Raw stylus contact, tracked in every state (the guide dismisses on it).
     // `stylus_on` is the level; `stylus_tapped` latches any contact seen this
     // loop iteration, so a tap that starts AND ends within one drain still
@@ -451,8 +538,9 @@ fn run() -> std::io::Result<()> {
                 p.drain_pressed();
                 power_clicks.clear();
                 power_grace = Instant::now() + Duration::from_secs(3);
-                // A task may have become due while the tablet slept.
-                next_heartbeat = Instant::now();
+                // Recalculate from wall-clock time: tasks may have become due
+                // while the tablet slept.
+                next_heartbeat = heartbeat_deadline(&task_store);
             }
         }
 
@@ -463,6 +551,26 @@ fn run() -> std::io::Result<()> {
                 stylus_on = writing;
                 stylus_tapped |= writing;
                 if !writing {
+                    if matches!(
+                        &state,
+                        State::TaskList { .. }
+                            | State::TodoList { .. }
+                            | State::HistoryList { .. }
+                            | State::FontList { .. }
+                    ) {
+                        pen_down = false;
+                        finish_paper_list_stroke(
+                            &mut state,
+                            &mut store,
+                            &mut task_store,
+                            &mut todo_store,
+                            &mut next_heartbeat,
+                            &mut surf,
+                            &mut font,
+                            &disp,
+                        );
+                        continue;
+                    }
                     if pen_down {
                         pen_down = false;
                         user_ink.pen_up();
@@ -490,12 +598,43 @@ fn run() -> std::io::Result<()> {
                         }
                         *last_pen = Some(Instant::now());
                     }
-                    State::Lingering { region, .. } => {
-                        state = State::FadingReply {
-                            stage: 0,
-                            next: Instant::now(),
-                            region,
+                    State::Lingering { region, .. } | State::FadingReply { region, .. } => {
+                        let (x, y, w, h) = region.rect();
+                        surf.fill_rect(x as usize, y as usize, w as usize, h as usize, WHITE);
+                        disp.update(x, y, w, h, true);
+                        pen_down = true;
+                        let d = match s.tool {
+                            pen::Tool::Pen => {
+                                let r = 2 + s.pressure * 3 / pen::MAX_PRESSURE;
+                                user_ink.pen_point(&mut surf, s.x, s.y, r)
+                            }
+                            pen::Tool::Eraser => user_ink.erase_point(&mut surf, s.x, s.y, 22),
                         };
+                        if !d.is_empty() {
+                            ink_dirty.add(d.x0, d.y0, 0);
+                            ink_dirty.add(d.x1, d.y1, 0);
+                        }
+                        state = State::Listening {
+                            last_pen: Some(Instant::now()),
+                        };
+                    }
+                    State::TaskList { ref mut panel }
+                    | State::TodoList { ref mut panel }
+                    | State::HistoryList { ref mut panel } => {
+                        pen_down = true;
+                        let d = panel.pen_point(&mut surf, s.x, s.y);
+                        if !d.is_empty() {
+                            ink_dirty.add(d.x0, d.y0, 0);
+                            ink_dirty.add(d.x1, d.y1, 0);
+                        }
+                    }
+                    State::FontList { ref mut panel } => {
+                        pen_down = true;
+                        let d = panel.pen_point(&mut surf, s.x, s.y);
+                        if !d.is_empty() {
+                            ink_dirty.add(d.x0, d.y0, 0);
+                            ink_dirty.add(d.x1, d.y1, 0);
+                        }
                     }
                     _ => {}
                 }
@@ -515,7 +654,24 @@ fn run() -> std::io::Result<()> {
                 qtfb::INPUT_PEN_PRESS | qtfb::INPUT_PEN_UPDATE => {
                     stylus_on = true;
                     stylus_tapped = true;
-                    if let State::Listening { ref mut last_pen } = state {
+                    if let State::TaskList { ref mut panel }
+                    | State::TodoList { ref mut panel }
+                    | State::HistoryList { ref mut panel } = state
+                    {
+                        pen_down = true;
+                        let d = panel.pen_point(&mut surf, ev.x, ev.y);
+                        if !d.is_empty() {
+                            ink_dirty.add(d.x0, d.y0, 0);
+                            ink_dirty.add(d.x1, d.y1, 0);
+                        }
+                    } else if let State::FontList { ref mut panel } = state {
+                        pen_down = true;
+                        let d = panel.pen_point(&mut surf, ev.x, ev.y);
+                        if !d.is_empty() {
+                            ink_dirty.add(d.x0, d.y0, 0);
+                            ink_dirty.add(d.x1, d.y1, 0);
+                        }
+                    } else if let State::Listening { ref mut last_pen } = state {
                         cancel_speculative(&mut speculative, "writing resumed");
                         speculative_attempted = false;
                         pen_down = true;
@@ -526,16 +682,46 @@ fn run() -> std::io::Result<()> {
                             ink_dirty.add(d.x1, d.y1, 0);
                         }
                         *last_pen = Some(Instant::now());
-                    } else if let State::Lingering { region, .. } = state {
-                        state = State::FadingReply {
-                            stage: 0,
-                            next: Instant::now(),
-                            region,
+                    } else if let State::Lingering { region, .. }
+                    | State::FadingReply { region, .. } = state
+                    {
+                        let (x, y, w, h) = region.rect();
+                        surf.fill_rect(x as usize, y as usize, w as usize, h as usize, WHITE);
+                        disp.update(x, y, w, h, true);
+                        pen_down = true;
+                        let r = 2 + ev.d.clamp(0, 100) / 45;
+                        let d = user_ink.pen_point(&mut surf, ev.x, ev.y, r);
+                        if !d.is_empty() {
+                            ink_dirty.add(d.x0, d.y0, 0);
+                            ink_dirty.add(d.x1, d.y1, 0);
+                        }
+                        state = State::Listening {
+                            last_pen: Some(Instant::now()),
                         };
                     }
                 }
                 qtfb::INPUT_PEN_RELEASE => {
                     stylus_on = false;
+                    if matches!(
+                        &state,
+                        State::TaskList { .. }
+                            | State::TodoList { .. }
+                            | State::HistoryList { .. }
+                            | State::FontList { .. }
+                    ) {
+                        pen_down = false;
+                        finish_paper_list_stroke(
+                            &mut state,
+                            &mut store,
+                            &mut task_store,
+                            &mut todo_store,
+                            &mut next_heartbeat,
+                            &mut surf,
+                            &mut font,
+                            &disp,
+                        );
+                        continue;
+                    }
                     if pen_down {
                         pen_down = false;
                         user_ink.pen_up();
@@ -559,7 +745,12 @@ fn run() -> std::io::Result<()> {
         // ---- state machine ----
         state = match state {
             State::Listening { last_pen } => match last_pen {
-                Some(t) if !pen_down && t.elapsed() >= IDLE_COMMIT && !user_ink.is_empty() => {
+                Some(t)
+                    if !pen_down
+                        && !stylus_tapped
+                        && t.elapsed() >= idle_commit_delay(&speculative)
+                        && !user_ink.is_empty() =>
+                {
                     speculative_attempted = false;
                     if region_all_white(&surf, user_ink.bbox) {
                         // Everything was erased before the pause: nothing to
@@ -617,7 +808,11 @@ fn run() -> std::io::Result<()> {
                             }
                             let (tx, rx) = mpsc::channel();
                             if let Some(ref o) = oracle {
-                                let _ = o.ask(PNG_PATH, &build_ctx(&store, &task_store), tx);
+                                let _ = o.ask(
+                                    PNG_PATH,
+                                    &build_ctx(&store, &task_store, &todo_store),
+                                    tx,
+                                );
                             }
                             // The backend reads the page synchronously before
                             // ask() returns, so the PNG is no longer needed.
@@ -637,6 +832,7 @@ fn run() -> std::io::Result<()> {
                 }
                 Some(t)
                     if !pen_down
+                        && !stylus_tapped
                         && t.elapsed() >= IDLE_PREASK
                         && !user_ink.is_empty()
                         && !speculative_attempted =>
@@ -652,7 +848,7 @@ fn run() -> std::io::Result<()> {
                                         let (tx, rx) = mpsc::channel();
                                         let cancel = o.ask(
                                             PNG_PATH,
-                                            &build_ctx(&store, &task_store),
+                                            &build_ctx(&store, &task_store, &todo_store),
                                             tx,
                                         );
                                         speculative = Some(SpeculativeRequest { rx, cancel });
@@ -673,14 +869,20 @@ fn run() -> std::io::Result<()> {
                     }
                     State::Listening { last_pen }
                 }
-                _ if !pen_down && user_ink.is_empty() && Instant::now() >= next_heartbeat => {
-                    next_heartbeat = Instant::now() + heartbeat_every;
+                _ if !pen_down
+                    && !stylus_tapped
+                    && user_ink.is_empty()
+                    && next_heartbeat.is_some_and(|deadline| Instant::now() >= deadline) =>
+                {
                     let now = unix_now();
                     let due = task_store.as_ref().map(|s| s.due(now)).unwrap_or_default();
                     if due.is_empty() {
-                        eprintln!("magic-paper: heartbeat — no task is due");
+                        // A task was paused/deleted or its wall-clock deadline
+                        // moved. Recompute without touching the oracle.
+                        next_heartbeat = heartbeat_deadline(&task_store);
                         State::Listening { last_pen }
                     } else if let Some(ref o) = oracle {
+                        next_heartbeat = Some(Instant::now() + heartbeat_retry_interval());
                         turn_id = 0;
                         turn_strokes.clear();
                         turn_reply.clear();
@@ -690,7 +892,7 @@ fn run() -> std::io::Result<()> {
                         turn_task_ids = due.iter().map(|t| t.id).collect();
                         let prompt = tasks::heartbeat_prompt(&due);
                         let (tx, rx) = mpsc::channel();
-                        o.ask_text(&prompt, &build_ctx(&store, &task_store), tx);
+                        o.ask_text(&prompt, &build_ctx(&store, &task_store, &todo_store), tx);
                         eprintln!(
                             "magic-paper: heartbeat — executing {} due task(s)",
                             turn_task_ids.len()
@@ -700,6 +902,7 @@ fn run() -> std::io::Result<()> {
                             since: Instant::now(),
                         }
                     } else {
+                        next_heartbeat = Some(Instant::now() + heartbeat_retry_interval());
                         eprintln!("magic-paper: heartbeat postponed — oracle unavailable");
                         State::Listening { last_pen }
                     }
@@ -713,12 +916,11 @@ fn run() -> std::io::Result<()> {
                 region,
                 rx,
             } => {
-                const STAGES: u32 = 14;
                 if Instant::now() >= next {
-                    ink::dissolve_pass(&mut surf, region, stage, STAGES);
+                    ink::dissolve_pass(&mut surf, region, stage, DRINK_STAGES);
                     let (x, y, w, h) = region.rect();
                     disp.update(x, y, w, h, true);
-                    if stage + 1 >= STAGES {
+                    if stage + 1 >= DRINK_STAGES {
                         user_ink.clear();
                         State::Thinking {
                             rx,
@@ -727,7 +929,7 @@ fn run() -> std::io::Result<()> {
                     } else {
                         State::Drinking {
                             stage: stage + 1,
-                            next: Instant::now() + Duration::from_millis(70),
+                            next: Instant::now() + DRINK_STAGE_DELAY,
                             region,
                             rx,
                         }
@@ -764,6 +966,85 @@ fn run() -> std::io::Result<()> {
                                 }
                             }
                         }
+                        Ok(Event::TaskList) => {
+                            let lines = task_store
+                                .as_ref()
+                                .map(|store| store.panel_lines())
+                                .unwrap_or_default();
+                            let enabled = task_store
+                                .as_ref()
+                                .map(|store| store.panel_enabled())
+                                .unwrap_or_default();
+                            let panel = task_panel::PaperList::show(
+                                &mut surf,
+                                &font,
+                                "任務列表",
+                                "尚無任務",
+                                "橫劃可刪除 · 點右側方框啟用或停用 · 點空白退出",
+                                &lines,
+                                Some(&enabled),
+                            );
+                            disp.update_all(surf.w, surf.h);
+                            eprintln!("magic-paper: recurring-task list opened");
+                            State::TaskList { panel }
+                        }
+                        Ok(Event::TodoList) => {
+                            let lines = todo_store
+                                .as_ref()
+                                .map(|store| store.panel_lines())
+                                .unwrap_or_default();
+                            let panel = task_panel::PaperList::show(
+                                &mut surf,
+                                &font,
+                                "TODO 列表",
+                                "尚無 TODO",
+                                "橫劃 TODO 可刪除 · 點擊空白處退出",
+                                &lines,
+                                None,
+                            );
+                            disp.update_all(surf.w, surf.h);
+                            eprintln!("magic-paper: TODO list opened");
+                            State::TodoList { panel }
+                        }
+                        Ok(Event::FontList) => {
+                            let panel = font_panel::FontPanel::show(&mut surf, &font);
+                            disp.update_all(surf.w, surf.h);
+                            eprintln!("magic-paper: font list opened");
+                            State::FontList { panel }
+                        }
+                        Ok(Event::HistoryList) => {
+                            let lines = store
+                                .as_ref()
+                                .map(|store| store.panel_lines(HISTORY_VISIBLE))
+                                .unwrap_or_default();
+                            let panel = task_panel::PaperList::show(
+                                &mut surf,
+                                &font,
+                                "對話歷史",
+                                "尚無歷史",
+                                "橫劃一段歷史可刪除 · 點擊空白處退出",
+                                &lines,
+                                None,
+                            );
+                            disp.update_all(surf.w, surf.h);
+                            eprintln!("magic-paper: history list opened");
+                            State::HistoryList { panel }
+                        }
+                        Ok(Event::LocalCommand(command)) => {
+                            turn_transcript = Some(command.clone());
+                            let (reply, tasks_changed) =
+                                apply_local_command(&command, &mut task_store, &mut todo_store);
+                            if tasks_changed {
+                                next_heartbeat = heartbeat_deadline(&task_store);
+                            }
+                            turn_reply.push_str(&reply);
+                            let plan = plan_reply(&font, &reply, None);
+                            State::Replying {
+                                plan,
+                                next: Instant::now(),
+                                rx: None,
+                            }
+                        }
                         Ok(Event::Ink(text)) => {
                             turn_reply.push_str(&text);
                             let plan = plan_reply(&font, &text, None);
@@ -776,7 +1057,15 @@ fn run() -> std::io::Result<()> {
                         Ok(Event::Transcript(t)) => {
                             // Transcript with no prose (model skipped the
                             // reply): remember the words, keep waiting.
-                            accept_transcript(&mut turn_transcript, t, turn_kind, &mut task_store);
+                            if accept_transcript(
+                                &mut turn_transcript,
+                                t,
+                                turn_kind,
+                                &mut task_store,
+                                &mut todo_store,
+                            ) {
+                                next_heartbeat = heartbeat_deadline(&task_store);
+                            }
                             State::Thinking { rx, since }
                         }
                         Err(e) => {
@@ -837,11 +1126,26 @@ fn run() -> std::io::Result<()> {
                             }
                         }
                         Ok(Ok(Event::Transcript(t))) => {
-                            accept_transcript(&mut turn_transcript, t, turn_kind, &mut task_store);
+                            if accept_transcript(
+                                &mut turn_transcript,
+                                t,
+                                turn_kind,
+                                &mut task_store,
+                                &mut todo_store,
+                            ) {
+                                next_heartbeat = heartbeat_deadline(&task_store);
+                            }
                             false // the disconnect is still coming
                         }
-                        Ok(Ok(Event::Show(_))) => {
-                            eprintln!("riddle: conjuring directive mid-reply ignored");
+                        Ok(Ok(
+                            Event::Show(_)
+                            | Event::TaskList
+                            | Event::TodoList
+                            | Event::FontList
+                            | Event::HistoryList
+                            | Event::LocalCommand(_),
+                        )) => {
+                            eprintln!("riddle: page directive mid-reply ignored");
                             false
                         }
                         Ok(Err(e)) => {
@@ -901,6 +1205,7 @@ fn run() -> std::io::Result<()> {
                                         if let Err(e) = s.mark_ran(&turn_task_ids, unix_now()) {
                                             eprintln!("magic-paper: could not advance tasks: {e}");
                                         } else {
+                                            next_heartbeat = heartbeat_deadline(&task_store);
                                             eprintln!(
                                                 "magic-paper: completed {} heartbeat task(s)",
                                                 turn_task_ids.len()
@@ -1056,6 +1361,11 @@ fn run() -> std::io::Result<()> {
                 None => State::Listening { last_pen: None },
             },
 
+            State::TaskList { panel } => State::TaskList { panel },
+            State::TodoList { panel } => State::TodoList { panel },
+            State::FontList { panel } => State::FontList { panel },
+            State::HistoryList { panel } => State::HistoryList { panel },
+
             State::FadingReply {
                 stage,
                 next,
@@ -1107,18 +1417,277 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-fn heartbeat_interval() -> Duration {
-    let secs = std::env::var("RIDDLE_HEARTBEAT_SECONDS")
+fn heartbeat_retry_interval() -> Duration {
+    let secs = std::env::var("RIDDLE_HEARTBEAT_RETRY_SECONDS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(HEARTBEAT_DEFAULT.as_secs())
+        .unwrap_or(HEARTBEAT_RETRY_DEFAULT.as_secs())
         .max(5);
-    let interval = Duration::from_secs(secs);
-    eprintln!(
-        "magic-paper: heartbeat every {} seconds",
-        interval.as_secs()
-    );
-    interval
+    Duration::from_secs(secs)
+}
+
+/// Smart heartbeat: sleep logically until the nearest active task is due.
+/// No active task means no heartbeat and, crucially, no oracle/API request.
+fn heartbeat_deadline(task_store: &Option<tasks::TaskStore>) -> Option<Instant> {
+    let due = task_store.as_ref()?.next_due()?;
+    let wait = due.saturating_sub(unix_now());
+    eprintln!("magic-paper: next task check in {wait}s");
+    Some(Instant::now() + Duration::from_secs(wait))
+}
+
+fn finish_paper_list_stroke(
+    state: &mut State,
+    memory_store: &mut Option<memory::MemoryStore>,
+    task_store: &mut Option<tasks::TaskStore>,
+    todo_store: &mut Option<todos::TodoStore>,
+    next_heartbeat: &mut Option<Instant>,
+    surf: &mut Surface,
+    font: &mut fonts::FontBook,
+    disp: &display::Display,
+) {
+    if matches!(state, State::FontList { .. }) {
+        let action = match state {
+            State::FontList { panel } => panel.pen_up(),
+            _ => None,
+        };
+        match action {
+            Some(font_panel::Action::Select(id)) => {
+                if let Err(error) = font.select(id) {
+                    eprintln!("magic-paper: could not persist font selection: {error}");
+                }
+                if let State::FontList { panel } = state {
+                    panel.redraw(surf, font);
+                }
+                disp.update_all(surf.w, surf.h);
+                eprintln!("magic-paper: selected font {}", id.stable_id());
+            }
+            Some(font_panel::Action::Dismiss) => {
+                let old = std::mem::replace(state, State::Listening { last_pen: None });
+                match old {
+                    State::FontList { panel } => panel.dismiss(surf),
+                    _ => unreachable!(),
+                }
+                disp.update_all(surf.w, surf.h);
+                eprintln!("magic-paper: font list dismissed");
+            }
+            Some(font_panel::Action::Redraw) => {
+                if let State::FontList { panel } = state {
+                    panel.redraw(surf, font);
+                }
+                disp.update_all(surf.w, surf.h);
+            }
+            None => {}
+        }
+        return;
+    }
+
+    let action = match state {
+        State::TaskList { panel } | State::TodoList { panel } | State::HistoryList { panel } => {
+            panel.pen_up()
+        }
+        _ => None,
+    };
+    let Some(action) = action else {
+        return;
+    };
+    match action {
+        task_panel::Action::Delete(number) => {
+            match state {
+                State::TaskList { .. } => match task_store.as_mut() {
+                    Some(store) => match store.delete_number(number) {
+                        Ok(task) => {
+                            eprintln!(
+                                "magic-paper: task {number} deleted from paper list — {}",
+                                task.instruction
+                            );
+                            *next_heartbeat = heartbeat_deadline(task_store);
+                        }
+                        Err(e) => eprintln!("magic-paper: could not delete task {number}: {e}"),
+                    },
+                    None => eprintln!("magic-paper: task storage is disabled"),
+                },
+                State::TodoList { .. } => match todo_store.as_mut() {
+                    Some(store) => match store.delete_number(number) {
+                        Ok(todo) => eprintln!(
+                            "magic-paper: TODO {number} deleted from paper list — {}",
+                            todo.text
+                        ),
+                        Err(e) => eprintln!("magic-paper: could not delete TODO {number}: {e}"),
+                    },
+                    None => eprintln!("magic-paper: TODO storage is disabled"),
+                },
+                State::HistoryList { .. } => match memory_store.as_mut() {
+                    Some(store) => match store.delete_number(number, HISTORY_VISIBLE) {
+                        Ok(entry) => eprintln!(
+                            "magic-paper: history {number} deleted — {}",
+                            entry.transcript
+                        ),
+                        Err(error) => {
+                            eprintln!("magic-paper: could not delete history {number}: {error}")
+                        }
+                    },
+                    None => eprintln!("magic-paper: memory storage is disabled"),
+                },
+                _ => {}
+            }
+            redraw_paper_list(state, memory_store, task_store, todo_store, surf, font);
+            disp.update_all(surf.w, surf.h);
+        }
+        task_panel::Action::Toggle(number) => {
+            if let State::TaskList { .. } = state {
+                match task_store.as_mut() {
+                    Some(store) => match store.toggle_number(number, unix_now()) {
+                        Ok(task) => {
+                            eprintln!(
+                                "magic-paper: task {number} {} from paper list",
+                                if task.paused { "disabled" } else { "enabled" }
+                            );
+                            *next_heartbeat = heartbeat_deadline(task_store);
+                        }
+                        Err(error) => {
+                            eprintln!("magic-paper: could not toggle task {number}: {error}")
+                        }
+                    },
+                    None => eprintln!("magic-paper: task storage is disabled"),
+                }
+            }
+            redraw_paper_list(state, memory_store, task_store, todo_store, surf, font);
+            disp.update_all(surf.w, surf.h);
+        }
+        task_panel::Action::Dismiss => {
+            let old = std::mem::replace(state, State::Listening { last_pen: None });
+            match old {
+                State::TaskList { panel }
+                | State::TodoList { panel }
+                | State::HistoryList { panel } => panel.dismiss(surf),
+                _ => unreachable!(),
+            }
+            disp.update_all(surf.w, surf.h);
+            eprintln!("magic-paper: paper list dismissed");
+        }
+        task_panel::Action::Redraw => {
+            redraw_paper_list(state, memory_store, task_store, todo_store, surf, font);
+            disp.update_all(surf.w, surf.h);
+        }
+    }
+}
+
+fn redraw_paper_list(
+    state: &mut State,
+    memory_store: &Option<memory::MemoryStore>,
+    task_store: &Option<tasks::TaskStore>,
+    todo_store: &Option<todos::TodoStore>,
+    surf: &mut Surface,
+    font: &fonts::FontBook,
+) {
+    match state {
+        State::TaskList { panel } => {
+            let lines = task_store
+                .as_ref()
+                .map(|store| store.panel_lines())
+                .unwrap_or_default();
+            let enabled = task_store
+                .as_ref()
+                .map(|store| store.panel_enabled())
+                .unwrap_or_default();
+            panel.redraw(
+                surf,
+                font,
+                "任務列表",
+                "尚無任務",
+                "橫劃可刪除 · 點右側方框啟用或停用 · 點空白退出",
+                &lines,
+                Some(&enabled),
+            );
+        }
+        State::TodoList { panel } => {
+            let lines = todo_store
+                .as_ref()
+                .map(|store| store.panel_lines())
+                .unwrap_or_default();
+            panel.redraw(
+                surf,
+                font,
+                "TODO 列表",
+                "尚無 TODO",
+                "橫劃 TODO 可刪除 · 點擊空白處退出",
+                &lines,
+                None,
+            );
+        }
+        State::HistoryList { panel } => {
+            let lines = memory_store
+                .as_ref()
+                .map(|store| store.panel_lines(HISTORY_VISIBLE))
+                .unwrap_or_default();
+            panel.redraw(
+                surf,
+                font,
+                "對話歷史",
+                "尚無歷史",
+                "橫劃一段歷史可刪除 · 點擊空白處退出",
+                &lines,
+                None,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn apply_local_command(
+    command: &str,
+    task_store: &mut Option<tasks::TaskStore>,
+    todo_store: &mut Option<todos::TodoStore>,
+) -> (String, bool) {
+    if let Some(store) = task_store.as_mut() {
+        match store.apply_from_transcript(command, unix_now()) {
+            Ok(Some(change)) => {
+                let reply = match change {
+                    tasks::TaskChange::Added(task) => {
+                        format!("任務已新增：{}。", task.instruction)
+                    }
+                    tasks::TaskChange::Deleted { number, task } => {
+                        format!("已刪除任務 {number}：{}。", task.instruction)
+                    }
+                    tasks::TaskChange::Paused { number, .. } => {
+                        format!("任務 {number} 已暫停。")
+                    }
+                    tasks::TaskChange::Resumed { number, .. } => {
+                        format!("任務 {number} 已恢復。")
+                    }
+                    tasks::TaskChange::Modified { number, after, .. } => {
+                        format!("任務 {number} 已修改為：{}。", after.instruction)
+                    }
+                };
+                eprintln!("magic-paper: local task command applied — {command}");
+                return (reply, true);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("magic-paper: local task command rejected: {error}");
+                return (
+                    "任務指令無法執行，請檢查編號、間隔或任務上限。".into(),
+                    false,
+                );
+            }
+        }
+    }
+
+    if let Some(store) = todo_store.as_mut() {
+        match store.add_from_transcript(command, unix_now()) {
+            Ok(Some(todo)) => {
+                eprintln!("magic-paper: local TODO added — {}", todo.text);
+                return (format!("TODO 已新增：{}。", todo.text), false);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("magic-paper: local TODO rejected: {error}");
+                return ("TODO 無法新增，請檢查內容或列表上限。".into(), false);
+            }
+        }
+    }
+
+    ("指令未能辨識，請再寫一次。".into(), false)
 }
 
 fn accept_transcript(
@@ -1126,21 +1695,31 @@ fn accept_transcript(
     transcript: String,
     kind: TurnKind,
     task_store: &mut Option<tasks::TaskStore>,
-) {
+    todo_store: &mut Option<todos::TodoStore>,
+) -> bool {
     let first = slot.is_none();
+    let mut scheduled_tasks_changed = false;
     if first && kind == TurnKind::User {
         if let Some(store) = task_store.as_mut() {
-            match store.add_from_transcript(&transcript, unix_now()) {
-                Ok(Some(task)) => eprintln!(
-                    "magic-paper: task added — every {}s: {}",
-                    task.interval_secs, task.instruction
-                ),
+            match store.apply_from_transcript(&transcript, unix_now()) {
+                Ok(Some(change)) => {
+                    scheduled_tasks_changed = true;
+                    eprintln!("magic-paper: task list changed — {change:?}");
+                }
                 Ok(None) => {}
                 Err(e) => eprintln!("magic-paper: task command rejected: {e}"),
             }
         }
+        if let Some(store) = todo_store.as_mut() {
+            match store.add_from_transcript(&transcript, unix_now()) {
+                Ok(Some(todo)) => eprintln!("magic-paper: TODO added — {}", todo.text),
+                Ok(None) => {}
+                Err(e) => eprintln!("magic-paper: TODO command rejected: {e}"),
+            }
+        }
     }
     *slot = Some(transcript);
+    scheduled_tasks_changed
 }
 
 /// True if the region no longer holds any dark pixels (fully erased).
@@ -1183,7 +1762,7 @@ fn oracle_excuse(e: &str) -> String {
 /// the memory's rewriting — the date in a small hand, the writer's own strokes
 /// exactly as they were penned, Tom's old reply beneath — all in faded ink.
 fn conjure(
-    font: &FontRef,
+    font: &fonts::FontBook,
     store: &Option<memory::MemoryStore>,
     id: u64,
     surf: &mut Surface,
@@ -1258,7 +1837,7 @@ fn conjure(
 
 /// Lay out reply text and produce screen-space strokes. `y_start` continues a
 /// streamed reply below its previous chunk; None places the first chunk.
-fn plan_reply(font: &FontRef, text: &str, y_start: Option<i32>) -> WritePlan {
+fn plan_reply(font: &fonts::FontBook, text: &str, y_start: Option<i32>) -> WritePlan {
     let max_w = (screen_w() as i32 - 2 * MARGIN_X) as f32;
     let lines = script::wrap(font, text, REPLY_PX, max_w);
     let line_h = (REPLY_PX * 1.25) as i32;
@@ -1301,7 +1880,7 @@ fn plan_reply(font: &FontRef, text: &str, y_start: Option<i32>) -> WritePlan {
 }
 
 /// Splice a streamed continuation chunk into a running write animation.
-fn append_reply(font: &FontRef, plan: &mut WritePlan, more: &str) {
+fn append_reply(font: &fonts::FontBook, plan: &mut WritePlan, more: &str) {
     let cont = plan_reply(font, more, Some(plan.next_y));
     if cont.strokes.is_empty() {
         return;

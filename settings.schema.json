@@ -20,7 +20,28 @@
       "label": "Model",
       "kind": "text",
       "placeholder": "gpt-5.6-terra",
-      "help": "Must be vision-capable."
+      "help": "With PaddleOCR configured this model receives text only and does not need vision."
+    },
+    {
+      "key": "RIDDLE_OCR_TOKEN",
+      "label": "PaddleOCR token",
+      "kind": "secret",
+      "placeholder": "AI Studio access token",
+      "help": "Enables external OCR. The token is stored only on the tablet; OpenAI then receives recognized text instead of the page image."
+    },
+    {
+      "key": "RIDDLE_OCR_MODEL",
+      "label": "OCR model",
+      "kind": "text",
+      "placeholder": "PP-OCRv6",
+      "help": "PP-OCRv6 is the fast default. PaddleOCR-VL-1.6 remains supported for document-layout OCR."
+    },
+    {
+      "key": "RIDDLE_OCR_SPECULATIVE",
+      "label": "Speculative OCR",
+      "kind": "select",
+      "options": ["", "on", "off"],
+      "help": "On by default: submit after one second of idle time. Turn off to avoid possible extra paid jobs after a mid-sentence pause."
     },
     {
       "key": "RIDDLE_OPENAI_API",
@@ -86,11 +107,18 @@
       "help": "On by default. Write a command such as 任务 每五分钟讲一个冷笑话 to add a persistent task."
     },
     {
-      "key": "RIDDLE_HEARTBEAT_SECONDS",
-      "label": "Heartbeat interval",
+      "key": "RIDDLE_TODOS",
+      "label": "TODO list",
+      "kind": "select",
+      "options": ["", "off"],
+      "help": "On by default. Write TODO followed by text to add an item; write TODO alone to open the list."
+    },
+    {
+      "key": "RIDDLE_HEARTBEAT_RETRY_SECONDS",
+      "label": "Task retry delay",
       "kind": "text",
-      "placeholder": "300",
-      "help": "How often MP checks for due tasks; 300 seconds is five minutes."
+      "placeholder": "30",
+      "help": "Smart scheduling waits until the exact nearest due time without an API request. This controls only retries after delivery failure."
     }
   ],
   "presets": [

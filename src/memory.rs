@@ -67,6 +67,21 @@ impl MemoryStore {
         self.dir.join(format!("{id}.strokes"))
     }
 
+    fn persist_index(&self) -> std::io::Result<()> {
+        let mut out = String::new();
+        for entry in &self.entries {
+            out.push_str(&format!(
+                "{}\t{}\t{}\n",
+                entry.id,
+                escape(&entry.transcript),
+                escape(&entry.reply)
+            ));
+        }
+        let temporary = self.dir.join("index.tsv.new");
+        std::fs::write(&temporary, out)?;
+        std::fs::rename(temporary, self.index_path())
+    }
+
     fn load(&mut self) {
         let Ok(text) = std::fs::read_to_string(self.index_path()) else {
             return;
@@ -209,6 +224,47 @@ impl MemoryStore {
             ids.push(e.id);
         }
         (lines, ids)
+    }
+
+    /// A compact newest-first local history page. Its visible numbering is
+    /// also accepted by `delete_number`, independent of the model catalog.
+    pub fn panel_lines(&self, max: usize) -> Vec<String> {
+        self.entries
+            .iter()
+            .rev()
+            .take(max)
+            .enumerate()
+            .map(|(index, entry)| {
+                format!(
+                    "{}  你：{}  MP：{}",
+                    index + 1,
+                    one_line(&entry.transcript, 36),
+                    one_line(&entry.reply, 44)
+                )
+            })
+            .collect()
+    }
+
+    /// Delete one of the newest `max` visible history rows and its strokes.
+    pub fn delete_number(&mut self, number: usize, max: usize) -> Result<Entry, String> {
+        let visible = self.entries.len().min(max);
+        if number == 0 || number > visible {
+            return Err(format!(
+                "history {number} does not exist (there are {visible} visible)"
+            ));
+        }
+        let index = self.entries.len() - number;
+        let entry = self.entries.remove(index);
+        if let Err(error) = self.persist_index() {
+            self.entries.insert(index, entry.clone());
+            return Err(format!("save history deletion: {error}"));
+        }
+        if let Err(error) = std::fs::remove_file(self.strokes_path(entry.id)) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("riddle: deleted history index but not strokes: {error}");
+            }
+        }
+        Ok(entry)
     }
 }
 
@@ -406,6 +462,25 @@ mod tests {
         assert!(lines[0].starts_with("1. "));
         assert!(lines[0].contains("about the rain"));
         assert!(lines[1].contains("about the garden"));
+        let _ = std::fs::remove_dir_all(&s.dir);
+    }
+
+    #[test]
+    fn history_panel_deletes_newest_visible_entry_and_strokes() {
+        let mut s = tmp_store("history-delete");
+        s.append(101, "第一问", "第一答", &vec![vec![(1, 1, 1)]]);
+        s.append(102, "第二问", "第二答", &vec![vec![(2, 2, 2)]]);
+        assert!(s.panel_lines(9)[0].contains("第二问"));
+        let removed = s.delete_number(1, 9).unwrap();
+        assert_eq!(removed.id, 102);
+        assert!(!s.strokes_path(102).exists());
+        assert_eq!(s.entries.len(), 1);
+        let mut reopened = MemoryStore {
+            dir: s.dir.clone(),
+            entries: Vec::new(),
+        };
+        reopened.load();
+        assert_eq!(reopened.entries[0].id, 101);
         let _ = std::fs::remove_dir_all(&s.dir);
     }
 
