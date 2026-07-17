@@ -1,4 +1,4 @@
-//! The paper-native recurring-task list.
+//! Shared paper-native task, TODO, and history list component.
 //!
 //! It is deliberately local: the oracle only recognizes the handwritten
 //! `任务` / `task` entry word, while rendering and strike-to-delete happen on

@@ -1,4 +1,4 @@
-//! The diary's memory. Every finished turn is kept — the writer's actual pen
+//! MagicPaper's memory. Every finished turn is kept — the writer's actual pen
 //! strokes, a transcription of their words, and Tom's reply — so a later
 //! incantation ("show me what I wrote about the garden") can conjure the page
 //! back in the writer's own hand.

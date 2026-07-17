@@ -1,4 +1,4 @@
-//! Persistent, unscheduled TODO notes for MagicPaper.
+//! Persistent unscheduled TODO notes, separate from recurring tasks.
 
 use std::io;
 use std::path::PathBuf;

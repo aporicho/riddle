@@ -1,4 +1,4 @@
-//! The diary's guide: a lone, large "?" drawn on the page summons a panel of
+//! MagicPaper's instruction manual: a lone, large "?" or a local help command summons it.
 //! the diary's gestures; touching the pen to the page dismisses it. Detection
 //! is local geometry — no oracle — so the guide works even with no network.
 
@@ -96,55 +96,65 @@ pub fn looks_like_question_mark(strokes: &[Vec<(i32, i32, i32)>]) -> bool {
     true
 }
 
-const TITLE: &str = "MagicPaper  MP";
+const TITLE: &str = "MagicPaper 使用說明";
 /// Takeover mode: riddle owns touch and the power button.
 const BODY_TAKEOVER: &[&str] = &[
-    "Write, then rest your quill:",
-    "MagicPaper drinks your ink and replies.",
+    "書寫後停筆，MP 會讀取墨跡並回答。",
+    "等待時仍可繼續寫，新筆跡永遠優先。",
     "",
-    "MP remembers. Ask it:",
-    "\"show me what I wrote about...\"",
-    "and the page will rise again.",
+    "寫「任務」：開啟定時任務列表。",
+    "寫「TODO」：開啟待辦事項列表。",
+    "寫「歷史」：查看最近九段對話。",
+    "寫「字體」：切換字體並校準大小。",
+    "寫「幫助」或 help：開啟本說明。",
     "",
-    "Write: task every 5 minutes...",
-    "Write task or TODO to open its list.",
-    "Task boxes: check=active, cross=paused.",
-    "Write 字体 for fonts; 历史 for dialogue.",
-    "Strike an entry to delete; tap blank to close.",
+    "在列表中橫劃一項即可刪除。",
+    "任務右側：勾為啟用，叉為停用。",
+    "點擊空白處退出列表。",
     "",
-    "Flip the marker to erase.",
-    "Press power three times to leave.",
-    "One power press sleeps MagicPaper.",
-    "Five fingers still leave as a backup.",
-    "",
-    "A large ? summons this guide.",
+    "畫一個大問號也能開啟本說明。",
+    "翻轉筆端可以擦除。",
+    "快速按三次電源鍵進入或退出 MP。",
+    "單按電源鍵可休眠或喚醒。",
+    "五指觸碰仍可緊急退出。",
 ];
 /// Windowed mode: AppLoad owns the window and xochitl owns the button.
 const BODY_WINDOWED: &[&str] = &[
-    "Write, then rest your quill:",
-    "MagicPaper drinks your ink and replies.",
+    "書寫後停筆，MP 會讀取墨跡並回答。",
+    "等待時仍可繼續寫，新筆跡永遠優先。",
     "",
-    "MP remembers. Ask it:",
-    "\"show me what I wrote about...\"",
-    "and the page will rise again.",
+    "寫「任務」：開啟定時任務列表。",
+    "寫「TODO」：開啟待辦事項列表。",
+    "寫「歷史」：查看最近九段對話。",
+    "寫「字體」：切換字體並校準大小。",
+    "寫「幫助」或 help：開啟本說明。",
     "",
-    "Write: task every 5 minutes...",
-    "Write task or TODO to open its list.",
-    "Task boxes: check=active, cross=paused.",
-    "Write 字体 for fonts; 历史 for dialogue.",
-    "Strike an entry to delete; tap blank to close.",
+    "在列表中橫劃一項即可刪除。",
+    "任務右側：勾為啟用，叉為停用。",
+    "點擊空白處退出列表。",
     "",
-    "Flip the marker to erase.",
-    "Close MagicPaper from AppLoad.",
-    "",
-    "A large ? summons this guide.",
+    "畫一個大問號也能開啟本說明。",
+    "翻轉筆端可以擦除。",
+    "從 AppLoad 關閉 MagicPaper。",
 ];
-const FOOTER: &str = "Touch pen to page to close.";
+const FOOTER: &str = "用筆點一下頁面即可關閉說明";
 
-const TITLE_PX: f32 = 88.0;
-const BODY_PX: f32 = 54.0;
-const FOOTER_PX: f32 = 40.0;
+const TITLE_PX: f32 = 72.0;
+const BODY_PX: f32 = 42.0;
+const FOOTER_PX: f32 = 36.0;
 const PAD: usize = 64;
+
+fn fitted_base_sizes(font: &FontBook, body_lines: usize, page_h: usize) -> (f32, f32, f32) {
+    let selected = font.selected();
+    let raw_title_px = font.calibrated_px(selected, TITLE_PX);
+    let raw_body_px = font.calibrated_px(selected, BODY_PX);
+    let raw_footer_px = font.calibrated_px(selected, FOOTER_PX);
+    let raw_text_height =
+        raw_title_px * 1.4 + raw_body_px * 1.3 * (body_lines as f32 + 0.5) + raw_footer_px * 1.4;
+    let available_text_height = page_h.saturating_sub(2 * PAD + 40) as f32;
+    let fit = (available_text_height / raw_text_height).min(1.0);
+    (TITLE_PX * fit, BODY_PX * fit, FOOTER_PX * fit)
+}
 
 /// The open guide panel: remembers the pixels it covered.
 pub struct Help {
@@ -165,13 +175,19 @@ pub fn show(surf: &mut Surface, font: &FontBook, takeover: bool) -> Help {
     } else {
         BODY_WINDOWED
     };
-    let title_h = (TITLE_PX * 1.4) as usize;
-    let line_h = (BODY_PX * 1.3) as usize;
-    let footer_h = (FOOTER_PX * 1.4) as usize;
+    let selected = font.selected();
+    let (title_base_px, body_base_px, footer_base_px) =
+        fitted_base_sizes(font, body.len(), screen_h());
+    let title_px = font.calibrated_px(selected, title_base_px);
+    let body_px = font.calibrated_px(selected, body_base_px);
+    let footer_px = font.calibrated_px(selected, footer_base_px);
+    let title_h = (title_px * 1.4) as usize;
+    let line_h = (body_px * 1.3) as usize;
+    let footer_h = (footer_px * 1.4) as usize;
 
-    let mut wmax = script::measure(font, TITLE, TITLE_PX);
+    let mut wmax = script::measure(font, TITLE, title_base_px);
     for l in body {
-        wmax = wmax.max(script::measure(font, l, BODY_PX));
+        wmax = wmax.max(script::measure(font, l, body_base_px));
     }
     let pw = (wmax as usize + 2 * PAD).min(screen_w().saturating_sub(40));
     let ph = PAD + title_h + line_h / 2 + body.len() * line_h + footer_h + PAD;
@@ -184,15 +200,15 @@ pub fn show(surf: &mut Surface, font: &FontBook, takeover: bool) -> Help {
     frame(surf, px + 14, py + 14, pw - 28, ph - 28, 1);
 
     let mut y = py + PAD;
-    blit_centered(surf, font, TITLE, TITLE_PX, px, pw, y);
+    blit_centered(surf, font, TITLE, title_base_px, px, pw, y);
     y += title_h + line_h / 2;
     for l in body {
         if !l.is_empty() {
-            blit_centered(surf, font, l, BODY_PX, px, pw, y);
+            blit_centered(surf, font, l, body_base_px, px, pw, y);
         }
         y += line_h;
     }
-    blit_centered(surf, font, FOOTER, FOOTER_PX, px, pw, y);
+    blit_centered(surf, font, FOOTER, footer_base_px, px, pw, y);
 
     let mut region = BBox::empty();
     region.add(px as i32, py as i32, 2);
@@ -347,7 +363,7 @@ mod tests {
         let ptr = buf.as_mut_ptr();
         let mut surf = Surface::new(ptr, buf.len(), w, h, w * 4, crate::surface::PixFmt::Rgb32);
         let font = FontBook::for_test(
-            ab_glyph::FontRef::try_from_slice(include_bytes!("../fonts/DancingScript.ttf"))
+            ab_glyph::FontRef::try_from_slice(include_bytes!("../../fonts/DancingScript.ttf"))
                 .unwrap(),
             None,
         );
@@ -398,7 +414,7 @@ mod tests {
         let ptr = buf.as_mut_ptr();
         let mut surf = Surface::new(ptr, buf.len(), w, h, w * 4, crate::surface::PixFmt::Rgb32);
         let font = FontBook::for_test(
-            ab_glyph::FontRef::try_from_slice(include_bytes!("../fonts/DancingScript.ttf"))
+            ab_glyph::FontRef::try_from_slice(include_bytes!("../../fonts/DancingScript.ttf"))
                 .unwrap(),
             None,
         );
@@ -437,5 +453,20 @@ mod tests {
             surf.copy_rect(0, 0, w, h),
             "sleep restore is not exact"
         );
+    }
+
+    #[test]
+    fn maximum_font_calibration_still_fits_the_move_manual() {
+        let face =
+            ab_glyph::FontRef::try_from_slice(include_bytes!("../../fonts/DancingScript.ttf"))
+                .unwrap();
+        let mut font = FontBook::for_test(face, None);
+        font.set_scale_for_test(crate::fonts::FontId::ChenYuluoyan, 180);
+        let (title, body, footer) = fitted_base_sizes(&font, BODY_TAKEOVER.len(), 1696);
+        let selected = font.selected();
+        let text_height = font.calibrated_px(selected, title) * 1.4
+            + font.calibrated_px(selected, body) * 1.3 * (BODY_TAKEOVER.len() as f32 + 0.5)
+            + font.calibrated_px(selected, footer) * 1.4;
+        assert!(text_height + (2 * PAD) as f32 <= 1656.5);
     }
 }

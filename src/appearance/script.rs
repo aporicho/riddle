@@ -1,4 +1,4 @@
-//! MagicPaper's hand: rasterize reply text with the selected font, thin it to
+//! MagicPaper's text layout and handwriting-stroke pipeline: rasterize text, thin it to
 //! single-pixel pen paths (Zhang-Suen), trace them into ordered strokes, and
 //! yield them for stroke-by-stroke animation.
 
@@ -28,23 +28,34 @@ pub fn rasterize_line_with(fonts: &FontBook, primary: FontId, text: &str, px: f3
         .collect();
     let baseline = selected
         .iter()
-        .map(|(id, _)| fonts.font(*id).as_scaled(PxScale::from(px)).ascent())
+        .map(|(id, _)| {
+            fonts
+                .font(*id)
+                .as_scaled(PxScale::from(fonts.calibrated_px(*id, px)))
+                .ascent()
+        })
         .fold(0.0f32, f32::max);
     let font_height = selected
         .iter()
-        .map(|(id, _)| fonts.font(*id).as_scaled(PxScale::from(px)).height())
+        .map(|(id, _)| {
+            fonts
+                .font(*id)
+                .as_scaled(PxScale::from(fonts.calibrated_px(*id, px)))
+                .height()
+        })
         .fold(px, f32::max);
     let mut glyphs: Vec<(FontId, Glyph)> = Vec::new();
     let mut caret = 0.0f32;
     let mut prev: Option<(FontId, ab_glyph::GlyphId)> = None;
     for (font_id, c) in selected {
         let font = fonts.font(font_id);
-        let scaled = font.as_scaled(PxScale::from(px));
+        let calibrated_px = fonts.calibrated_px(font_id, px);
+        let scaled = font.as_scaled(PxScale::from(calibrated_px));
         let id = scaled.glyph_id(c);
         if let Some((_, p)) = prev.filter(|(previous_font, _)| *previous_font == font_id) {
             caret += scaled.kern(p, id);
         }
-        let mut g = id.with_scale(PxScale::from(px));
+        let mut g = id.with_scale(PxScale::from(calibrated_px));
         g.position = ab_glyph::point(caret, baseline);
         caret += scaled.h_advance(id);
         glyphs.push((font_id, g));
@@ -86,7 +97,7 @@ pub fn measure_with(fonts: &FontBook, primary: FontId, text: &str, px: f32) -> f
     let mut prev: Option<(FontId, ab_glyph::GlyphId)> = None;
     for c in text.chars() {
         let (font_id, font) = fonts.resolve(primary, c);
-        let scaled = font.as_scaled(PxScale::from(px));
+        let scaled = font.as_scaled(PxScale::from(fonts.calibrated_px(font_id, px)));
         let id = scaled.glyph_id(c);
         if let Some((_, p)) = prev.filter(|(previous_font, _)| *previous_font == font_id) {
             caret += scaled.kern(p, id);
@@ -361,8 +372,10 @@ mod tests {
     #[test]
     fn pipeline_produces_strokes() {
         let font = FontBook::for_test(
-            ab_glyph::FontRef::try_from_slice(include_bytes!("../fonts/ChenYuluoyan-2.0-Thin.ttf"))
-                .unwrap(),
+            ab_glyph::FontRef::try_from_slice(include_bytes!(
+                "../../fonts/ChenYuluoyan-2.0-Thin.ttf"
+            ))
+            .unwrap(),
             None,
         );
         let mut line = rasterize_line(&font, "Yes, Harry?", 96.0);
@@ -398,8 +411,10 @@ mod tests {
     #[test]
     fn wraps_unspaced_chinese_without_orphaning_punctuation() {
         let font = FontBook::for_test(
-            ab_glyph::FontRef::try_from_slice(include_bytes!("../fonts/ChenYuluoyan-2.0-Thin.ttf"))
-                .unwrap(),
+            ab_glyph::FontRef::try_from_slice(include_bytes!(
+                "../../fonts/ChenYuluoyan-2.0-Thin.ttf"
+            ))
+            .unwrap(),
             None,
         );
         // Visible Chinese replies are prompted as Traditional Chinese; the
@@ -427,5 +442,24 @@ mod tests {
             !trace(&rendered).is_empty(),
             "Chinese glyphs should produce pen strokes"
         );
+    }
+
+    #[test]
+    fn calibration_changes_measurement_and_rasterization_together() {
+        let mut font = FontBook::for_test(
+            ab_glyph::FontRef::try_from_slice(include_bytes!(
+                "../../fonts/ChenYuluoyan-2.0-Thin.ttf"
+            ))
+            .unwrap(),
+            None,
+        );
+        let normal_width = measure(&font, "字體大小", 80.0);
+        let normal = rasterize_line(&font, "字體大小", 80.0);
+        font.set_scale_for_test(FontId::ChenYuluoyan, 150);
+        let calibrated_width = measure(&font, "字體大小", 80.0);
+        let calibrated = rasterize_line(&font, "字體大小", 80.0);
+        assert!(calibrated_width > normal_width * 1.45);
+        assert!(calibrated.width > normal.width);
+        assert!(calibrated.height > normal.height);
     }
 }

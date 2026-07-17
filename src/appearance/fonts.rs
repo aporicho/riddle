@@ -8,9 +8,13 @@ use std::path::{Path, PathBuf};
 
 use ab_glyph::{Font, FontRef};
 
-const CHEN_BYTES: &[u8] = include_bytes!("../fonts/ChenYuluoyan-2.0-Thin.ttf");
+const CHEN_BYTES: &[u8] = include_bytes!("../../fonts/ChenYuluoyan-2.0-Thin.ttf");
 const DEFAULT_PREF_DIR: &str = "/home/root/riddle-data/preferences";
 const FONT_PREF_FILE: &str = "font";
+const FONT_SCALE_PREF_FILE: &str = "font_scales";
+pub const MIN_SCALE_PERCENT: u16 = 50;
+pub const MAX_SCALE_PERCENT: u16 = 180;
+const DEFAULT_SCALE_PERCENT: u16 = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FontId {
@@ -43,6 +47,14 @@ impl FontId {
             .into_iter()
             .find(|id| id.stable_id() == value.trim())
     }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::ChenYuluoyan => 0,
+            Self::ButterShisan => 1,
+            Self::Farstar851 => 2,
+        }
+    }
 }
 
 struct FontEntry {
@@ -53,6 +65,7 @@ struct FontEntry {
 pub struct FontBook {
     entries: Vec<FontEntry>,
     selected: FontId,
+    scales: [u16; 3],
     preference_dir: PathBuf,
 }
 
@@ -89,19 +102,24 @@ impl FontBook {
             .and_then(|saved| FontId::parse(&saved))
             .filter(|id| entries.iter().any(|entry| entry.id == *id))
             .unwrap_or(default);
+        let scales = load_scales(&preference_dir);
 
         eprintln!(
-            "magic-paper: fonts={} selected={}",
+            "magic-paper: fonts={} selected={} scales={}/{}/{}",
             entries
                 .iter()
                 .map(|entry| entry.id.stable_id())
                 .collect::<Vec<_>>()
                 .join(","),
-            selected.stable_id()
+            selected.stable_id(),
+            scales[0],
+            scales[1],
+            scales[2]
         );
         Ok(Self {
             entries,
             selected,
+            scales,
             preference_dir,
         })
     }
@@ -132,6 +150,35 @@ impl FontBook {
         let target = self.preference_dir.join(FONT_PREF_FILE);
         let temporary = self.preference_dir.join("font.new");
         std::fs::write(&temporary, format!("{}\n", id.stable_id()))?;
+        std::fs::rename(temporary, target)
+    }
+
+    pub fn scale_percent(&self, id: FontId) -> u16 {
+        self.scales[id.index()]
+    }
+
+    /// Convert a semantic text size into the calibrated pixel size for the
+    /// font that will actually draw the glyph.
+    pub fn calibrated_px(&self, id: FontId, base_px: f32) -> f32 {
+        base_px * self.scale_percent(id) as f32 / 100.0
+    }
+
+    /// Apply one font's visual-size calibration immediately and persist all
+    /// three stable IDs atomically. Values outside the paper UI's supported
+    /// range are clamped so hand-edited preference files remain safe.
+    pub fn set_scale_percent(&mut self, id: FontId, percent: u16) -> std::io::Result<()> {
+        self.scales[id.index()] = percent.clamp(MIN_SCALE_PERCENT, MAX_SCALE_PERCENT);
+        std::fs::create_dir_all(&self.preference_dir)?;
+        let target = self.preference_dir.join(FONT_SCALE_PREF_FILE);
+        let temporary = self.preference_dir.join("font_scales.new");
+        let mut body = String::new();
+        for font_id in FontId::ALL {
+            body.push_str(font_id.stable_id());
+            body.push('=');
+            body.push_str(&self.scale_percent(font_id).to_string());
+            body.push('\n');
+        }
+        std::fs::write(&temporary, body)?;
         std::fs::rename(temporary, target)
     }
 
@@ -178,9 +225,35 @@ impl FontBook {
         Self {
             entries,
             selected: FontId::ChenYuluoyan,
+            scales: [DEFAULT_SCALE_PERCENT; 3],
             preference_dir: std::env::temp_dir(),
         }
     }
+
+    #[cfg(test)]
+    pub fn set_scale_for_test(&mut self, id: FontId, percent: u16) {
+        self.scales[id.index()] = percent.clamp(MIN_SCALE_PERCENT, MAX_SCALE_PERCENT);
+    }
+}
+
+fn load_scales(preference_dir: &Path) -> [u16; 3] {
+    let mut scales = [DEFAULT_SCALE_PERCENT; 3];
+    let Ok(saved) = std::fs::read_to_string(preference_dir.join(FONT_SCALE_PREF_FILE)) else {
+        return scales;
+    };
+    for line in saved.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let Some(id) = FontId::parse(key) else {
+            continue;
+        };
+        let Ok(percent) = value.trim().parse::<u16>() else {
+            continue;
+        };
+        scales[id.index()] = percent.clamp(MIN_SCALE_PERCENT, MAX_SCALE_PERCENT);
+    }
+    scales
 }
 
 fn runtime_font_dir() -> PathBuf {
@@ -226,9 +299,11 @@ mod tests {
 
     #[test]
     fn missing_glyph_uses_the_broad_fallback() {
-        let latin = FontRef::try_from_slice(include_bytes!("../fonts/DancingScript.ttf")).unwrap();
+        let latin =
+            FontRef::try_from_slice(include_bytes!("../../fonts/DancingScript.ttf")).unwrap();
         let chinese =
-            FontRef::try_from_slice(include_bytes!("../fonts/ChenYuluoyan-2.0-Thin.ttf")).unwrap();
+            FontRef::try_from_slice(include_bytes!("../../fonts/ChenYuluoyan-2.0-Thin.ttf"))
+                .unwrap();
         let book = FontBook::for_test(latin, Some(chinese));
         assert_eq!(
             book.resolve(FontId::ChenYuluoyan, '務').0,
@@ -238,8 +313,8 @@ mod tests {
 
     #[test]
     fn selection_is_written_with_a_stable_id() {
-        let font =
-            FontRef::try_from_slice(include_bytes!("../fonts/ChenYuluoyan-2.0-Thin.ttf")).unwrap();
+        let font = FontRef::try_from_slice(include_bytes!("../../fonts/ChenYuluoyan-2.0-Thin.ttf"))
+            .unwrap();
         let mut book = FontBook::for_test(font.clone(), Some(font));
         let dir =
             std::env::temp_dir().join(format!("magic-paper-font-test-{}", std::process::id()));
@@ -250,6 +325,31 @@ mod tests {
             std::fs::read_to_string(dir.join(FONT_PREF_FILE)).unwrap(),
             "851_farstar\n"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scale_calibration_is_clamped_and_persisted_by_font() {
+        let font = FontRef::try_from_slice(include_bytes!("../../fonts/ChenYuluoyan-2.0-Thin.ttf"))
+            .unwrap();
+        let mut book = FontBook::for_test(font.clone(), Some(font));
+        let dir = std::env::temp_dir().join(format!(
+            "magic-paper-font-scale-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        book.preference_dir = dir.clone();
+        book.set_scale_percent(FontId::ChenYuluoyan, 25).unwrap();
+        book.set_scale_percent(FontId::Farstar851, 147).unwrap();
+        assert_eq!(book.scale_percent(FontId::ChenYuluoyan), MIN_SCALE_PERCENT);
+        assert_eq!(book.scale_percent(FontId::Farstar851), 147);
+        assert_eq!(book.calibrated_px(FontId::Farstar851, 100.0), 147.0);
+        let saved = std::fs::read_to_string(dir.join(FONT_SCALE_PREF_FILE)).unwrap();
+        assert!(saved.contains("chenyuluoyan=50\n"));
+        assert!(saved.contains("851_farstar=147\n"));
+        let reloaded = load_scales(&dir);
+        assert_eq!(reloaded[FontId::ChenYuluoyan.index()], 50);
+        assert_eq!(reloaded[FontId::Farstar851.index()], 147);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

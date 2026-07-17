@@ -12,7 +12,7 @@ This fork is based on Maxime Rivest's original
 
 ## How this fork differs from upstream
 
-MagicPaper 0.5.0 turns the original Tom Riddle diary into a Chinese-first,
+MagicPaper 0.5.1 turns the original Tom Riddle diary into a Chinese-first,
 Move-tested personal paper assistant while preserving the ink-only interface.
 
 | Area | Upstream riddle | This MagicPaper fork |
@@ -23,7 +23,7 @@ Move-tested personal paper assistant while preserving the ink-only interface.
 | AI path | pi or chat-completions | Responses API with vision, low reasoning, automatic background web search, and AI paper-ready editing |
 | OCR path | Answer model reads the page image | Optional fast PP-OCRv6 first stage; the answer model then receives corrected text only |
 | Handwriting recognition | Compact vision image | PP-OCRv6 plus contextual correction, optional PaddleOCR-VL fallback, or cropped high-detail vision with ambiguity and arithmetic checks |
-| Reply appearance | Dancing Script | Three switchable Chinese handwriting fonts, per-glyph fallback, Traditional Chinese replies, and Chinese-aware wrapping |
+| Reply appearance | Dancing Script | Three switchable Chinese handwriting fonts, independent 50–180% size calibration, per-glyph fallback, Traditional Chinese replies, and Chinese-aware wrapping |
 | Memory | Short recent context plus saved pages | 20 recent dialogue turns, up to 400 saved pages, and a 40-page recall catalog |
 | Automation | Conversation and page recall | Persistent recurring tasks, paper-native task/TODO/history lists, checkbox enable/disable, and due-time-aware smart heartbeat scheduling |
 | Perceived latency | Request starts after the 2.8-second commit | OCR starts speculatively after one idle second; high-confidence complete input commits at 2.2s and uncertain input at 2.6s |
@@ -319,10 +319,12 @@ QUILL_DIR=../quill-move ./scripts/make-bundle.sh
 
 The two `MAGICPAPER_*_FONT` variables are optional local TTF resources. They
 are copied into `dist/riddle/fonts/` but never committed to this repository.
-With both installed, handwrite **字体** or **字體**, tap a row to preview and
-select it, then tap blank paper to leave. 851 is the default; the selection is
-saved under `/home/root/riddle-data/preferences/font`. Missing glyphs fall
-back to 851 automatically, so Simplified Task/TODO text does not disappear.
+With both installed, handwrite **字体** or **字體**, tap a row to select it, or
+drag that row's scale from 50% to 180% to calibrate the font's visual size.
+851 is the default. Selection and the three independent calibration values are
+saved under `/home/root/riddle-data/preferences/`. Measurement, wrapping,
+rendering, and per-glyph fallback all use the same calibrated size, so fallback
+characters stay aligned instead of becoming unexpectedly large or small.
 Do not publish a bundle containing fonts unless their licenses permit it.
 
 Handwrite **历史** or **歷史** to open the nine newest local dialogue pages;
@@ -331,6 +333,10 @@ list, the right-hand box is a direct local control: a check means active and a
 cross means paused. User pen events are drained before commit, heartbeat, and
 fade timers; touching an old lingering/fading reply clears it immediately and
 starts the new stroke instead of making the writer wait.
+
+Handwrite **帮助**, **幫助**, or **help** to open the device-local Chinese
+instruction manual without an answer-model request. Drawing one large `?`
+continues to open the same manual.
 
 The staged `dist/riddle/` is self-contained (binary, `libquill.so`, launch
 scripts, manifest) — copy it to
@@ -352,14 +358,25 @@ riddle dies uncleanly. If anything wedges:
   it; set `RIDDLE_KEEP_PAGE=1` to keep the last page around for debugging.
 - riddle never writes replies to disk. The pi backend, however, keeps its own
   session history in its data dir — the HTTP backend keeps nothing.
-- MP stays in character by design: the persona prompt (see `src/oracle.rs`)
+- MP stays in character by design: the persona prompt (see `src/oracle/`)
   tells the model it is living magical paper and nothing else.
+
+## Source layout
+
+The binary entry is intentionally tiny. Device state and interaction live in
+`src/app/`; model backends, OCR, streaming, and local routes live in
+`src/oracle/`; reusable paper panels live in `src/ui/`; appearance and text
+tracing live in `src/appearance/`; persistent memory, tasks, and TODOs live in
+`src/storage/`. This keeps feature work out of a single multi-thousand-line
+file while preserving one central, auditable input-priority loop.
 
 ## Fonts
 
-The reply hand is [ChenYuluoyan 2.0 Thin](https://github.com/Chenyu-otf/chenyuluoyan_thin),
-with character-aware line wrapping for unspaced Chinese text (SIL OFL 1.1 —
-see `fonts/OFL-ChenYuluoyan.txt`).
+The redistributable fallback is
+[ChenYuluoyan 2.0 Thin](https://github.com/Chenyu-otf/chenyuluoyan_thin),
+with character-aware line wrapping for unspaced Chinese text (SIL OFL 1.1;
+see `fonts/OFL-ChenYuluoyan.txt`). Optional local fonts remain outside Git and
+must be used according to their own licenses.
 
 ## License
 
