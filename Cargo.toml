@@ -1,9 +1,9 @@
 [package]
 name = "riddle"
-version = "0.3.0"
+version = "0.4.2"
 edition = "2021"
 license = "MIT"
-description = "The diary of Tom Riddle, for the reMarkable Paper Pro"
+description = "MagicPaper (MP), living magical paper for the reMarkable Paper Pro"
 
 [dependencies]
 libc = "0.2"

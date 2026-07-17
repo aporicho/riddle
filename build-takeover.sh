@@ -7,15 +7,18 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SDK=~/rm-sdk-3.26
+SDK=${RM_SDK:-~/rm-sdk-3.26}
+QUILL=${QUILL_DIR:-../quill-move}
 ENV=$(ls "$SDK"/environment-setup-* | head -n1)
 unset LD_LIBRARY_PATH          # SDK env refuses to source otherwise
 source "$ENV"                  # sets CC=aarch64-remarkable-linux-gcc ... --sysroot=...
+export RM_SDK="$SDK"
+export QUILL_DIR="$(realpath "$QUILL")"
 
 # Ensure quill's build artifacts exist (libquill.so + vendor/libqsgepaper.so).
-if [ ! -f ../quill/build/libquill.so ]; then
+if [ ! -f "$QUILL/build/libquill.so" ]; then
     echo "building quill first..."
-    ( cd ../quill && ./build.sh )
+    ( cd "$QUILL" && RM_SDK="$SDK" ./build.sh )
 fi
 
 # Point cargo's aarch64 linker at the SDK gcc. $CC includes the -mcpu/-sysroot

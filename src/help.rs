@@ -2,7 +2,7 @@
 //! the diary's gestures; touching the pen to the page dismisses it. Detection
 //! is local geometry — no oracle — so the guide works even with no network.
 
-use crate::fb::{BBox, SCREEN_H, SCREEN_W};
+use crate::fb::{screen_h, screen_w, BBox};
 use crate::script;
 use crate::surface::{Surface, BLACK, WHITE};
 use ab_glyph::FontRef;
@@ -13,7 +13,9 @@ pub fn looks_like_question_mark(strokes: &[Vec<(i32, i32, i32)>]) -> bool {
     if strokes.is_empty() || strokes.len() > 3 {
         return false;
     }
-    let main_i = (0..strokes.len()).max_by_key(|&i| strokes[i].len()).unwrap();
+    let main_i = (0..strokes.len())
+        .max_by_key(|&i| strokes[i].len())
+        .unwrap();
     let main = &strokes[main_i];
     if main.len() < 12 {
         return false;
@@ -94,33 +96,40 @@ pub fn looks_like_question_mark(strokes: &[Vec<(i32, i32, i32)>]) -> bool {
     true
 }
 
-const TITLE: &str = "The Diary";
+const TITLE: &str = "MagicPaper  MP";
 /// Takeover mode: riddle owns touch and the power button.
 const BODY_TAKEOVER: &[&str] = &[
     "Write, then rest your quill:",
-    "the diary drinks your ink and Tom replies.",
+    "MagicPaper drinks your ink and replies.",
     "",
-    "The diary remembers. Ask it:",
+    "MP remembers. Ask it:",
     "\"show me what I wrote about...\"",
     "and the page will rise again.",
     "",
+    "Write: task every 5 minutes...",
+    "MP will perform it on heartbeat.",
+    "",
     "Flip the marker to erase.",
-    "Tap five fingers at once to leave.",
-    "The power button sleeps the diary.",
+    "Press power three times to leave.",
+    "One power press sleeps MagicPaper.",
+    "Five fingers still leave as a backup.",
     "",
     "A large ? summons this guide.",
 ];
 /// Windowed mode: AppLoad owns the window and xochitl owns the button.
 const BODY_WINDOWED: &[&str] = &[
     "Write, then rest your quill:",
-    "the diary drinks your ink and Tom replies.",
+    "MagicPaper drinks your ink and replies.",
     "",
-    "The diary remembers. Ask it:",
+    "MP remembers. Ask it:",
     "\"show me what I wrote about...\"",
     "and the page will rise again.",
     "",
+    "Write: task every 5 minutes...",
+    "MP will perform it on heartbeat.",
+    "",
     "Flip the marker to erase.",
-    "Close the diary from AppLoad.",
+    "Close MagicPaper from AppLoad.",
     "",
     "A large ? summons this guide.",
 ];
@@ -145,7 +154,11 @@ pub struct Help {
 /// The gesture list depends on the display mode: only takeover owns the
 /// touchscreen (5-finger exit) and the power button.
 pub fn show(surf: &mut Surface, font: &FontRef, takeover: bool) -> Help {
-    let body = if takeover { BODY_TAKEOVER } else { BODY_WINDOWED };
+    let body = if takeover {
+        BODY_TAKEOVER
+    } else {
+        BODY_WINDOWED
+    };
     let title_h = (TITLE_PX * 1.4) as usize;
     let line_h = (BODY_PX * 1.3) as usize;
     let footer_h = (FOOTER_PX * 1.4) as usize;
@@ -154,10 +167,10 @@ pub fn show(surf: &mut Surface, font: &FontRef, takeover: bool) -> Help {
     for l in body {
         wmax = wmax.max(script::measure(font, l, BODY_PX));
     }
-    let pw = (wmax as usize + 2 * PAD).min(SCREEN_W - 40);
+    let pw = (wmax as usize + 2 * PAD).min(screen_w().saturating_sub(40));
     let ph = PAD + title_h + line_h / 2 + body.len() * line_h + footer_h + PAD;
-    let px = (SCREEN_W - pw) / 2;
-    let py = (SCREEN_H.saturating_sub(ph)) / 2;
+    let px = (screen_w() - pw) / 2;
+    let py = (screen_h().saturating_sub(ph)) / 2;
 
     let saved = surf.copy_rect(px, py, pw, ph);
     surf.fill_rect(px, py, pw, ph, WHITE);
@@ -178,7 +191,14 @@ pub fn show(surf: &mut Surface, font: &FontRef, takeover: bool) -> Help {
     let mut region = BBox::empty();
     region.add(px as i32, py as i32, 2);
     region.add((px + pw) as i32, (py + ph) as i32, 2);
-    Help { region, x: px, y: py, w: pw, h: ph, saved }
+    Help {
+        region,
+        x: px,
+        y: py,
+        w: pw,
+        h: ph,
+        saved,
+    }
 }
 
 impl Help {
@@ -192,18 +212,27 @@ impl Help {
 /// Replace the page with the full-screen sleep card; returns the saved page
 /// pixels so waking can restore them exactly.
 pub fn show_sleep(surf: &mut Surface, font: &FontRef) -> Vec<u8> {
-    let saved = surf.copy_rect(0, 0, SCREEN_W, SCREEN_H);
-    surf.fill_rect(0, 0, SCREEN_W, SCREEN_H, WHITE);
-    frame(surf, 48, 48, SCREEN_W - 96, SCREEN_H - 96, 4);
-    frame(surf, 66, 66, SCREEN_W - 132, SCREEN_H - 132, 1);
-    let y = SCREEN_H * 38 / 100;
-    blit_centered(surf, font, "The diary sleeps.", 116.0, 0, SCREEN_W, y);
-    blit_centered(surf, font, "Press the button to wake it.", 56.0, 0, SCREEN_W, y + 230);
+    let (w, h) = (screen_w(), screen_h());
+    let saved = surf.copy_rect(0, 0, w, h);
+    surf.fill_rect(0, 0, w, h, WHITE);
+    frame(surf, 48, 48, w - 96, h - 96, 4);
+    frame(surf, 66, 66, w - 132, h - 132, 1);
+    let y = h * 38 / 100;
+    blit_centered(surf, font, "MagicPaper sleeps.", 116.0, 0, w, y);
+    blit_centered(
+        surf,
+        font,
+        "Press the button to wake it.",
+        56.0,
+        0,
+        w,
+        y + 230,
+    );
     saved
 }
 
 pub fn restore_sleep(surf: &mut Surface, saved: &[u8]) {
-    surf.paste_rect(0, 0, SCREEN_W, SCREEN_H, saved);
+    surf.paste_rect(0, 0, screen_w(), screen_h(), saved);
 }
 
 fn frame(surf: &mut Surface, x: usize, y: usize, w: usize, h: usize, t: usize) {
@@ -213,7 +242,15 @@ fn frame(surf: &mut Surface, x: usize, y: usize, w: usize, h: usize, t: usize) {
     surf.fill_rect(x + w - t, y, t, h, BLACK);
 }
 
-fn blit_centered(surf: &mut Surface, font: &FontRef, text: &str, px_size: f32, panel_x: usize, panel_w: usize, y: usize) {
+fn blit_centered(
+    surf: &mut Surface,
+    font: &FontRef,
+    text: &str,
+    px_size: f32,
+    panel_x: usize,
+    panel_w: usize,
+    y: usize,
+) {
     let line = script::rasterize_line(font, text, px_size);
     let x = panel_x + panel_w.saturating_sub(line.width) / 2;
     for row in 0..line.height {
@@ -273,7 +310,10 @@ mod tests {
         assert!(!looks_like_question_mark(&question_mark(0.5, true, false)));
         // "!" — vertical bar plus dot.
         let bar: Vec<(i32, i32)> = (0..40).map(|i| (200, 60 + i * 12)).collect();
-        assert!(!looks_like_question_mark(&[stroke(&bar), stroke(&[(200, 600), (204, 604)])]));
+        assert!(!looks_like_question_mark(&[
+            stroke(&bar),
+            stroke(&[(200, 600), (204, 604)])
+        ]));
         // "7" — flat top bar, diagonal descender.
         let mut seven: Vec<(i32, i32)> = (0..20).map(|i| (80 + i * 12, 60)).collect();
         seven.extend((0..40).map(|i| (320 - i * 4, 60 + i * 12)));
@@ -285,12 +325,18 @@ mod tests {
         // Empty / too many strokes.
         assert!(!looks_like_question_mark(&[]));
         let dot = stroke(&[(0, 0), (1, 1)]);
-        assert!(!looks_like_question_mark(&[dot.clone(), dot.clone(), dot.clone(), dot]));
+        assert!(!looks_like_question_mark(&[
+            dot.clone(),
+            dot.clone(),
+            dot.clone(),
+            dot
+        ]));
     }
 
     #[test]
     fn modal_renders_and_restores() {
-        let (w, h) = (SCREEN_W, SCREEN_H);
+        crate::fb::test_init_screen();
+        let (w, h) = (screen_w(), screen_h());
         let mut buf = vec![0xFFu8; w * h * 4];
         let ptr = buf.as_mut_ptr();
         let mut surf = Surface::new(ptr, buf.len(), w, h, w * 4, crate::surface::PixFmt::Rgb32);
@@ -336,7 +382,8 @@ mod tests {
 
     #[test]
     fn sleep_page_renders_and_restores() {
-        let (w, h) = (SCREEN_W, SCREEN_H);
+        crate::fb::test_init_screen();
+        let (w, h) = (screen_w(), screen_h());
         let mut buf = vec![0xFFu8; w * h * 4];
         let ptr = buf.as_mut_ptr();
         let mut surf = Surface::new(ptr, buf.len(), w, h, w * 4, crate::surface::PixFmt::Rgb32);
@@ -371,6 +418,10 @@ mod tests {
         eprintln!("sleep snapshot: {}", out.display());
 
         restore_sleep(&mut surf, &saved);
-        assert_eq!(before, surf.copy_rect(0, 0, w, h), "sleep restore is not exact");
+        assert_eq!(
+            before,
+            surf.copy_rect(0, 0, w, h),
+            "sleep restore is not exact"
+        );
     }
 }

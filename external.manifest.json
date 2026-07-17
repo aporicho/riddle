@@ -1,8 +1,8 @@
 {
   "id": "riddle",
-  "name": "The Diary",
-  "version": "0.3.0",
-  "description": "An enchanted diary: write to it with the pen — it writes back, and it remembers.",
+  "name": "MagicPaper",
+  "version": "0.4.2",
+  "description": "Living magical paper: write with the pen — MP replies, remembers, and performs recurring tasks.",
   "application": "appload-launch.sh",
   "qtfb": false
 }

@@ -14,7 +14,12 @@ pub struct Ink {
 
 impl Ink {
     pub fn new() -> Self {
-        Self { strokes: Vec::new(), current: Vec::new(), last_erase: None, bbox: BBox::empty() }
+        Self {
+            strokes: Vec::new(),
+            current: Vec::new(),
+            last_erase: None,
+            bbox: BBox::empty(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -105,9 +110,9 @@ impl Ink {
     }
 
     /// Rasterize the ink region to a grayscale PNG for the oracle.
-    /// Crops to the ink bounding box and box-downscales so the long side stays
-    /// ≤ 800px (at least 2x): the model reads handwriting fine at that scale,
-    /// and image pixels are the dominant vision-token / latency cost.
+    /// Crops to the ink bounding box and only downsamples when its long side
+    /// exceeds the configured limit. Small handwriting stays at native
+    /// resolution so similar Chinese strokes survive the vision round-trip.
     pub fn to_png(&self, surf: &Surface, path: &str) -> std::io::Result<()> {
         if self.bbox.is_empty() {
             return Err(std::io::Error::other("no ink"));
@@ -117,8 +122,13 @@ impl Ink {
         let y0 = (by - 20).max(0) as usize;
         let x1 = ((bx + bw + 20) as usize).min(surf.w);
         let y1 = ((by + bh + 20) as usize).min(surf.h);
-        let f = ((x1 - x0).max(y1 - y0)).div_ceil(800).max(2);
-        let (w, h) = ((x1 - x0) / f, (y1 - y0) / f);
+        let max_edge = std::env::var("RIDDLE_IMAGE_MAX_EDGE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v >= 400)
+            .unwrap_or(1600);
+        let f = ((x1 - x0).max(y1 - y0)).div_ceil(max_edge).max(1);
+        let (w, h) = (((x1 - x0) / f).max(1), ((y1 - y0) / f).max(1));
 
         let mut gray = vec![0u8; w * h];
         for oy in 0..h {
@@ -126,7 +136,8 @@ impl Ink {
                 let mut acc = 0u32;
                 for sy in 0..f {
                     for sx in 0..f {
-                        acc += surf.luma((x0 + ox * f + sx) as i32, (y0 + oy * f + sy) as i32) as u32;
+                        acc +=
+                            surf.luma((x0 + ox * f + sx) as i32, (y0 + oy * f + sy) as i32) as u32;
                     }
                 }
                 gray[oy * w + ox] = (acc / (f * f) as u32) as u8;
@@ -177,6 +188,7 @@ mod tests {
     use crate::surface::PixFmt;
 
     fn surf() -> (Vec<u8>, Surface) {
+        crate::fb::test_init_screen();
         let mut buf = vec![0xFFu8; 400 * 400 * 4];
         let ptr = buf.as_mut_ptr();
         let s = Surface::new(ptr, buf.len(), 400, 400, 400 * 4, PixFmt::Rgb32);
@@ -198,8 +210,15 @@ mod tests {
         // Erase through the middle: the stroke splits, points vanish.
         ink.erase_point(&mut s, 110, 100, 20);
         let after: usize = ink.stroke_list().iter().map(|s| s.len()).sum();
-        assert!(after < before, "erase kept every point ({after} of {before})");
-        assert_eq!(ink.stroke_list().len(), 2, "middle-erase should split the stroke");
+        assert!(
+            after < before,
+            "erase kept every point ({after} of {before})"
+        );
+        assert_eq!(
+            ink.stroke_list().len(),
+            2,
+            "middle-erase should split the stroke"
+        );
         // No surviving point lies under the eraser.
         for st in ink.stroke_list() {
             for &(x, y, _) in st {

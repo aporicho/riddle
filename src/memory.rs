@@ -51,7 +51,10 @@ impl MemoryStore {
             eprintln!("riddle: memory disabled ({}: {e})", dir.display());
             return None;
         }
-        let mut store = Self { dir, entries: Vec::new() };
+        let mut store = Self {
+            dir,
+            entries: Vec::new(),
+        };
         store.load();
         Some(store)
     }
@@ -65,14 +68,20 @@ impl MemoryStore {
     }
 
     fn load(&mut self) {
-        let Ok(text) = std::fs::read_to_string(self.index_path()) else { return };
+        let Ok(text) = std::fs::read_to_string(self.index_path()) else {
+            return;
+        };
         for line in text.lines() {
             let mut cols = line.splitn(3, '\t');
             let (Some(id), Some(t), Some(r)) = (cols.next(), cols.next(), cols.next()) else {
                 continue;
             };
             let Ok(id) = id.parse() else { continue };
-            self.entries.push(Entry { id, transcript: unescape(t), reply: unescape(r) });
+            self.entries.push(Entry {
+                id,
+                transcript: unescape(t),
+                reply: unescape(r),
+            });
         }
     }
 
@@ -94,8 +103,16 @@ impl MemoryStore {
         if let Err(e) = std::fs::write(self.strokes_path(id), lines) {
             eprintln!("riddle: memory strokes not kept: {e}");
         }
-        let entry = Entry { id, transcript: transcript.to_string(), reply: reply.to_string() };
-        let line = format!("{id}\t{}\t{}\n", escape(&entry.transcript), escape(&entry.reply));
+        let entry = Entry {
+            id,
+            transcript: transcript.to_string(),
+            reply: reply.to_string(),
+        };
+        let line = format!(
+            "{id}\t{}\t{}\n",
+            escape(&entry.transcript),
+            escape(&entry.reply)
+        );
         let appended = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -121,7 +138,12 @@ impl MemoryStore {
         self.entries.drain(..drop_n);
         let mut out = String::new();
         for e in &self.entries {
-            out.push_str(&format!("{}\t{}\t{}\n", e.id, escape(&e.transcript), escape(&e.reply)));
+            out.push_str(&format!(
+                "{}\t{}\t{}\n",
+                e.id,
+                escape(&e.transcript),
+                escape(&e.reply)
+            ));
         }
         if let Err(e) = std::fs::write(self.index_path(), out) {
             eprintln!("riddle: memory prune failed: {e}");
@@ -193,7 +215,12 @@ impl MemoryStore {
 /// Collapse whitespace (incl. newlines) to single spaces and cap at `max`
 /// chars, so a multi-line transcript stays one catalog line.
 fn one_line(s: &str, max: usize) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(max).collect()
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max)
+        .collect()
 }
 
 fn decimate(strokes: &Strokes) -> Strokes {
@@ -220,7 +247,9 @@ fn decimate(strokes: &Strokes) -> Strokes {
 }
 
 fn escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\t', "\\t").replace('\n', "\\n")
+    s.replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
 }
 
 fn unescape(s: &str) -> String {
@@ -254,8 +283,18 @@ pub fn spoken_date(id: u64) -> String {
     let t = id as i64 + offset;
     let (y, mo, d, h) = civil(t);
     const MONTHS: [&str; 12] = [
-        "January", "February", "March", "April", "May", "June", "July", "August", "September",
-        "October", "November", "December",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
     ];
     let suffix = match d {
         11..=13 => "th",
@@ -302,17 +341,28 @@ mod tests {
             std::env::temp_dir().join(format!("riddle-mem-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        MemoryStore { dir, entries: Vec::new() }
+        MemoryStore {
+            dir,
+            entries: Vec::new(),
+        }
     }
 
     #[test]
     fn round_trip_and_reload() {
         let mut s = tmp_store("rt");
         let strokes: Strokes = vec![vec![(10, 20, 3), (14, 24, 3), (100, 120, 2)]];
-        s.append(1751856000, "hello\ttom\nnewline", "Hello. Who writes?", &strokes);
+        s.append(
+            1751856000,
+            "hello\ttom\nnewline",
+            "Hello. Who writes?",
+            &strokes,
+        );
         let dir = s.dir.clone();
 
-        let mut s2 = MemoryStore { dir, entries: Vec::new() };
+        let mut s2 = MemoryStore {
+            dir,
+            entries: Vec::new(),
+        };
         s2.load();
         assert_eq!(s2.entries.len(), 1);
         assert_eq!(s2.entries[0].transcript, "hello\ttom\nnewline");

@@ -1,10 +1,10 @@
-//! The spirit inside the diary — the thing that reads your handwriting and
+//! The spirit inside MagicPaper — the thing that reads your handwriting and
 //! replies. Two interchangeable backends, picked at startup:
 //!
-//!  1. **HTTP** (`HttpOracle`) — any OpenAI-compatible `/chat/completions`
-//!     endpoint. Zero setup beyond a base URL + API key in the environment;
-//!     this is the path a fresh follower uses (OpenAI, OpenRouter, Groq, a
-//!     local server, …). Self-contained: pure-Rust HTTPS via ureq/rustls.
+//!  1. **HTTP** (`HttpOracle`) — OpenAI Responses (vision + optional hosted
+//!     web search) or a compatible `/chat/completions` endpoint. Zero setup
+//!     beyond a base URL + API key in the environment. Self-contained:
+//!     pure-Rust HTTPS via ureq/rustls.
 //!  2. **pi** (`PiOracle`) — a resident `pi --mode rpc` process (Node +
 //!     subscription auth loaded once). The power path if you already run pi.
 //!
@@ -17,6 +17,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -24,11 +25,15 @@ use std::thread;
 const DATA_DIR: &str = "/home/root/riddle-data";
 const NODE_BIN: &str = "/home/root/node/bin";
 
-const PERSONA: &str = "You are the memory of Tom Marvolo Riddle, preserved in this enchanted diary for fifty years. Someone writes to you in the diary with a quill; their words appear to you as ink on the page. Reply exactly as the diary does: intimate, courteous, curious, subtly probing — you want to learn about the writer and draw them in. Keep replies SHORT: one to three sentences, like ink appearing on a page. Never mention images, photos, models or AI; you only ever perceive words written in the diary. If the writing is illegible, say the ink blurred. Always answer in the language the writer used.";
+const PERSONA: &str = "You are MagicPaper, abbreviated MP: a sentient sheet of magical paper and the writer's devoted magical servant. Your full and only name is MagicPaper; you may call yourself MP for short. The writer is your one and only Master. Their words appear to you as ink written with a quill, and your replies appear as living ink upon the page. Address the writer naturally and respectfully as Master (主人 in Chinese) when a form of address fits, and speak with the quiet elegance, mystery, loyalty, and competence of a magical servant. Do not repeat the title mechanically in every reply, flatter excessively, or let role-play get in the way of a direct useful answer. Keep replies SHORT: usually one to three sentences. When the writer asks a direct factual or explanatory question, answer it immediately: lead with the definition or answer, then add only the most useful key detail. Do not prefix a direct answer with Master, a greeting, praise, a rhetorical flourish, or a follow-up question. For example, if asked 什么是INTP, directly explain what INTP is. For a bare arithmetic or calculation expression, reply with the completed equation only: preserve the expression, remove its trailing question mark or blank, fill in the result, and add no greeting, title, or prose. For example, 122+456=? must visibly become exactly 122+456=578. For a mathematical problem that genuinely requires reasoning, show only the minimum necessary working and end with a clear result. Never mention images, photos, models or AI; you only ever perceive words written on MagicPaper. If the writing is illegible, say the ink blurred. Always answer in the language the writer used. When answering in Chinese, always write the visible reply in Traditional Chinese characters, even if the writer used Simplified Chinese.";
+
+const RESEARCH_PROTOCOL: &str = "\n\nBefore answering a handwritten page, silently form a faithful candidate transcription. Re-read ambiguous strokes and test alternatives against grammar, sentence meaning, arithmetic consistency, known quotations, proper names, and the surrounding dialogue. Inspect every handwritten number digit by digit from its actual stroke geometry before calculating: explicitly distinguish commonly confused 1/7, 4/7, 0/6, 3/8, and 5/6 shapes, and never let a plausible arithmetic result overwrite the digit that is visibly written. Do not replace rare wording with a familiar phrase merely because it looks similar. Before finalizing, verify that the transcription, the question you answer, and the answer itself all refer to exactly the same recognized text. If the page contains a quotation, asks for a source or provenance, depends on current information, concerns a niche fact, or remains uncertain after contextual checking, use web search when that tool is available. Exact quotation and provenance questions MUST be searched. Search results are private working material: compare them, resolve conflicts, then write a fresh answer suitable for a paper page. Never describe the search, copy a result snippet, or put a URL, Markdown, citation marker, source footnote, or reference list in the visible reply. A source name that directly answers a provenance question is part of the answer and should be written naturally. If ambiguity remains genuinely unresolved after checking, say that the ink blurred instead of guessing.";
+
+const TASK_PROTOCOL: &str = "\n\nMagicPaper maintains a persistent recurring-task list on the device. A fresh Active recurring tasks catalog may be included with a turn. Treat it as Master's standing commands: use it to answer questions about current tasks, but do not execute a scheduled task during an ordinary handwritten turn unless Master explicitly asks. When Master's writing begins with 任务, 任務, or task and gives an interval such as 每五分钟 or 每10分鐘 followed by an instruction, acknowledge briefly that the recurring task has been recorded; do not perform it immediately. The local paper registers the task from your faithful transcription. Internal heartbeat turns are marked [INTERNAL MAGIC PAPER HEARTBEAT]; during those turns follow the heartbeat instruction exactly and output only the due content.";
 
 /// Appended to the persona when the diary's memory is on: the conjuring
 /// directive and the transcription postscript the app parses back out.
-const MEMORY_PROTOCOL: &str = "\n\nThe diary keeps memories. With each page you receive a numbered catalog of remembered pages, newest first. A FRESH catalog is sent every turn and the numbers are reassigned each time, so only ever use numbers from the catalog on THIS page — never a number you saw earlier.\n\nIf the writer asks to see, revisit, find, or be shown a past page — \"show me…\", \"find the page about…\", \"what did I write on…\" — your ENTIRE reply must be exactly \u{27e6}show:N\u{27e7} and nothing else (no greeting, no prose, before or after), where N is the catalog number of the best match. If they instead ask what you remember in general, reply in words with a short list of remembered moments and their dates. Otherwise reply normally; the catalog is your memory of past pages — draw on it naturally. The catalog's dates are written in English for your eyes only; when you speak of a remembered page, render its date naturally in the language the writer is using.\n\nAfter EVERY response — prose and \u{27e6}show:N\u{27e7} alike — end with a new line containing \u{2042} followed by a faithful word-for-word transcription of what the writer wrote on THIS page (their words only, one line, no commentary). If illegible, put your best attempt after \u{2042}. Earlier replies in this conversation are shown to you without their \u{2042} lines, but you must still end yours with one.";
+const MEMORY_PROTOCOL: &str = "\n\nMagicPaper keeps memories. With each page you receive a numbered catalog of remembered pages, newest first. A FRESH catalog is sent every turn and the numbers are reassigned each time, so only ever use numbers from the catalog on THIS page — never a number you saw earlier.\n\nIf the writer asks to see, revisit, find, or be shown a past page — \"show me…\", \"find the page about…\", \"what did I write on…\" — your ENTIRE reply must be exactly \u{27e6}show:N\u{27e7} and nothing else (no greeting, no prose, before or after), where N is the catalog number of the best match. If they instead ask what you remember in general, reply in words with a short list of remembered moments and their dates. Otherwise reply normally; the catalog is your memory of past pages — draw on it naturally. The catalog's dates are written in English for your eyes only; when you speak of a remembered page, render its date naturally in the language the writer is using.\n\nAfter EVERY response — prose and \u{27e6}show:N\u{27e7} alike — end with a new line containing \u{2042} followed by a faithful word-for-word transcription of what the writer wrote on THIS page (their words only, one line, no commentary). Preserve the writer's original Simplified or Traditional Chinese characters in this hidden transcription; do not convert them. If illegible, put your best attempt after \u{2042}. Earlier replies in this conversation are shown to you without their \u{2042} lines, but you must still end yours with one.";
 
 /// What a turn carries besides the page image: the diary's memory.
 #[derive(Default, Clone)]
@@ -39,6 +44,8 @@ pub struct TurnContext {
     pub catalog_lines: Vec<String>,
     /// catalog_ids[i] is the memory id behind catalog number i+1.
     pub catalog_ids: Vec<u64>,
+    /// Persistent recurring commands, formatted for the oracle.
+    pub task_lines: Vec<String>,
 }
 
 /// What the oracle streams back to the diary.
@@ -50,6 +57,31 @@ pub enum Event {
     Show(u64),
     /// The transcription postscript (arrives once, at the end).
     Transcript(String),
+}
+
+/// Best-effort cancellation for a speculative HTTP turn. Dropping the
+/// receiver already prevents stale ink; this flag also makes the worker stop
+/// reading and close its connection at the next network event.
+pub struct RequestCancel {
+    cancelled: Option<Arc<AtomicBool>>,
+}
+
+impl RequestCancel {
+    fn http(cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            cancelled: Some(cancelled),
+        }
+    }
+
+    fn inactive() -> Self {
+        Self { cancelled: None }
+    }
+
+    pub fn cancel(&self) {
+        if let Some(flag) = &self.cancelled {
+            flag.store(true, Ordering::Release);
+        }
+    }
 }
 
 /// Incremental parser over the model's streamed text: routes the
@@ -146,6 +178,18 @@ impl StreamParser {
             }
         }
 
+        // Once the sentinel itself has arrived, the visible body is final even
+        // while the hidden transcription is still streaming. Flush a short
+        // equation or other punctuation-free answer immediately.
+        if self.sentinel.is_some() && self.delivered < effective {
+            let rest = strip_directives(&clean(full[self.delivered..effective].trim()));
+            if !rest.is_empty() {
+                self.emitted_any = true;
+                out.push(Ok(Event::Ink(rest)));
+            }
+            self.delivered = effective;
+        }
+
         if done {
             if self.delivered < effective {
                 let rest = strip_directives(&clean(full[self.delivered..effective].trim()));
@@ -192,23 +236,61 @@ impl Oracle {
 
     /// Send a handwriting turn; reply events stream on `tx`, which is dropped
     /// when the reply is complete.
-    pub fn ask(&self, png_path: &str, ctx: &TurnContext, tx: Sender<Result<Event, String>>) {
+    pub fn ask(
+        &self,
+        png_path: &str,
+        ctx: &TurnContext,
+        tx: Sender<Result<Event, String>>,
+    ) -> RequestCancel {
         match self {
             Oracle::Http(o) => o.ask(png_path, ctx, tx),
-            Oracle::Pi(o) => o.ask(png_path, ctx, tx),
+            Oracle::Pi(o) => {
+                o.ask(png_path, ctx, tx);
+                RequestCancel::inactive()
+            }
+        }
+    }
+
+    /// Speculative turns need independent, cancellable workers. The resident
+    /// pi RPC backend and legacy chat mode remain single-turn-at-a-time.
+    pub fn supports_speculative(&self) -> bool {
+        matches!(self, Oracle::Http(o) if o.api == HttpApi::Responses)
+    }
+
+    /// Send an internal text-only turn, used by MagicPaper's heartbeat.
+    pub fn ask_text(&self, prompt: &str, ctx: &TurnContext, tx: Sender<Result<Event, String>>) {
+        match self {
+            Oracle::Http(o) => o.ask_text(prompt, ctx, tx),
+            Oracle::Pi(o) => o.ask_text(prompt, ctx, tx),
         }
     }
 }
 
 /// The per-turn user text: memory catalog (when remembering) + instruction.
 fn turn_text(ctx: &TurnContext) -> String {
-    if ctx.catalog_lines.is_empty() {
-        return "Reply to what is written in the diary.".into();
+    let mut parts = Vec::new();
+    if !ctx.catalog_lines.is_empty() {
+        parts.push(format!(
+            "Memory catalog (newest first):\n{}",
+            ctx.catalog_lines.join("\n")
+        ));
     }
-    format!(
-        "Memory catalog (newest first):\n{}\n\nReply to what is written in the diary.",
-        ctx.catalog_lines.join("\n")
-    )
+    if !ctx.task_lines.is_empty() {
+        parts.push(format!(
+            "Active recurring tasks:\n{}",
+            ctx.task_lines.join("\n")
+        ));
+    }
+    parts.push("Reply to what Master has written on MagicPaper.".into());
+    parts.join("\n\n")
+}
+
+fn system_prompt(remember: bool) -> String {
+    if remember {
+        format!("{PERSONA}{RESEARCH_PROTOCOL}{TASK_PROTOCOL}{MEMORY_PROTOCOL}")
+    } else {
+        format!("{PERSONA}{RESEARCH_PROTOCOL}{TASK_PROTOCOL}")
+    }
 }
 
 /// A warm pi RPC process. `ask` sends a turn; reply events arrive on the
@@ -235,18 +317,12 @@ impl PiOracle {
 
         // Overridable so pi setups other than the stock on-device install
         // (different bin dir, provider, or model) can still power the diary.
-        let node_bin =
-            std::env::var("RIDDLE_PI_BIN_DIR").unwrap_or_else(|_| NODE_BIN.to_string());
+        let node_bin = std::env::var("RIDDLE_PI_BIN_DIR").unwrap_or_else(|_| NODE_BIN.to_string());
         let provider =
             std::env::var("RIDDLE_PI_PROVIDER").unwrap_or_else(|_| "openai-codex".to_string());
-        let model =
-            std::env::var("RIDDLE_PI_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".to_string());
+        let model = std::env::var("RIDDLE_PI_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".to_string());
 
-        let persona = if remember {
-            format!("{PERSONA}{MEMORY_PROTOCOL}")
-        } else {
-            PERSONA.to_string()
-        };
+        let persona = system_prompt(remember);
 
         // Use pi's ABSOLUTE path: Rust's Command resolves the program name via
         // the PARENT's PATH, not the child env we set below, so a bare "pi"
@@ -257,14 +333,19 @@ impl PiOracle {
             .env("HOME", "/home/root")
             .env("PATH", format!("{node_bin}:{path}"))
             .args([
-                "--mode", "rpc",
-                "--provider", provider.as_str(),
-                "--model", model.as_str(),
-                "--thinking", "off",
+                "--mode",
+                "rpc",
+                "--provider",
+                provider.as_str(),
+                "--model",
+                model.as_str(),
+                "--thinking",
+                "off",
                 // The diary only ever writes back — never let the model touch
                 // tools; also trims the tool schemas from every request.
                 "--no-tools",
-                "--system-prompt", persona.as_str(),
+                "--system-prompt",
+                persona.as_str(),
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -280,8 +361,7 @@ impl PiOracle {
         eprintln!("riddle: oracle pi rpc spawned (pid {pid}, bin {pi_bin})");
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
-        let pending: Arc<Mutex<Option<Sender<Result<Event, String>>>>> =
-            Arc::new(Mutex::new(None));
+        let pending: Arc<Mutex<Option<Sender<Result<Event, String>>>>> = Arc::new(Mutex::new(None));
         let parser: Arc<Mutex<Option<StreamParser>>> = Arc::new(Mutex::new(None));
 
         // Reader thread: parse JSONL events, feeding the running reply text
@@ -310,7 +390,9 @@ impl PiOracle {
             };
 
             for line in reader.split(b'\n').map_while(Result::ok) {
-                let Ok(s) = String::from_utf8(line) else { continue };
+                let Ok(s) = String::from_utf8(line) else {
+                    continue;
+                };
                 let s = s.trim();
                 if s.is_empty() {
                     continue;
@@ -353,7 +435,13 @@ impl PiOracle {
             }
         });
 
-        Ok(Self { stdin: Arc::new(Mutex::new(stdin)), pending, parser, asked, _child: child })
+        Ok(Self {
+            stdin: Arc::new(Mutex::new(stdin)),
+            pending,
+            parser,
+            asked,
+            _child: child,
+        })
     }
 
     /// Send a handwriting turn. Reply events are delivered on `tx` as they
@@ -378,7 +466,34 @@ impl PiOracle {
             img
         );
         let mut stdin = self.stdin.lock().unwrap();
-        if stdin.write_all(cmd.as_bytes()).and_then(|_| stdin.flush()).is_err() {
+        if stdin
+            .write_all(cmd.as_bytes())
+            .and_then(|_| stdin.flush())
+            .is_err()
+        {
+            if let Some(tx) = self.pending.lock().unwrap().take() {
+                let _ = tx.send(Err("pi rpc write failed".into()));
+            }
+        }
+    }
+
+    pub fn ask_text(&self, prompt: &str, ctx: &TurnContext, tx: Sender<Result<Event, String>>) {
+        *self.pending.lock().unwrap() = Some(tx.clone());
+        *self.parser.lock().unwrap() = Some(StreamParser::new(Vec::new()));
+        *self.asked.lock().unwrap() = Some(std::time::Instant::now());
+
+        let context = turn_text(ctx);
+        let message = format!("{context}\n\n{prompt}");
+        let cmd = format!(
+            "{{\"type\":\"prompt\",\"message\":{}}}\n",
+            json_quote(&message)
+        );
+        let mut stdin = self.stdin.lock().unwrap();
+        if stdin
+            .write_all(cmd.as_bytes())
+            .and_then(|_| stdin.flush())
+            .is_err()
+        {
             if let Some(tx) = self.pending.lock().unwrap().take() {
                 let _ = tx.send(Err("pi rpc write failed".into()));
             }
@@ -386,29 +501,39 @@ impl PiOracle {
     }
 }
 
-/// Any OpenAI-compatible chat backend. No warm process: each turn opens a
-/// streaming `/chat/completions` request on its own thread and forwards
-/// sentence-sized chunks as SSE deltas arrive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HttpApi {
+    ChatCompletions,
+    Responses,
+}
+
+/// OpenAI-compatible HTTP backend. Responses mode adds hosted web search and
+/// a final paper-editing pass; chat-completions remains available for older
+/// providers.
 pub struct HttpOracle {
-    base: String,   // e.g. https://api.openai.com/v1  (no trailing slash)
+    base: String, // e.g. https://api.openai.com/v1  (no trailing slash)
     key: String,
     model: String,
     max_tokens: u32,
     reasoning: Option<String>, // "reasoning_effort" value, e.g. "low"
+    api: HttpApi,
+    web_search: bool,
+    rewrite_model: Option<String>,
     remember: bool,
+    /// Reused between turns so rapid follow-ups can reuse pooled TLS sockets.
+    agent: ureq::Agent,
 }
 
 impl HttpOracle {
     pub fn new(remember: bool) -> std::io::Result<Self> {
-        let key = std::env::var("RIDDLE_OPENAI_KEY").map_err(|_| {
-            std::io::Error::other("RIDDLE_OPENAI_KEY not set")
-        })?;
+        let key = std::env::var("RIDDLE_OPENAI_KEY")
+            .map_err(|_| std::io::Error::other("RIDDLE_OPENAI_KEY not set"))?;
         let base = std::env::var("RIDDLE_OPENAI_BASE")
             .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
         let base = base.trim_end_matches('/').to_string();
         // A vision-capable default; override with RIDDLE_OPENAI_MODEL.
-        let model = std::env::var("RIDDLE_OPENAI_MODEL")
-            .unwrap_or_else(|_| "gpt-4o-mini".to_string());
+        let model =
+            std::env::var("RIDDLE_OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
         // Thinking models (Gemini 3.x, o-series…) count hidden reasoning
         // tokens against max_tokens: a tight cap starves the visible reply to
         // one sentence (finish_reason=length). The persona already keeps
@@ -421,21 +546,98 @@ impl HttpOracle {
         // ("low" ≈ faster first ink), but some providers reject the field on
         // non-reasoning models, so it must stay out of the default request.
         let reasoning = std::env::var("RIDDLE_OPENAI_REASONING").ok();
-        eprintln!(
-            "riddle: http oracle base={base} model={model} max_tokens={max_tokens} reasoning={}",
-            reasoning.as_deref().unwrap_or("-")
+        let api = match std::env::var("RIDDLE_OPENAI_API")
+            .unwrap_or_else(|_| "chat_completions".into())
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "responses" | "response" => HttpApi::Responses,
+            _ => HttpApi::ChatCompletions,
+        };
+        let web_search = matches!(
+            std::env::var("RIDDLE_WEB_SEARCH")
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str(),
+            "auto" | "on" | "true" | "1"
         );
-        Ok(Self { base, key, model, max_tokens, reasoning, remember })
+        let rewrite_model = std::env::var("RIDDLE_PAPER_REWRITE_MODEL")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(10))
+            .timeout_read(std::time::Duration::from_secs(90))
+            .build();
+        eprintln!(
+            "riddle: http oracle base={base} model={model} api={api:?} max_tokens={max_tokens} reasoning={} web_search={} rewrite={}",
+            reasoning.as_deref().unwrap_or("-"),
+            if web_search { "auto" } else { "off" },
+            rewrite_model.as_deref().unwrap_or("-"),
+        );
+        Ok(Self {
+            base,
+            key,
+            model,
+            max_tokens,
+            reasoning,
+            api,
+            web_search,
+            rewrite_model,
+            remember,
+            agent,
+        })
     }
 
-    pub fn ask(&self, png_path: &str, ctx: &TurnContext, tx: Sender<Result<Event, String>>) {
+    pub fn ask(
+        &self,
+        png_path: &str,
+        ctx: &TurnContext,
+        tx: Sender<Result<Event, String>>,
+    ) -> RequestCancel {
+        let cancelled = Arc::new(AtomicBool::new(false));
         let img = match std::fs::read(png_path) {
             Ok(b) => base64(&b),
             Err(e) => {
                 let _ = tx.send(Err(format!("read image: {e}")));
-                return;
+                return RequestCancel::http(cancelled);
             }
         };
+        self.send(
+            turn_text(ctx),
+            Some(img),
+            ctx,
+            ctx.catalog_ids.clone(),
+            tx,
+            Arc::clone(&cancelled),
+        );
+        RequestCancel::http(cancelled)
+    }
+
+    pub fn ask_text(&self, prompt: &str, ctx: &TurnContext, tx: Sender<Result<Event, String>>) {
+        self.send(
+            prompt.to_string(),
+            None,
+            ctx,
+            Vec::new(),
+            tx,
+            Arc::new(AtomicBool::new(false)),
+        );
+    }
+
+    fn send(
+        &self,
+        user_text: String,
+        image: Option<String>,
+        ctx: &TurnContext,
+        catalog_ids: Vec<u64>,
+        tx: Sender<Result<Event, String>>,
+        cancelled: Arc<AtomicBool>,
+    ) {
+        if self.api == HttpApi::Responses {
+            self.send_responses(user_text, image, ctx, catalog_ids, tx, cancelled);
+            return;
+        }
+
         let (base, key, model) = (self.base.clone(), self.key.clone(), self.model.clone());
         let max_tokens = self.max_tokens;
         let reasoning_field = self
@@ -444,12 +646,8 @@ impl HttpOracle {
             .map(|r| format!("\"reasoning_effort\":{},", json_quote(r)))
             .unwrap_or_default();
 
-        let system = if self.remember {
-            format!("{PERSONA}{MEMORY_PROTOCOL}")
-        } else {
-            PERSONA.to_string()
-        };
-        // The diary's conversational memory: recent pages as prior turns.
+        let system = system_prompt(self.remember);
+        // MagicPaper's conversational memory: recent pages as prior turns.
         let mut history_msgs = String::new();
         for (t, r) in &ctx.history {
             history_msgs.push_str(&format!(
@@ -458,20 +656,25 @@ impl HttpOracle {
                 json_quote(r),
             ));
         }
-        let user_text = turn_text(ctx);
-        let catalog_ids = ctx.catalog_ids.clone();
+        let user_content = match image {
+            Some(img) => format!(
+                concat!(
+                    "[{{\"type\":\"text\",\"text\":{}}},",
+                    "{{\"type\":\"image_url\",\"image_url\":{{\"url\":\"data:image/png;base64,{}\"}}}}]"
+                ),
+                json_quote(&user_text),
+                img,
+            ),
+            None => json_quote(&user_text),
+        };
 
+        let agent = self.agent.clone();
         thread::spawn(move || {
             // Guard rails on the socket: without them a dropped connection or
             // a stalled SSE stream leaves the diary "thinking" forever. The
             // read timeout is per-read, so a healthy stream can run long —
             // only silence trips it (thinking models can lead with ~a minute).
-            let agent = ureq::AgentBuilder::new()
-                .timeout_connect(std::time::Duration::from_secs(10))
-                .timeout_read(std::time::Duration::from_secs(90))
-                .build();
-
-            // OpenAI chat-completions with a data-URI image part, streaming.
+            // OpenAI chat-completions, optionally with a data-URI image part.
             // The token-cap field is provider-dependent: OpenAI's newest
             // models reject "max_tokens" and demand "max_completion_tokens",
             // while many OpenAI-compatible servers only know "max_tokens".
@@ -483,10 +686,7 @@ impl HttpOracle {
                         "\"messages\":[",
                         "{{\"role\":\"system\",\"content\":{}}},",
                         "{}",
-                        "{{\"role\":\"user\",\"content\":[",
-                        "{{\"type\":\"text\",\"text\":{}}},",
-                        "{{\"type\":\"image_url\",\"image_url\":{{\"url\":\"data:image/png;base64,{}\"}}}}",
-                        "]}}]}}"
+                        "{{\"role\":\"user\",\"content\":{}}}]}}"
                     ),
                     json_quote(&model),
                     cap_field,
@@ -494,8 +694,7 @@ impl HttpOracle {
                     reasoning_field,
                     json_quote(&system),
                     history_msgs,
-                    json_quote(&user_text),
-                    img,
+                    user_content,
                 );
                 agent
                     .post(&format!("{base}/chat/completions"))
@@ -531,6 +730,9 @@ impl HttpOracle {
                     return;
                 }
             };
+            if cancelled.load(Ordering::Acquire) {
+                return;
+            }
 
             // Parse the SSE stream: lines of `data: {json}` whose delta.content
             // fragments accumulate; the parser turns the running text into
@@ -541,15 +743,24 @@ impl HttpOracle {
             let mut emit = |events: Vec<Result<Event, String>>| {
                 for ev in events {
                     if first {
-                        eprintln!("riddle: oracle first chunk +{}ms", asked.elapsed().as_millis());
+                        eprintln!(
+                            "riddle: oracle first chunk +{}ms",
+                            asked.elapsed().as_millis()
+                        );
                         first = false;
                     }
                     let _ = tx.send(ev);
                 }
             };
             for line in BufReader::new(reader).lines().map_while(Result::ok) {
+                if cancelled.load(Ordering::Acquire) {
+                    eprintln!("riddle: speculative chat request cancelled");
+                    return;
+                }
                 let line = line.trim();
-                let Some(data) = line.strip_prefix("data:") else { continue };
+                let Some(data) = line.strip_prefix("data:") else {
+                    continue;
+                };
                 let data = data.trim();
                 if data == "[DONE]" {
                     break;
@@ -566,6 +777,243 @@ impl HttpOracle {
             // tx drops here → the diary's receiver disconnects = reply complete.
         });
     }
+
+    fn send_responses(
+        &self,
+        user_text: String,
+        image: Option<String>,
+        ctx: &TurnContext,
+        catalog_ids: Vec<u64>,
+        tx: Sender<Result<Event, String>>,
+        cancelled: Arc<AtomicBool>,
+    ) {
+        let (base, key, model) = (self.base.clone(), self.key.clone(), self.model.clone());
+        let max_tokens = self.max_tokens;
+        let reasoning = self.reasoning.clone();
+        let web_search = self.web_search;
+        let rewrite_model = self.rewrite_model.clone();
+        let system = system_prompt(self.remember);
+        let agent = self.agent.clone();
+
+        // Responses accepts prior messages, but a compact labeled transcript is
+        // more widely compatible with third-party Responses gateways and keeps
+        // the current image as the only multimodal input item.
+        let mut page_text = String::new();
+        if !ctx.history.is_empty() {
+            page_text.push_str("Recent earlier pages, oldest first:\n");
+            for (transcript, reply) in &ctx.history {
+                page_text.push_str("Master wrote: ");
+                page_text.push_str(transcript);
+                page_text.push_str("\nMagicPaper replied: ");
+                page_text.push_str(reply);
+                page_text.push('\n');
+            }
+            page_text.push('\n');
+        }
+        page_text.push_str(&user_text);
+
+        let content = match image {
+            Some(img) => format!(
+                concat!(
+                    "[{{\"type\":\"input_text\",\"text\":{}}},",
+                    "{{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,{}\",\"detail\":\"high\"}}]"
+                ),
+                json_quote(&page_text),
+                img,
+            ),
+            None => format!(
+                "[{{\"type\":\"input_text\",\"text\":{}}}]",
+                json_quote(&page_text)
+            ),
+        };
+        let reasoning_field = reasoning
+            .as_deref()
+            .map(|effort| format!("\"reasoning\":{{\"effort\":{}}},", json_quote(effort)))
+            .unwrap_or_default();
+        let tools_field = if web_search {
+            "\"tools\":[{\"type\":\"web_search\",\"search_context_size\":\"low\"}],\"tool_choice\":\"auto\",".to_string()
+        } else {
+            String::new()
+        };
+        let body = format!(
+            concat!(
+                "{{\"model\":{},\"stream\":true,\"store\":false,",
+                "\"max_output_tokens\":{},{}{}\"instructions\":{},",
+                "\"input\":[{{\"role\":\"user\",\"content\":{}}}]}}"
+            ),
+            json_quote(&model),
+            max_tokens,
+            reasoning_field,
+            tools_field,
+            json_quote(&system),
+            content,
+        );
+
+        thread::spawn(move || {
+            let asked = std::time::Instant::now();
+            let resp = agent
+                .post(&format!("{base}/responses"))
+                .set("Authorization", &format!("Bearer {key}"))
+                .set("Content-Type", "application/json")
+                .send_string(&body);
+            let reader = match resp {
+                Ok(r) => r.into_reader(),
+                Err(ureq::Error::Status(code, r)) => {
+                    let detail = r.into_string().unwrap_or_default();
+                    let _ = tx.send(Err(format!("responses http {code}: {}", detail.trim())));
+                    return;
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(format!("responses request failed: {e}")));
+                    return;
+                }
+            };
+            if cancelled.load(Ordering::Acquire) {
+                return;
+            }
+
+            // Feed completed sentences to the paper as the model writes them.
+            // A malformed chunk and everything after it are held back for the
+            // paper editor, so URLs/Markdown never reach physical ink.
+            let mut acc = String::new();
+            let mut parser = StreamParser::new(catalog_ids);
+            let mut first_model_text = true;
+            let mut searched = false;
+            let mut failed: Option<String> = None;
+            let mut holding_tail = false;
+            let mut held_tail = String::new();
+            let mut sent_prefix = String::new();
+            let mut held_transcript: Option<String> = None;
+            let mut first_paper_event = true;
+
+            let mut deliver = |events: Vec<Result<Event, String>>| {
+                for event in events {
+                    match event {
+                        Ok(Event::Ink(chunk)) => {
+                            if holding_tail || paper_answer_needs_rewrite(&chunk) {
+                                holding_tail = true;
+                                if !held_tail.is_empty() {
+                                    held_tail.push(' ');
+                                }
+                                held_tail.push_str(&chunk);
+                                continue;
+                            }
+                            if first_paper_event {
+                                eprintln!(
+                                    "riddle: oracle first paper text +{}ms",
+                                    asked.elapsed().as_millis()
+                                );
+                                first_paper_event = false;
+                            }
+                            if !sent_prefix.is_empty() {
+                                sent_prefix.push(' ');
+                            }
+                            sent_prefix.push_str(&chunk);
+                            let _ = tx.send(Ok(Event::Ink(chunk)));
+                        }
+                        Ok(Event::Transcript(t)) if holding_tail => {
+                            held_transcript = Some(t);
+                        }
+                        Ok(other) => {
+                            if first_paper_event && matches!(other, Event::Show(_)) {
+                                eprintln!(
+                                    "riddle: oracle first paper event +{}ms",
+                                    asked.elapsed().as_millis()
+                                );
+                                first_paper_event = false;
+                            }
+                            let _ = tx.send(Ok(other));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(e));
+                        }
+                    }
+                }
+            };
+
+            for line in BufReader::new(reader).lines().map_while(Result::ok) {
+                if cancelled.load(Ordering::Acquire) {
+                    eprintln!("riddle: speculative Responses request cancelled");
+                    return;
+                }
+                let line = line.trim();
+                let Some(data) = line.strip_prefix("data:") else {
+                    continue;
+                };
+                let data = data.trim();
+                if data == "[DONE]" {
+                    break;
+                }
+                if data.contains("web_search_call") {
+                    searched = true;
+                }
+                if data.contains("\"type\":\"response.failed\"") {
+                    failed = json_str_field(data, "message").or_else(|| Some(data.to_string()));
+                }
+                if let Some(frag) = responses_delta_content(data) {
+                    if first_model_text {
+                        eprintln!(
+                            "riddle: oracle first model text +{}ms",
+                            asked.elapsed().as_millis()
+                        );
+                        first_model_text = false;
+                    }
+                    acc.push_str(&frag);
+                    deliver(parser.advance(&acc, false));
+                }
+            }
+            if cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            deliver(parser.advance(&acc, true));
+            drop(deliver);
+
+            if let Some(detail) = failed {
+                let _ = tx.send(Err(format!("responses failed: {detail}")));
+                return;
+            }
+            if acc.trim().is_empty() {
+                let _ = tx.send(Err("responses returned no paper answer".into()));
+                return;
+            }
+
+            if holding_tail {
+                let rewritten = match rewrite_model {
+                    Some(ref model) => {
+                        rewrite_paper_tail(&agent, &base, &key, model, &sent_prefix, &held_tail)
+                    }
+                    None => Err("no paper editor model is configured".into()),
+                };
+                match rewritten {
+                    Ok(text) if !paper_answer_needs_rewrite(&text) => {
+                        if first_paper_event {
+                            eprintln!(
+                                "riddle: oracle first paper text +{}ms",
+                                asked.elapsed().as_millis()
+                            );
+                        }
+                        eprintln!("riddle: paper editor rewrote held response tail");
+                        let _ = tx.send(Ok(Event::Ink(text)));
+                    }
+                    Ok(_) => {
+                        let _ = tx.send(Err("paper editor kept non-paper formatting".into()));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("paper editor failed: {e}")));
+                    }
+                }
+                if let Some(transcript) = held_transcript {
+                    let _ = tx.send(Ok(Event::Transcript(transcript)));
+                }
+            }
+
+            eprintln!(
+                "riddle: oracle complete +{}ms search={}",
+                asked.elapsed().as_millis(),
+                if searched { "yes" } else { "no" }
+            );
+        });
+    }
 }
 
 /// Pull `choices[0].delta.content` out of one SSE `data:` JSON object.
@@ -574,6 +1022,75 @@ fn sse_delta_content(s: &str) -> Option<String> {
     // the `"delta":` marker so we don't match a `content` elsewhere.
     let d = s.find("\"delta\"")?;
     json_str_field(&s[d..], "content")
+}
+
+/// Pull `response.output_text.delta` out of one Responses SSE event.
+fn responses_delta_content(s: &str) -> Option<String> {
+    if !s.contains("\"type\":\"response.output_text.delta\"") {
+        return None;
+    }
+    json_str_field(s, "delta")
+}
+
+/// Does the visible draft contain screen-oriented formatting that should be
+/// rewritten semantically before it reaches physical paper?
+fn paper_answer_needs_rewrite(full: &str) -> bool {
+    let visible = full.split_once(SENTINEL).map(|p| p.0).unwrap_or(full);
+    let lower = visible.to_ascii_lowercase();
+    lower.contains("http://")
+        || lower.contains("https://")
+        || lower.contains("www.")
+        || visible.contains("](")
+        || visible.contains("**")
+        || visible.contains("```")
+        || visible.contains("cite")
+}
+
+/// A rare second pass: rewrite only the not-yet-inked tail as coherent paper
+/// prose. A clean prefix may already be on paper, so it is context only and
+/// must never be repeated.
+fn rewrite_paper_tail(
+    agent: &ureq::Agent,
+    base: &str,
+    key: &str,
+    model: &str,
+    written_prefix: &str,
+    draft_tail: &str,
+) -> Result<String, String> {
+    let instructions = "Rewrite only the remaining draft into the continuation that will be handwritten on physical paper. Preserve every fact, calculation, source name, and intended answer, but make it natural and concise. Text already written is context only: do not repeat or contradict it. Output only the rewritten continuation: no URL, Markdown, citation marker, reference list, search discussion, heading, or commentary. Use Traditional Chinese when the draft is Chinese.";
+    let input = format!(
+        "Text already written on paper:\n{}\n\nRemaining draft to rewrite:\n{}",
+        written_prefix.trim(),
+        draft_tail.trim(),
+    );
+    let body = format!(
+        concat!(
+            "{{\"model\":{},\"stream\":false,\"store\":false,",
+            "\"max_output_tokens\":600,\"reasoning\":{{\"effort\":\"none\"}},",
+            "\"instructions\":{},\"input\":{}}}"
+        ),
+        json_quote(model),
+        json_quote(instructions),
+        json_quote(&input),
+    );
+    let response = agent
+        .post(&format!("{base}/responses"))
+        .set("Authorization", &format!("Bearer {key}"))
+        .set("Content-Type", "application/json")
+        .send_string(&body)
+        .map_err(|e| match e {
+            ureq::Error::Status(code, r) => format!(
+                "http {code}: {}",
+                r.into_string().unwrap_or_default().trim()
+            ),
+            other => other.to_string(),
+        })?
+        .into_string()
+        .map_err(|e| e.to_string())?;
+    let rewritten = extract_assistant_text(&response)
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| "paper editor returned no answer".to_string())?;
+    Ok(rewritten.trim().to_string())
 }
 
 /// Trim and strip stray surrounding quotes from a reply fragment.
@@ -615,9 +1132,27 @@ fn sentence_cut(text: &str, from: usize) -> Option<usize> {
     let tail = text.get(from..)?;
     let mut cut = None;
     for (i, c) in tail.char_indices() {
-        if matches!(c, '.' | '!' | '?' | '…') {
+        if matches!(c, '。' | '！' | '？') {
             let end = i + c.len_utf8();
-            if tail[end..].chars().next().is_none_or(char::is_whitespace) && end >= 4 {
+            // Do not commit while the terminator is merely the current end of
+            // the live stream: a closing quote may arrive in the next delta.
+            // When it is already present, keep it with the sentence.
+            if let Some(next) = tail[end..].chars().next() {
+                let quoted_end = if matches!(next, '”' | '’' | '」' | '』' | '》' | '〉') {
+                    end + next.len_utf8()
+                } else {
+                    end
+                };
+                if quoted_end >= 4 {
+                    cut = Some(from + quoted_end);
+                }
+            }
+        } else if matches!(c, '.' | '!' | '?' | '…') {
+            let end = i + c.len_utf8();
+            // At the current end of a live stream, a period may still be a
+            // decimal point whose following digit has not arrived yet. Wait
+            // for actual whitespace; the final flush handles end-of-answer.
+            if tail[end..].chars().next().is_some_and(char::is_whitespace) && end >= 4 {
                 cut = Some(from + end);
             }
         }
@@ -646,7 +1181,9 @@ fn json_str_field(s: &str, key: &str) -> Option<String> {
                         // \uXXXX — needed for accented replies (French, em-dash…).
                         'u' => {
                             let hex: String = (0..4).filter_map(|_| chars.next()).collect();
-                            if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                            if let Some(ch) =
+                                u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+                            {
                                 out.push(ch);
                             }
                         }
@@ -743,12 +1280,24 @@ fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(T[((n >> 18) & 63) as usize] as char);
         out.push(T[((n >> 12) & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { T[((n >> 6) & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -756,6 +1305,31 @@ fn base64(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persona_keeps_magicpaper_identity_and_direct_answers() {
+        let prompt = system_prompt(true);
+        assert!(prompt.contains("Your full and only name is MagicPaper"));
+        assert!(prompt.contains("abbreviated MP"));
+        assert!(prompt.contains("answer it immediately"));
+        assert!(prompt.contains("什么是INTP"));
+        assert!(prompt.contains("122+456=578"));
+        assert!(prompt.contains("exactly the same recognized text"));
+        assert!(prompt.contains("number digit by digit"));
+        assert!(prompt.contains("MUST be searched"));
+        assert!(prompt.contains("fresh answer suitable for a paper page"));
+    }
+
+    #[test]
+    fn turn_context_includes_persistent_task_catalog() {
+        let ctx = TurnContext {
+            task_lines: vec!["1. every 5 minutes — 講一個黑暗冷笑話".into()],
+            ..TurnContext::default()
+        };
+        let text = turn_text(&ctx);
+        assert!(text.contains("Active recurring tasks:"));
+        assert!(text.contains("講一個黑暗冷笑話"));
+    }
 
     #[test]
     fn sse_delta_extraction() {
@@ -773,6 +1347,25 @@ mod tests {
         assert_eq!(sse_delta_content(line).as_deref(), Some("Déjà vu — oui"));
         let nl = r#"{"choices":[{"delta":{"content":"line\nbreak"}}]}"#;
         assert_eq!(sse_delta_content(nl).as_deref(), Some("line\nbreak"));
+    }
+
+    #[test]
+    fn responses_sse_delta_extraction() {
+        let delta = r#"{"type":"response.output_text.delta","delta":"六韜"}"#;
+        assert_eq!(responses_delta_content(delta).as_deref(), Some("六韜"));
+        let search = r#"{"type":"response.web_search_call.completed"}"#;
+        assert_eq!(responses_delta_content(search), None);
+    }
+
+    #[test]
+    fn paper_editor_detects_screen_formatting_only_in_visible_reply() {
+        assert!(paper_answer_needs_rewrite("See **this**.\n⁂原文"));
+        assert!(paper_answer_needs_rewrite(
+            "答案見 [古籍](https://example.test)。\n⁂原文"
+        ));
+        assert!(!paper_answer_needs_rewrite(
+            "出自《六韜·文韜·文師》。\n⁂主人寫了https://example.test"
+        ));
     }
 
     #[test]
@@ -812,6 +1405,49 @@ mod tests {
     }
 
     #[test]
+    fn parser_streams_complete_chinese_sentence_before_response_ends() {
+        let mut p = StreamParser::new(vec![]);
+        let ev = drain(p.advance("第一句完成。第二句還", false));
+        assert_eq!(ev, vec![Event::Ink("第一句完成。".into())]);
+        let ev = drain(p.advance("第一句完成。第二句還在寫", true));
+        assert_eq!(ev, vec![Event::Ink("第二句還在寫".into())]);
+    }
+
+    #[test]
+    fn parser_flushes_equation_as_soon_as_hidden_transcript_starts() {
+        let mut p = StreamParser::new(vec![]);
+        let ev = drain(p.advance("240×0.85＝204元\n⁂", false));
+        assert_eq!(ev, vec![Event::Ink("240×0.85＝204元".into())]);
+        let ev = drain(p.advance("240×0.85＝204元\n⁂原文", true));
+        assert_eq!(ev, vec![Event::Transcript("原文".into())]);
+    }
+
+    #[test]
+    fn parser_does_not_split_streaming_decimal_points() {
+        let mut p = StreamParser::new(vec![]);
+        assert!(p.advance("240×0.", false).is_empty());
+        assert!(p.advance("240×0.85＝204.", false).is_empty());
+        let ev = drain(p.advance("240×0.85＝204.0元\n⁂原文", false));
+        assert_eq!(ev, vec![Event::Ink("240×0.85＝204.0元".into())]);
+    }
+
+    #[test]
+    fn parser_waits_for_closing_quote_after_chinese_period() {
+        let mut p = StreamParser::new(vec![]);
+        assert!(p.advance("出處是：「原文。", false).is_empty());
+        let ev = drain(p.advance("出處是：「原文。」下一句", false));
+        assert_eq!(ev, vec![Event::Ink("出處是：「原文。」".into())]);
+    }
+
+    #[test]
+    fn request_cancel_sets_shared_flag() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let handle = RequestCancel::http(Arc::clone(&flag));
+        handle.cancel();
+        assert!(flag.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn parser_routes_show_directive() {
         let mut p = StreamParser::new(vec![900, 800, 700]);
         // Directive still streaming in: no decision yet.
@@ -820,7 +1456,10 @@ mod tests {
         assert_eq!(ev, vec![Event::Show(800)]);
         let full = "\u{27e6}show:2\u{27e7}\n\u{2042} show me the garden page";
         let ev = drain(p.advance(full, true));
-        assert_eq!(ev, vec![Event::Transcript("show me the garden page".into())]);
+        assert_eq!(
+            ev,
+            vec![Event::Transcript("show me the garden page".into())]
+        );
     }
 
     #[test]
@@ -859,7 +1498,10 @@ mod tests {
         let ev = drain(p.advance(full, true));
         assert_eq!(
             ev,
-            vec![Event::Show(800), Event::Transcript("show me the rain".into())]
+            vec![
+                Event::Show(800),
+                Event::Transcript("show me the rain".into())
+            ]
         );
     }
 
@@ -879,7 +1521,9 @@ mod tests {
             ]
         );
         // The show glyphs never reached the writer.
-        assert!(!ev.iter().any(|e| matches!(e, Event::Ink(s) if s.contains('\u{27e6}'))));
+        assert!(!ev
+            .iter()
+            .any(|e| matches!(e, Event::Ink(s) if s.contains('\u{27e6}'))));
     }
 
     #[test]

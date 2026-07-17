@@ -5,6 +5,8 @@
 use std::io;
 use std::os::fd::RawFd;
 
+use crate::fb::screen_h;
+
 const EV_SYN: u16 = 0;
 const SYN_REPORT: u16 = 0;
 const EV_ABS: u16 = 3;
@@ -12,10 +14,37 @@ const ABS_MT_SLOT: u16 = 47;
 const ABS_MT_POSITION_Y: u16 = 54;
 const ABS_MT_TRACKING_ID: u16 = 57;
 const EVIOCGRAB: libc::c_ulong = 0x40044590;
+const EVIOCGABS_MT_POSITION_Y: libc::c_ulong = 0x80184576;
 const MAX_SLOTS: usize = 16;
-const SCREEN_H: i32 = 2160;
-const TOUCH_MAX_Y: i32 = 2832;
+const FALLBACK_TOUCH_MAX_Y: i32 = 2832;
 const TAP_SLOP: i32 = 45;
+
+#[repr(C)]
+#[derive(Default)]
+struct InputAbsInfo {
+    value: i32,
+    minimum: i32,
+    maximum: i32,
+    fuzz: i32,
+    flat: i32,
+    resolution: i32,
+}
+
+fn query_touch_max_y(fd: RawFd) -> i32 {
+    let mut info = InputAbsInfo::default();
+    let result =
+        unsafe { libc::ioctl(fd, EVIOCGABS_MT_POSITION_Y, &mut info as *mut InputAbsInfo) };
+    if result != 0 || info.maximum <= 0 {
+        eprintln!(
+            "riddle: warning: touch EVIOCGABS failed ({}), assuming {}",
+            io::Error::last_os_error(),
+            FALLBACK_TOUCH_MAX_Y
+        );
+        FALLBACK_TOUCH_MAX_Y
+    } else {
+        info.maximum
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gesture {
@@ -37,6 +66,7 @@ struct Slot {
 
 pub struct TouchDevice {
     fd: RawFd,
+    touch_max_y: i32,
     slots: [Slot; MAX_SLOTS],
     cur: usize,
     max_fingers: usize,
@@ -57,9 +87,12 @@ impl TouchDevice {
                     if fd < 0 {
                         return Err(io::Error::last_os_error());
                     }
+                    let touch_max_y = query_touch_max_y(fd);
+                    eprintln!("riddle: touch digitizer Y range {touch_max_y}");
                     unsafe { libc::ioctl(fd, EVIOCGRAB, 1i32) };
                     return Ok(Self {
                         fd,
+                        touch_max_y,
                         slots: [Slot::default(); MAX_SLOTS],
                         cur: 0,
                         max_fingers: 0,
@@ -141,7 +174,7 @@ impl TouchDevice {
             let raw_delta = previous - current;
             self.total_motion += raw_delta.abs();
             if count == 2 {
-                let pixels = raw_delta * SCREEN_H / TOUCH_MAX_Y;
+                let pixels = raw_delta * screen_h() as i32 / self.touch_max_y;
                 if pixels != 0 {
                     out.push(Gesture::Scroll(pixels));
                 }

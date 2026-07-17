@@ -1,5 +1,5 @@
 {
-  "title": "The Diary — oracle settings",
+  "title": "MagicPaper (MP) — oracle settings",
   "env": "oracle.env",
   "fields": [
     {
@@ -19,15 +19,36 @@
       "key": "RIDDLE_OPENAI_MODEL",
       "label": "Model",
       "kind": "text",
-      "placeholder": "gpt-4o-mini",
+      "placeholder": "gpt-5.6-terra",
       "help": "Must be vision-capable."
+    },
+    {
+      "key": "RIDDLE_OPENAI_API",
+      "label": "API mode",
+      "kind": "select",
+      "options": ["chat_completions", "responses"],
+      "help": "Responses enables model-managed tools such as web search."
     },
     {
       "key": "RIDDLE_OPENAI_REASONING",
       "label": "Reasoning effort",
       "kind": "select",
-      "options": ["", "low", "medium", "high"],
-      "help": "Only for thinking models (Gemini 3.x, o-series). Leave empty otherwise."
+      "options": ["", "none", "low", "medium", "high", "xhigh"],
+      "help": "Only for reasoning models. Low balances accuracy and first-ink latency."
+    },
+    {
+      "key": "RIDDLE_WEB_SEARCH",
+      "label": "Background web search",
+      "kind": "select",
+      "options": ["", "auto"],
+      "help": "In Responses mode, MP searches quotations, provenance, current and uncertain facts in the background."
+    },
+    {
+      "key": "RIDDLE_PAPER_REWRITE_MODEL",
+      "label": "Paper editor model",
+      "kind": "text",
+      "placeholder": "gpt-5.6-luna",
+      "help": "Rare fallback that rewrites web/Markdown formatting as natural paper prose."
     },
     {
       "key": "RIDDLE_OPENAI_MAX_TOKENS",
@@ -38,10 +59,17 @@
     },
     {
       "key": "RIDDLE_MEMORY",
-      "label": "The diary remembers",
+      "label": "MagicPaper remembers",
       "kind": "select",
       "options": ["", "off"],
-      "help": "When on (default), the diary keeps your pages on the tablet, Tom follows the conversation, and \"show me…\" conjures past pages. \"off\" disables all of it."
+      "help": "When on (default), MP keeps your pages on the tablet, follows the conversation, and \"show me…\" conjures past pages. \"off\" disables page memory."
+    },
+    {
+      "key": "RIDDLE_MEMORY_TURNS",
+      "label": "Recent dialogue turns",
+      "kind": "text",
+      "placeholder": "20",
+      "help": "Number of recent page/reply pairs carried as continuous conversation."
     },
     {
       "key": "RIDDLE_TZ_OFFSET",
@@ -49,6 +77,20 @@
       "kind": "text",
       "placeholder": "-4",
       "help": "Hours from UTC, so the dates of conjured memories read right."
+    },
+    {
+      "key": "RIDDLE_TASKS",
+      "label": "Recurring tasks",
+      "kind": "select",
+      "options": ["", "off"],
+      "help": "On by default. Write a command such as 任务 每五分钟讲一个冷笑话 to add a persistent task."
+    },
+    {
+      "key": "RIDDLE_HEARTBEAT_SECONDS",
+      "label": "Heartbeat interval",
+      "kind": "text",
+      "placeholder": "300",
+      "help": "How often MP checks for due tasks; 300 seconds is five minutes."
     }
   ],
   "presets": [
@@ -64,8 +106,11 @@
       "name": "OpenAI",
       "values": {
         "RIDDLE_OPENAI_BASE": "https://api.openai.com/v1",
-        "RIDDLE_OPENAI_MODEL": "gpt-4o-mini",
-        "RIDDLE_OPENAI_REASONING": ""
+        "RIDDLE_OPENAI_MODEL": "gpt-5.6-terra",
+        "RIDDLE_OPENAI_API": "responses",
+        "RIDDLE_OPENAI_REASONING": "low",
+        "RIDDLE_WEB_SEARCH": "auto",
+        "RIDDLE_PAPER_REWRITE_MODEL": "gpt-5.6-luna"
       }
     },
     {
