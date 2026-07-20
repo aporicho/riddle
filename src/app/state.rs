@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::fb::BBox;
 use crate::oracle::{self, Event};
+use crate::reader;
 use crate::ui;
 
 const IDLE_COMMIT_FAST: Duration = Duration::from_millis(2200);
@@ -100,6 +101,12 @@ pub(super) enum State {
     /// and replay strokes.
     HistoryList {
         panel: ui::paper_list::PaperList,
+    },
+    /// Ambiguous `read <title>` matches. A short pen tap chooses a book;
+    /// blank paper dismisses the catalog without touching any files.
+    ReaderList {
+        panel: ui::paper_list::PaperList,
+        books: Vec<reader::Book>,
     },
 }
 

@@ -7,8 +7,12 @@
 //! QTFB_KEY is set, or full takeover via the vendor engine (quill) when
 //! built with --features takeover and launched with xochitl stopped.
 
-use crate::{display, fb, fonts, ink, memory, oracle, pen, power, qtfb, tasks, todos, touch, ui};
+use crate::{
+    agent, display, fb, fonts, ink, memory, oracle, pen, power, qtfb, reader, tasks, todos, touch,
+    ui,
+};
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -19,6 +23,12 @@ use crate::oracle::Event;
 use crate::surface::{BLACK, FADED, WHITE};
 
 pub(super) const PNG_PATH: &str = "/tmp/riddle-page.png";
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RunOutcome {
+    Closed,
+    OpenReader(PathBuf),
+}
 
 /// Begin reading a tentative page while its ink is still visible. The page is
 /// not committed until the adaptive fast/slow deadline; more pen input
@@ -38,7 +48,7 @@ use super::reply::{append_reply, conjure, oracle_excuse, plan_reply, region_all_
 use super::state::{cancel_speculative, idle_commit_delay, SpeculativeRequest, State, TurnKind};
 use super::timing::{heartbeat_deadline, heartbeat_retry_interval, unix_now};
 
-pub(super) fn run() -> std::io::Result<()> {
+pub(super) fn run() -> std::io::Result<RunOutcome> {
     let mut font = fonts::FontBook::open()?;
 
     let (disp, mut surf) = display::Display::open()?;
@@ -66,11 +76,15 @@ pub(super) fn run() -> std::io::Result<()> {
         None
     };
     // Takeover mode: the power button is ours too (sleep page + suspend).
-    let mut power_dev = if takeover {
+    let manager_owns_power = std::env::var_os("REMAGIC_MANAGED").is_some();
+    let mut power_dev = if takeover && !manager_owns_power {
         power::PowerButton::open()
             .map_err(|e| eprintln!("riddle: no power button ({e})"))
             .ok()
     } else {
+        if manager_owns_power {
+            eprintln!("riddle: Remagic manager owns the power-button lifecycle");
+        }
         None
     };
     // A single click sleeps after the multi-click window; three quick clicks
@@ -120,6 +134,14 @@ pub(super) fn run() -> std::io::Result<()> {
 
     let mut user_ink = ink::Ink::new();
     let mut state = State::Listening { last_pen: None };
+    if let Some(error) = reader::take_launch_error() {
+        eprintln!("magic-paper: KOReader handoff reported: {error}");
+        state = State::Replying {
+            plan: plan_reply(&font, &error, None),
+            next: Instant::now(),
+            rx: None,
+        };
+    }
     let mut pen_down = false;
     let mut speculative: Option<SpeculativeRequest> = None;
     let mut speculative_attempted = false;
@@ -132,7 +154,14 @@ pub(super) fn run() -> std::io::Result<()> {
     let mut turn_failed = false;
     let mut turn_kind = TurnKind::User;
     let mut turn_task_ids: Vec<u64> = Vec::new();
-    let mut next_heartbeat = heartbeat_deadline(&task_store);
+    // Under Remagic the screenless agent owns scheduled execution. The UI
+    // only consumes queued results, so a timer can never race Master's pen.
+    let mut next_heartbeat = if manager_owns_power {
+        None
+    } else {
+        heartbeat_deadline(&task_store)
+    };
+    let mut next_agent_poll = Instant::now();
     // Raw stylus contact, tracked in every state (the guide dismisses on it).
     // `stylus_on` is the level; `stylus_tapped` latches any contact seen this
     // loop iteration, so a tap that starts AND ends within one drain still
@@ -141,6 +170,7 @@ pub(super) fn run() -> std::io::Result<()> {
     let mut stylus_tapped = false;
     let mut ink_dirty = BBox::empty();
     let mut last_flush = Instant::now();
+    let mut reader_target: Option<PathBuf> = None;
     // Takeover swaps are cheap and synchronous; qtfb needs coalescing.
     let flush_every = if takeover {
         Duration::from_millis(8)
@@ -150,7 +180,7 @@ pub(super) fn run() -> std::io::Result<()> {
 
     eprintln!("riddle: the diary is open");
 
-    loop {
+    'main: loop {
         if sigterm.load(Ordering::Relaxed) {
             break;
         }
@@ -246,9 +276,10 @@ pub(super) fn run() -> std::io::Result<()> {
                             | State::TodoList { .. }
                             | State::HistoryList { .. }
                             | State::FontList { .. }
+                            | State::ReaderList { .. }
                     ) {
                         pen_down = false;
-                        finish_paper_list_stroke(
+                        if let Some(path) = finish_paper_list_stroke(
                             &mut state,
                             &mut store,
                             &mut task_store,
@@ -257,7 +288,10 @@ pub(super) fn run() -> std::io::Result<()> {
                             &mut surf,
                             &mut font,
                             &disp,
-                        );
+                        ) {
+                            reader_target = Some(path);
+                            break 'main;
+                        }
                         continue;
                     }
                     if pen_down {
@@ -309,7 +343,8 @@ pub(super) fn run() -> std::io::Result<()> {
                     }
                     State::TaskList { ref mut panel }
                     | State::TodoList { ref mut panel }
-                    | State::HistoryList { ref mut panel } => {
+                    | State::HistoryList { ref mut panel }
+                    | State::ReaderList { ref mut panel, .. } => {
                         pen_down = true;
                         let d = panel.pen_point(&mut surf, s.x, s.y);
                         if !d.is_empty() {
@@ -345,7 +380,8 @@ pub(super) fn run() -> std::io::Result<()> {
                     stylus_tapped = true;
                     if let State::TaskList { ref mut panel }
                     | State::TodoList { ref mut panel }
-                    | State::HistoryList { ref mut panel } = state
+                    | State::HistoryList { ref mut panel }
+                    | State::ReaderList { ref mut panel, .. } = state
                     {
                         pen_down = true;
                         let d = panel.pen_point(&mut surf, ev.x, ev.y);
@@ -397,9 +433,10 @@ pub(super) fn run() -> std::io::Result<()> {
                             | State::TodoList { .. }
                             | State::HistoryList { .. }
                             | State::FontList { .. }
+                            | State::ReaderList { .. }
                     ) {
                         pen_down = false;
-                        finish_paper_list_stroke(
+                        if let Some(path) = finish_paper_list_stroke(
                             &mut state,
                             &mut store,
                             &mut task_store,
@@ -408,7 +445,10 @@ pub(super) fn run() -> std::io::Result<()> {
                             &mut surf,
                             &mut font,
                             &disp,
-                        );
+                        ) {
+                            reader_target = Some(path);
+                            break 'main;
+                        }
                         continue;
                     }
                     if pen_down {
@@ -557,6 +597,31 @@ pub(super) fn run() -> std::io::Result<()> {
                         }
                     }
                     State::Listening { last_pen }
+                }
+                _ if manager_owns_power
+                    && !pen_down
+                    && !stylus_tapped
+                    && user_ink.is_empty()
+                    && Instant::now() >= next_agent_poll =>
+                {
+                    next_agent_poll = Instant::now() + Duration::from_secs(1);
+                    match agent::take_pending() {
+                        Ok(Some(reply)) => {
+                            eprintln!("magic-paper: showing queued scheduled result");
+                            turn_kind = TurnKind::User;
+                            turn_reply.clear();
+                            State::Replying {
+                                plan: plan_reply(&font, &reply, None),
+                                next: Instant::now(),
+                                rx: None,
+                            }
+                        }
+                        Ok(None) => State::Listening { last_pen },
+                        Err(error) => {
+                            eprintln!("magic-paper: could not read agent queue: {error}");
+                            State::Listening { last_pen }
+                        }
+                    }
                 }
                 _ if !pen_down
                     && !stylus_tapped
@@ -729,6 +794,70 @@ pub(super) fn run() -> std::io::Result<()> {
                                 until: Instant::now() + Duration::from_secs(180),
                             }
                         }
+                        Ok(Event::Reader(query)) => match reader::Catalog::open() {
+                            Ok(catalog) => {
+                                eprintln!(
+                                    "magic-paper: reader catalog holds {} books",
+                                    catalog.len()
+                                );
+                                match catalog.lookup(query.as_deref()) {
+                                    reader::Lookup::Open(path) => {
+                                        eprintln!(
+                                            "magic-paper: handing page to KOReader — {}",
+                                            path.display()
+                                        );
+                                        reader_target = Some(path);
+                                        break 'main;
+                                    }
+                                    reader::Lookup::Choose(books) => {
+                                        let lines: Vec<String> =
+                                            books.iter().map(reader::Book::panel_label).collect();
+                                        let panel = ui::paper_list::PaperList::show_selectable(
+                                            &mut surf,
+                                            &font,
+                                            "選擇要閱讀的書",
+                                            "沒有相符書籍",
+                                            "用筆點書名開啟 · 點空白退出",
+                                            &lines,
+                                        );
+                                        disp.update_all(surf.w, surf.h);
+                                        eprintln!(
+                                            "magic-paper: {} ambiguous reader candidates shown",
+                                            books.len()
+                                        );
+                                        State::ReaderList { panel, books }
+                                    }
+                                    reader::Lookup::Missing => {
+                                        let text = match query {
+                                            Some(title) => {
+                                                format!("沒有找到《{}》，請寫更完整的書名。", title)
+                                            }
+                                            None => "沒有找到可用的 KOReader 書庫。".into(),
+                                        };
+                                        let plan = plan_reply(&font, &text, None);
+                                        State::Replying {
+                                            plan,
+                                            next: Instant::now(),
+                                            rx: None,
+                                        }
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("magic-paper: could not scan reader catalog: {error}");
+                                let plan = plan_reply(&font, "書庫暫時無法讀取。", None);
+                                State::Replying {
+                                    plan,
+                                    next: Instant::now(),
+                                    rx: None,
+                                }
+                            }
+                        },
+                        Ok(Event::FullRefresh) => {
+                            eprintln!("magic-paper: manual full-screen refresh");
+                            disp.full_refresh(surf.w, surf.h);
+                            State::Listening { last_pen: None }
+                        }
                         Ok(Event::LocalCommand(command)) => {
                             turn_transcript = Some(command.clone());
                             let (reply, tasks_changed) =
@@ -843,6 +972,8 @@ pub(super) fn run() -> std::io::Result<()> {
                             | Event::FontList
                             | Event::HistoryList
                             | Event::Help
+                            | Event::Reader(_)
+                            | Event::FullRefresh
                             | Event::LocalCommand(_),
                         )) => {
                             eprintln!("riddle: page directive mid-reply ignored");
@@ -1065,6 +1196,7 @@ pub(super) fn run() -> std::io::Result<()> {
             State::TodoList { panel } => State::TodoList { panel },
             State::FontList { panel } => State::FontList { panel },
             State::HistoryList { panel } => State::HistoryList { panel },
+            State::ReaderList { panel, books } => State::ReaderList { panel, books },
 
             State::FadingReply {
                 stage,
@@ -1107,5 +1239,8 @@ pub(super) fn run() -> std::io::Result<()> {
     eprintln!("riddle: the diary closes");
     cancel_speculative(&mut speculative, "diary closed");
     disp.terminate();
-    Ok(())
+    Ok(match reader_target {
+        Some(path) => RunOutcome::OpenReader(path),
+        None => RunOutcome::Closed,
+    })
 }

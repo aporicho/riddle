@@ -12,7 +12,7 @@ This fork is based on Maxime Rivest's original
 
 ## How this fork differs from upstream
 
-MagicPaper 0.5.1 turns the original Tom Riddle diary into a Chinese-first,
+MagicPaper 0.6.0 turns the original Tom Riddle diary into a Chinese-first,
 Move-tested personal paper assistant while preserving the ink-only interface.
 
 | Area | Upstream riddle | This MagicPaper fork |
@@ -26,8 +26,10 @@ Move-tested personal paper assistant while preserving the ink-only interface.
 | Reply appearance | Dancing Script | Three switchable Chinese handwriting fonts, independent 50–180% size calibration, per-glyph fallback, Traditional Chinese replies, and Chinese-aware wrapping |
 | Memory | Short recent context plus saved pages | 20 recent dialogue turns, up to 400 saved pages, and a 40-page recall catalog |
 | Automation | Conversation and page recall | Persistent recurring tasks, paper-native task/TODO/history lists, checkbox enable/disable, and due-time-aware smart heartbeat scheduling |
+| Reading | Not integrated | Handwrite `read` for KOReader's library or `read 书名` to open a matched EPUB/PDF; exiting KOReader returns to MP |
 | Perceived latency | Request starts after the 2.8-second commit | OCR starts speculatively after one idle second; high-confidence complete input commits at 2.2s and uncertain input at 2.6s |
 | E-ink behavior | Thinking indicator and broader refreshes | No pulsing wait dot; reply-region cleanup avoids a distracting full-screen refresh after every answer |
+| Manual ghost clearing | None | Handwrite `刷新`, `刷新屏幕`, `重新整理`, or `refresh` for one local full-panel refresh |
 
 The upstream commit history and MIT attribution are intentionally retained.
 
@@ -117,6 +119,9 @@ self-contained `dist/riddle` directory.
 | Write *"what do you remember?"* | MP answers with a handwritten list of remembered moments |
 | Flip the marker | Erase |
 | Draw a large **?** | Summon the built-in guide |
+| Write `read` | Open the existing library in KOReader |
+| Write `read 书名` | Open one matching EPUB/PDF directly; ambiguous names show a pen-selectable list |
+| Write `刷新` or `refresh` | Perform one full-screen e-ink refresh to clear ghosting, without contacting the oracle |
 | Tap five fingers at once | Leave the diary *(takeover mode)* |
 | Power button once | The page turns to *"The diary sleeps."*, then the tablet suspends; press again to wake exactly where you were *(takeover mode)* |
 | Power button three times quickly | Open the standalone diary from xochitl, or leave it while the diary is open |
@@ -158,6 +163,31 @@ replayed. The smart heartbeat computes the nearest active due time and makes
 no oracle/API request until then. Failed delivery retries after 30 seconds.
 TODOs are limited to twenty visible entries and never participate in the
 heartbeat.
+
+## KOReader handoff
+
+The takeover build can switch directly from MagicPaper to an installed
+KOReader without enabling Paperweight's MCP/CLI access. A bare `read` opens
+`/home/root/.local/share/remarkable/xochitl`; `read` followed by a title joins
+the human-readable `visibleName` in each `.metadata` file to its UUID-named
+EPUB/PDF. It also searches ordinary EPUB/PDF files below `/home/root/koreader`.
+Exact and unique partial matches open immediately. Ambiguous matches show up to
+nine choices; tap a row with the pen or tap blank paper to cancel.
+
+The standalone takeover script supervises the handoff. MagicPaper fully
+releases Quill and raw input before KOReader starts. While MagicPaper owns the
+panel, xochitl is runtime-masked so a vendor recovery job cannot start a
+second display engine over it; the volatile mask is removed on exit and is
+also cleared by every reboot. The supervisor briefly restores xochitl as the
+display host and injects Paperweight's local einkface client directly;
+this does not require enabling Paperweight CLI or MCP. When KOReader exits, the
+supervisor stops the host again and relaunches MagicPaper. Both
+the Rust side and shell side restrict requested paths to the two book-library
+roots. A missing reader, invalid target, or KOReader crash returns to MP with a
+paper-visible error; the existing systemd `ExecStopPost` still restores
+xochitl if the whole session stops unexpectedly. The supported Move package is
+the `aarch64` KOReader build described in the
+[upstream installation guide](https://github.com/koreader/koreader/wiki/Installation-on-Remarkable).
 
 ## MagicPaper remembers
 
@@ -338,6 +368,11 @@ Handwrite **帮助**, **幫助**, or **help** to open the device-local Chinese
 instruction manual without an answer-model request. Drawing one large `?`
 continues to open the same manual.
 
+Handwrite **刷新**, **刷新屏幕**, **重新整理**, or **refresh** to request one
+full-panel refresh locally. This is intentionally explicit: routine reply
+cleanup remains region-only, while the command provides an immediate way to
+remove accumulated ghosting.
+
 The staged `dist/riddle/` is self-contained (binary, `libquill.so`, launch
 scripts, manifest) — copy it to
 `/home/root/xovi/exthome/appload/riddle/`, or publish it to the catalog with
@@ -365,7 +400,8 @@ riddle dies uncleanly. If anything wedges:
 
 The binary entry is intentionally tiny. Device state and interaction live in
 `src/app/`; model backends, OCR, streaming, and local routes live in
-`src/oracle/`; reusable paper panels live in `src/ui/`; appearance and text
+`src/oracle/`; local KOReader title discovery and guarded handoff live in
+`src/reader.rs`; reusable paper panels live in `src/ui/`; appearance and text
 tracing live in `src/appearance/`; persistent memory, tasks, and TODOs live in
 `src/storage/`. This keeps feature work out of a single multi-thousand-line
 file while preserving one central, auditable input-priority loop.

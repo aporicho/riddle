@@ -1,9 +1,10 @@
 //! Local font, task, TODO, and history panel actions.
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::surface::Surface;
-use crate::{display, fonts, memory, tasks, todos, ui};
+use crate::{display, fonts, memory, reader, tasks, todos, ui};
 
 use super::state::{State, TurnKind};
 use super::timing::{heartbeat_deadline, unix_now};
@@ -19,7 +20,7 @@ pub(super) fn finish_paper_list_stroke(
     surf: &mut Surface,
     font: &mut fonts::FontBook,
     disp: &display::Display,
-) {
+) -> Option<PathBuf> {
     if matches!(state, State::FontList { .. }) {
         let action = match state {
             State::FontList { panel } => panel.pen_up(),
@@ -67,7 +68,50 @@ pub(super) fn finish_paper_list_stroke(
             }
             None => {}
         }
-        return;
+        return None;
+    }
+
+    if matches!(state, State::ReaderList { .. }) {
+        let action = match state {
+            State::ReaderList { panel, .. } => panel.pen_up(),
+            _ => None,
+        };
+        match action {
+            Some(ui::paper_list::Action::Select(number)) => {
+                let path = match state {
+                    State::ReaderList { books, .. } => books
+                        .get(number.wrapping_sub(1))
+                        .map(|book| book.path.clone()),
+                    _ => None,
+                };
+                if let Some(path) = path {
+                    eprintln!(
+                        "magic-paper: reader candidate {number} selected — {}",
+                        path.display()
+                    );
+                    return Some(path);
+                }
+                redraw_reader_list(state, surf, font);
+                disp.update_all(surf.w, surf.h);
+            }
+            Some(ui::paper_list::Action::Dismiss) => {
+                let old = std::mem::replace(state, State::Listening { last_pen: None });
+                match old {
+                    State::ReaderList { panel, .. } => panel.dismiss(surf),
+                    _ => unreachable!(),
+                }
+                disp.update_all(surf.w, surf.h);
+                eprintln!("magic-paper: reader candidates dismissed");
+            }
+            Some(ui::paper_list::Action::Redraw)
+            | Some(ui::paper_list::Action::Delete(_))
+            | Some(ui::paper_list::Action::Toggle(_)) => {
+                redraw_reader_list(state, surf, font);
+                disp.update_all(surf.w, surf.h);
+            }
+            None => {}
+        }
+        return None;
     }
 
     let action = match state {
@@ -77,7 +121,7 @@ pub(super) fn finish_paper_list_stroke(
         _ => None,
     };
     let Some(action) = action else {
-        return;
+        return None;
     };
     match action {
         ui::paper_list::Action::Delete(number) => {
@@ -158,6 +202,23 @@ pub(super) fn finish_paper_list_stroke(
             redraw_paper_list(state, memory_store, task_store, todo_store, surf, font);
             disp.update_all(surf.w, surf.h);
         }
+        ui::paper_list::Action::Select(_) => {}
+    }
+    None
+}
+
+fn redraw_reader_list(state: &mut State, surf: &mut Surface, font: &fonts::FontBook) {
+    if let State::ReaderList { panel, books } = state {
+        let lines: Vec<String> = books.iter().map(reader::Book::panel_label).collect();
+        panel.redraw(
+            surf,
+            font,
+            "選擇要閱讀的書",
+            "沒有相符書籍",
+            "用筆點書名開啟 · 點空白退出",
+            &lines,
+            None,
+        );
     }
 }
 

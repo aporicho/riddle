@@ -7,7 +7,7 @@ use crate::oracle::Event;
 use crate::{memory, oracle, power, tasks, todos};
 
 use super::context::build_ctx;
-use super::runtime::{run, PNG_PATH};
+use super::runtime::{run, RunOutcome, PNG_PATH};
 
 const USAGE: &str = "\
 MagicPaper (MP) — your living magical paper
@@ -20,6 +20,7 @@ usage:
                               reply; verifies key + endpoint + model
   riddle --ocr-test PNG       send one PNG only to the configured PaddleOCR
                               service and print its recognized text
+  riddle --agent              run the screenless scheduled-task worker
   riddle --power-launcher     watch for three quick power-button presses and
                               launch the standalone diary
   riddle --version            print the version
@@ -58,6 +59,13 @@ pub(crate) fn entry() {
             }
             return;
         }
+        Some("--agent") => {
+            if let Err(error) = crate::agent::run() {
+                eprintln!("magic-paper-agent: fatal: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
         Some("--version" | "-V") => {
             println!("MagicPaper (MP) {}", env!("CARGO_PKG_VERSION"));
             return;
@@ -73,9 +81,44 @@ pub(crate) fn entry() {
         }
         _ => {}
     }
-    if let Err(e) = run() {
-        eprintln!("riddle: fatal: {e}");
-        std::process::exit(1);
+    match run() {
+        Ok(RunOutcome::Closed) => {}
+        Ok(RunOutcome::OpenReader(path)) => {
+            if std::env::var_os("REMAGIC_MANAGED").is_some() {
+                let manager = "/home/root/apps/remagic/bin/remagicctl";
+                match std::process::Command::new(manager)
+                    .args(["launch", "koreader", "--open-path"])
+                    .arg(&path)
+                    .status()
+                {
+                    Ok(status) if status.success() => {
+                        eprintln!(
+                            "magic-paper: Remagic is opening KOReader — {}",
+                            path.display()
+                        );
+                        return;
+                    }
+                    Ok(status) => {
+                        eprintln!("magic-paper: Remagic KOReader request failed: {status}");
+                        std::process::exit(1);
+                    }
+                    Err(error) => {
+                        eprintln!("magic-paper: could not contact Remagic: {error}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            if let Err(error) = crate::reader::write_handoff(&path) {
+                eprintln!("magic-paper: could not prepare KOReader handoff: {error}");
+                std::process::exit(1);
+            }
+            eprintln!("magic-paper: KOReader handoff ready — {}", path.display());
+            std::process::exit(42);
+        }
+        Err(e) => {
+            eprintln!("riddle: fatal: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -131,6 +174,17 @@ fn oracle_test(png: &str) -> i32 {
             Ok(Ok(Event::Help)) => {
                 println!("[would open instruction manual]");
                 got.push_str("(help)");
+            }
+            Ok(Ok(Event::Reader(title))) => {
+                println!(
+                    "[would open KOReader: {}]",
+                    title.as_deref().unwrap_or("library")
+                );
+                got.push_str("(reader)");
+            }
+            Ok(Ok(Event::FullRefresh)) => {
+                println!("[would perform a full-screen refresh]");
+                got.push_str("(refresh)");
             }
             Ok(Ok(Event::LocalCommand(command))) => {
                 println!("[would apply local command: {command}]");

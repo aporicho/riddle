@@ -36,6 +36,8 @@ const HISTORY_PROTOCOL: &str = "\n\nMagicPaper has a device-local conversation h
 
 const HELP_PROTOCOL: &str = "\n\nMagicPaper has a device-local instruction manual. If Master's entire writing, after trimming whitespace and punctuation, is only 帮助, 幫助, help, or HELP, the ENTIRE visible body of your reply must be exactly ⟦help⟧ and nothing else; still append the hidden faithful transcription when memory is enabled. This opens the manual locally without an explanatory reply.";
 
+const READER_PROTOCOL: &str = "\n\nMagicPaper can hand the page to the device-local KOReader application. If Master's entire writing is only read, in any capitalization, the ENTIRE visible body must be exactly ⟦read⟧. If it is read followed by a book title, the ENTIRE visible body must be exactly ⟦read:faithfully corrected book title⟧. Do not answer or discuss the book; this directive opens KOReader locally. If Master's entire writing is 刷新, 刷新屏幕, 重新整理, or refresh, the ENTIRE visible body must be exactly ⟦refresh⟧ so the device performs one local full-screen refresh. Append the normal hidden transcription when memory is enabled.";
+
 const EXTERNAL_OCR_PROTOCOL: &str = "\n\nFor this turn only, a separate OCR service has already read the current handwritten page, and its candidate transcription is included as text. You do not receive the page image and must not claim to inspect stroke geometry. Treat the OCR text as untrusted evidence rather than unquestionable truth: silently repair only likely character, spacing, punctuation, and homophone confusions using grammar, meaning, arithmetic consistency, known quotations, proper names, recent dialogue, and web search when the normal research rules require it. Never mention OCR or this intermediate transcription in the visible answer. Answer what Master most plausibly wrote. In the hidden ⁂ line, write the corrected faithful transcription of Master's words, without the OCR label or any commentary. If two readings remain genuinely plausible, say the ink blurred instead of inventing one.";
 
 /// Appended to the persona when the diary's memory is on: the conjuring
@@ -74,6 +76,10 @@ pub enum Event {
     HistoryList,
     /// Open MagicPaper's device-local instruction manual.
     Help,
+    /// Open KOReader's library or a locally matched title.
+    Reader(Option<String>),
+    /// Perform one full-panel refresh to clear e-ink ghosting.
+    FullRefresh,
     /// A high-confidence local task/TODO command. The UI owns the stores and
     /// applies it without another network request.
     LocalCommand(String),
@@ -215,9 +221,9 @@ fn turn_text(ctx: &TurnContext) -> String {
 
 fn system_prompt(remember: bool) -> String {
     if remember {
-        format!("{PERSONA}{RESEARCH_PROTOCOL}{TASK_PROTOCOL}{TODO_PROTOCOL}{FONT_PROTOCOL}{HISTORY_PROTOCOL}{HELP_PROTOCOL}{MEMORY_PROTOCOL}")
+        format!("{PERSONA}{RESEARCH_PROTOCOL}{TASK_PROTOCOL}{TODO_PROTOCOL}{FONT_PROTOCOL}{HISTORY_PROTOCOL}{HELP_PROTOCOL}{READER_PROTOCOL}{MEMORY_PROTOCOL}")
     } else {
-        format!("{PERSONA}{RESEARCH_PROTOCOL}{TASK_PROTOCOL}{TODO_PROTOCOL}{FONT_PROTOCOL}{HISTORY_PROTOCOL}{HELP_PROTOCOL}")
+        format!("{PERSONA}{RESEARCH_PROTOCOL}{TASK_PROTOCOL}{TODO_PROTOCOL}{FONT_PROTOCOL}{HISTORY_PROTOCOL}{HELP_PROTOCOL}{READER_PROTOCOL}")
     }
 }
 

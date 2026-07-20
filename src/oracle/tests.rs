@@ -52,6 +52,19 @@ fn parser_routes_local_task_and_todo_lists() {
         drain(help.advance("⟦help⟧\n⁂帮助", true)),
         vec![Event::Help, Event::Transcript("帮助".into())]
     );
+    let mut reader = StreamParser::new(vec![]);
+    assert_eq!(
+        drain(reader.advance("⟦read:置身事内⟧\n⁂read 置身事内", true)),
+        vec![
+            Event::Reader(Some("置身事内".into())),
+            Event::Transcript("read 置身事内".into())
+        ]
+    );
+    let mut refresh = StreamParser::new(vec![]);
+    assert_eq!(
+        drain(refresh.advance("⟦refresh⟧\n⁂刷新", true)),
+        vec![Event::FullRefresh, Event::Transcript("刷新".into())]
+    );
 }
 
 #[test]
@@ -129,6 +142,19 @@ fn high_confidence_local_routes_choose_fast_commit() {
         Some(LocalRoute::Event(Event::HistoryList))
     );
     assert_eq!(local_route("help"), Some(LocalRoute::Event(Event::Help)));
+    assert_eq!(
+        local_route("read"),
+        Some(LocalRoute::Event(Event::Reader(None)))
+    );
+    assert_eq!(
+        local_route("Read：置身事内"),
+        Some(LocalRoute::Event(Event::Reader(Some("置身事内".into()))))
+    );
+    assert_eq!(
+        local_route("刷新屏幕"),
+        Some(LocalRoute::Event(Event::FullRefresh))
+    );
+    assert_eq!(local_route("reader"), None);
     assert_eq!(local_route("TODO 买牛奶"), Some(LocalRoute::Command));
     let shared = Arc::new(Mutex::new(Some(result)));
     let handle = RequestCancel::http(Arc::new(AtomicBool::new(false)), Some(shared));

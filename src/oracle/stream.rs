@@ -62,6 +62,17 @@ impl StreamParser {
                     out.push(Ok(Event::HistoryList));
                 } else if directive == "help" || directive == "manual" {
                     out.push(Ok(Event::Help));
+                } else if directive == "read" || directive == "reader" {
+                    out.push(Ok(Event::Reader(None)));
+                } else if let Some(title) = directive
+                    .strip_prefix("read:")
+                    .or_else(|| directive.strip_prefix("reader:"))
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                {
+                    out.push(Ok(Event::Reader(Some(title.to_string()))));
+                } else if directive == "refresh" {
+                    out.push(Ok(Event::FullRefresh));
                 } else {
                     let n: Option<usize> = directive
                         .strip_prefix("show")

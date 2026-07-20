@@ -1,8 +1,8 @@
 {
   "id": "riddle",
   "name": "MagicPaper",
-  "version": "0.5.1",
-  "description": "Living magical paper with calibrated handwriting, local help/history/tasks/TODOs, and smart due-time scheduling.",
+  "version": "0.6.0",
+  "description": "Living magical paper with local KOReader handoff, manual ghost clearing, calibrated handwriting, tasks, TODOs, history, and help.",
   "application": "appload-launch.sh",
   "qtfb": false
 }

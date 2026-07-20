@@ -1,5 +1,6 @@
 //! MagicPaper (MP) — living paper for the reMarkable Paper Pro Move.
 
+mod agent;
 mod app;
 mod appearance;
 mod display;
@@ -9,6 +10,7 @@ mod oracle;
 mod pen;
 mod power;
 mod qtfb;
+mod reader;
 mod storage;
 mod surface;
 mod touch;

@@ -28,10 +28,26 @@ pub(super) fn local_route(text: &str) -> Option<LocalRoute> {
         "帮助" | "幫助" | "help" => return Some(LocalRoute::Event(Event::Help)),
         "任务" | "任務" | "task" | "tasks" => return Some(LocalRoute::Event(Event::TaskList)),
         "todo" => return Some(LocalRoute::Event(Event::TodoList)),
+        "read" => return Some(LocalRoute::Event(Event::Reader(None))),
+        "刷新" | "刷新屏幕" | "重新整理" | "refresh" => {
+            return Some(LocalRoute::Event(Event::FullRefresh));
+        }
         _ => {}
     }
 
     let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("read") && trimmed.is_char_boundary(4) {
+        let rest = trimmed[4..].trim_start();
+        let rest = rest.strip_prefix([':', '：']).unwrap_or(rest).trim();
+        if !rest.is_empty()
+            && trimmed[4..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_whitespace() || matches!(c, ':' | '：'))
+        {
+            return Some(LocalRoute::Event(Event::Reader(Some(rest.to_string()))));
+        }
+    }
     let task_prefixes = [
         "任务",
         "任務",

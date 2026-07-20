@@ -17,6 +17,7 @@ const LIST_BOTTOM_PAD: usize = 180;
 pub enum Action {
     Delete(usize),
     Toggle(usize),
+    Select(usize),
     Dismiss,
     Redraw,
 }
@@ -33,6 +34,7 @@ pub struct PaperList {
     saved: Vec<u8>,
     rows: Vec<Row>,
     stroke: Vec<(i32, i32)>,
+    selectable: bool,
 }
 
 impl PaperList {
@@ -45,11 +47,39 @@ impl PaperList {
         entries: &[String],
         enabled: Option<&[bool]>,
     ) -> Self {
+        Self::show_with_mode(
+            surf, empty_text, font, title, footer, entries, enabled, false,
+        )
+    }
+
+    /// A non-destructive list whose rows open an item on a small pen tap.
+    pub fn show_selectable(
+        surf: &mut Surface,
+        font: &FontBook,
+        title: &str,
+        empty_text: &str,
+        footer: &str,
+        entries: &[String],
+    ) -> Self {
+        Self::show_with_mode(surf, empty_text, font, title, footer, entries, None, true)
+    }
+
+    fn show_with_mode(
+        surf: &mut Surface,
+        empty_text: &str,
+        font: &FontBook,
+        title: &str,
+        footer: &str,
+        entries: &[String],
+        enabled: Option<&[bool]>,
+        selectable: bool,
+    ) -> Self {
         let saved = surf.copy_rect(0, 0, screen_w(), screen_h());
         let mut panel = Self {
             saved,
             rows: Vec::new(),
             stroke: Vec::new(),
+            selectable,
         };
         panel.redraw(surf, font, title, empty_text, footer, entries, enabled);
         panel
@@ -142,7 +172,7 @@ impl PaperList {
         let horizontal = x_span >= 140
             && x_span >= y_span.saturating_mul(2)
             && (last.0 - first.0).abs() >= (last.1 - first.1).abs().saturating_mul(2);
-        if horizontal {
+        if horizontal && !self.selectable {
             let center_y = (y0 + y1) / 2;
             if let Some(row) = self
                 .rows
@@ -162,11 +192,18 @@ impl PaperList {
             }) {
                 return Some(Action::Toggle(row.number));
             }
-            let inside_row = self
+            let row = self
                 .rows
                 .iter()
-                .any(|row| first.1 >= row.y0 && first.1 <= row.y1);
-            if !inside_row {
+                .find(|row| first.1 >= row.y0 && first.1 <= row.y1);
+            if self.selectable {
+                if let Some(row) = row {
+                    return Some(Action::Select(row.number));
+                }
+            } else if row.is_some() {
+                return Some(Action::Redraw);
+            }
+            if row.is_none() {
                 return Some(Action::Dismiss);
             }
         }
@@ -281,6 +318,7 @@ mod tests {
                 },
             ],
             stroke: Vec::new(),
+            selectable: false,
         }
     }
 
@@ -313,6 +351,16 @@ mod tests {
         panel.stroke = vec![(500, 490), (505, 620)];
         assert_eq!(panel.pen_up(), Some(Action::Redraw));
         panel.stroke = vec![(500, 550), (590, 550)];
+        assert_eq!(panel.pen_up(), Some(Action::Redraw));
+    }
+
+    #[test]
+    fn selectable_rows_open_on_tap_and_never_delete_on_strike() {
+        let mut panel = panel_with_rows();
+        panel.selectable = true;
+        panel.stroke = vec![(800, 550), (802, 551)];
+        assert_eq!(panel.pen_up(), Some(Action::Select(2)));
+        panel.stroke = vec![(200, 550), (500, 548), (900, 553)];
         assert_eq!(panel.pen_up(), Some(Action::Redraw));
     }
 }

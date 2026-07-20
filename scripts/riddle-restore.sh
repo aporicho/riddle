@@ -2,6 +2,9 @@
 # systemd ExecStopPost safety net for a takeover session.
 rm -f /tmp/epframebuffer.lock
 rmdir /run/riddle-takeover.lock 2>/dev/null || true
+# The takeover supervisor runtime-masks xochitl while Quill owns the panel.
+# Always remove that volatile guard before restoring the stock UI.
+systemctl unmask --runtime xochitl.service >/dev/null 2>&1 || true
 # xochitl allows only a few starts per ten minutes. Takeover apps legitimately
 # stop/start it, so clear the counter before restoring the stock UI.
 systemctl reset-failed xochitl.service paperweight.service 2>/dev/null || true
