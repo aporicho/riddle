@@ -6,6 +6,7 @@
 
 use std::io;
 use std::os::fd::RawFd;
+use std::time::{Duration, Instant};
 
 pub const MESSAGE_INITIALIZE: u8 = 0;
 pub const MESSAGE_UPDATE: u8 = 1;
@@ -19,8 +20,8 @@ pub const MESSAGE_REQUEST_FULL_REFRESH: u8 = 6;
 pub const UPDATE_ALL: i32 = 0;
 pub const UPDATE_PARTIAL: i32 = 1;
 
-/// FBFMT_RMPP_RGB565: native 1620x2160, 2 bytes/pixel, stride = 3240.
-pub const FBFMT_RMPP_RGB565: u8 = 3;
+/// FBFMT_RMPPM_RGB565: Paper Pro Move native 954x1696 RGB565.
+pub const FBFMT_RMPPM_RGB565: u8 = 6;
 
 #[allow(dead_code)]
 pub const REFRESH_MODE_UFAST: i32 = 0;
@@ -34,11 +35,17 @@ pub const INPUT_PEN_PRESS: i32 = 0x20;
 pub const INPUT_PEN_RELEASE: i32 = 0x21;
 #[allow(dead_code)]
 pub const INPUT_PEN_UPDATE: i32 = 0x22;
+/// Runtime convention: dev_id 0 is the marker tip, 1 is the eraser tip.
+/// Upstream AppLoad currently sends 0 for every pen event, so this remains
+/// backward compatible while allowing the Remagic fork to preserve erasers.
+pub const PEN_DEVICE_ERASER: i32 = 1;
 pub const INPUT_VKB_PRESS: i32 = 0x40;
 #[allow(dead_code)]
 pub const INPUT_VKB_RELEASE: i32 = 0x41;
 
 const SOCKET_PATH: &str = "/tmp/qtfb.sock";
+const SEND_TIMEOUT: Duration = Duration::from_millis(250);
+const MAX_EVENTS_PER_PUMP: usize = 512;
 
 #[derive(Debug, Clone, Copy)]
 pub struct InputEvent {
@@ -48,6 +55,20 @@ pub struct InputEvent {
     pub y: i32,
     #[allow(dead_code)]
     pub d: i32,
+}
+
+impl InputEvent {
+    pub fn pen_tool(self) -> crate::pen::Tool {
+        if self.dev_id == PEN_DEVICE_ERASER || self.d < 0 {
+            crate::pen::Tool::Eraser
+        } else {
+            crate::pen::Tool::Pen
+        }
+    }
+
+    pub fn pressure_percent(self) -> i32 {
+        self.d.saturating_abs().clamp(0, 100)
+    }
 }
 
 pub struct QtfbClient {
@@ -141,7 +162,10 @@ impl QtfbClient {
         }
 
         if shm_size < width * height * bpp {
-            unsafe { libc::close(fd) };
+            unsafe {
+                libc::munmap(ptr, shm_size);
+                libc::close(fd);
+            }
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("shm too small: {} < {}", shm_size, width * height * bpp),
@@ -166,6 +190,28 @@ impl QtfbClient {
 
     pub fn raw_fd(&self) -> RawFd {
         self.fd
+    }
+
+    /// Block efficiently until the runtime sends input/window state, or the
+    /// caller's next animation/stream deadline. This replaces the idle 500 Hz
+    /// recv loop without adding latency to pen or touch events.
+    pub fn wait_readable(&self, timeout: Duration) -> io::Result<()> {
+        let timeout_ms = timeout.as_millis().clamp(1, i32::MAX as u128) as i32;
+        let mut pollfd = libc::pollfd {
+            fd: self.fd,
+            events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+            revents: 0,
+        };
+        loop {
+            let rc = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+            if rc >= 0 {
+                return Ok(());
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
     }
 
     pub fn framebuffer(&mut self) -> &mut [u8] {
@@ -246,6 +292,9 @@ impl QtfbClient {
                     y: i32::from_le_bytes(buf[20..24].try_into().unwrap()),
                     d: i32::from_le_bytes(buf[24..28].try_into().unwrap()),
                 });
+                if out.len() >= MAX_EVENTS_PER_PUMP {
+                    return Ok(out);
+                }
             }
         }
     }
@@ -262,8 +311,16 @@ impl Drop for QtfbClient {
 }
 
 fn send_all(fd: RawFd, buf: &[u8]) -> io::Result<()> {
+    let deadline = Instant::now() + SEND_TIMEOUT;
     loop {
-        let n = unsafe { libc::send(fd, buf.as_ptr() as *const libc::c_void, buf.len(), 0) };
+        let n = unsafe {
+            libc::send(
+                fd,
+                buf.as_ptr() as *const libc::c_void,
+                buf.len(),
+                libc::MSG_NOSIGNAL,
+            )
+        };
         if n == buf.len() as isize {
             return Ok(());
         }
@@ -275,11 +332,44 @@ fn send_all(fd: RawFd, buf: &[u8]) -> io::Result<()> {
             // Non-blocking socket: retry sends briefly rather than dropping a
             // protocol message (updates are small and the server drains fast).
             if e.kind() == io::ErrorKind::WouldBlock {
-                std::thread::sleep(std::time::Duration::from_millis(2));
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "qtfb server did not drain the control socket within 250ms",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(2));
                 continue;
             }
             return Err(e);
         }
         return Err(io::Error::new(io::ErrorKind::WriteZero, "short send"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pen_event(dev_id: i32, pressure: i32) -> InputEvent {
+        InputEvent {
+            input_type: INPUT_PEN_UPDATE,
+            dev_id,
+            x: 10,
+            y: 20,
+            d: pressure,
+        }
+    }
+
+    #[test]
+    fn forwarded_pen_keeps_pressure_and_eraser_semantics() {
+        assert_eq!(pen_event(0, 73).pen_tool(), crate::pen::Tool::Pen);
+        assert_eq!(pen_event(0, 73).pressure_percent(), 73);
+        assert_eq!(
+            pen_event(PEN_DEVICE_ERASER, 40).pen_tool(),
+            crate::pen::Tool::Eraser
+        );
+        assert_eq!(pen_event(0, -120).pen_tool(), crate::pen::Tool::Eraser);
+        assert_eq!(pen_event(0, -120).pressure_percent(), 100);
     }
 }

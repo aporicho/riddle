@@ -81,8 +81,14 @@ impl PaddleOcr {
             "on" | "true" | "yes" | "1"
         );
         let agent = ureq::AgentBuilder::new()
+            // Honor a manager-controlled HTTPS_PROXY when the tablet is on a
+            // restricted network (and in USB-tethered acceptance tests).
+            // CONNECT keeps the OCR token and image inside end-to-end TLS.
+            .try_proxy_from_env(true)
             .timeout_connect(std::time::Duration::from_secs(10))
             .timeout_read(std::time::Duration::from_secs(30))
+            .timeout_write(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(timeout_secs + 5))
             .build();
         Ok(Some(Self {
             job_url,
@@ -97,6 +103,8 @@ impl PaddleOcr {
 
     pub(super) fn recognize(
         &self,
+        request_id: u64,
+        domain: &str,
         png: &[u8],
         cancelled: &AtomicBool,
     ) -> Result<OcrResult, String> {
@@ -110,6 +118,13 @@ impl PaddleOcr {
         );
         let body = paddle_multipart(png, &self.model, &boundary);
         let started = std::time::Instant::now();
+        eprintln!(
+            "magic-paper: event=ocr-submit request={}:{} domain={domain} provider=paddle model={} bytes={}",
+            std::process::id(),
+            request_id,
+            self.model,
+            png.len()
+        );
         let response = self
             .agent
             .post(&self.job_url)
@@ -125,7 +140,9 @@ impl PaddleOcr {
         let job_id = json_str_field_loose(&response, "jobId")
             .ok_or_else(|| "PaddleOCR submit response has no jobId".to_string())?;
         eprintln!(
-            "riddle: PaddleOCR job accepted +{}ms",
+            "magic-paper: event=ocr-accepted request={}:{} domain={domain} latency_ms={}",
+            std::process::id(),
+            request_id,
             started.elapsed().as_millis()
         );
 
@@ -168,7 +185,9 @@ impl PaddleOcr {
                     }
                     let min_confidence = extract_paddle_scores(&jsonl).into_iter().reduce(f32::min);
                     eprintln!(
-                        "riddle: PaddleOCR complete +{}ms ({} chars, min confidence {})",
+                        "magic-paper: event=ocr-done request={}:{} domain={domain} latency_ms={} chars={} min_confidence={}",
+                        std::process::id(),
+                        request_id,
                         started.elapsed().as_millis(),
                         text.chars().count(),
                         min_confidence

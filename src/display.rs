@@ -4,6 +4,7 @@
 
 use crate::surface::{PixFmt, Surface};
 use std::io;
+use std::time::Duration;
 
 pub enum Display {
     Qtfb(crate::qtfb::QtfbClient),
@@ -31,15 +32,15 @@ impl Display {
             let key: i32 = key.parse().map_err(io::Error::other)?;
             let mut client = crate::qtfb::QtfbClient::connect(
                 key,
-                crate::qtfb::FBFMT_RMPP_RGB565,
-                1620,
-                2160,
+                crate::qtfb::FBFMT_RMPPM_RGB565,
+                954,
+                1696,
                 2,
             )?;
             let _ = client.set_refresh_mode(crate::qtfb::REFRESH_MODE_UFAST);
             let buf = client.framebuffer();
             let (ptr, len) = (buf.as_mut_ptr(), buf.len());
-            let surface = Surface::new(ptr, len, 1620, 2160, 1620 * 2, PixFmt::Rgb565);
+            let surface = Surface::new(ptr, len, 954, 1696, 954 * 2, PixFmt::Rgb565);
             return Ok((Display::Qtfb(client), surface));
         }
 
@@ -131,6 +132,18 @@ impl Display {
                 }
                 Ok(Vec::new())
             }
+        }
+    }
+
+    /// Wait for hosted input without polling the QTFB socket in a hot loop.
+    /// Takeover has additional raw fds that are not represented here, so keep
+    /// its historical short sleep until it moves to a shared poll set.
+    pub fn wait(&self, timeout: Duration) {
+        match self {
+            Display::Qtfb(client) => {
+                let _ = client.wait_readable(timeout);
+            }
+            Display::Quill => std::thread::sleep(timeout.min(Duration::from_millis(2))),
         }
     }
 

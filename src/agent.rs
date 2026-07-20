@@ -1,8 +1,9 @@
 //! Screenless recurring-task executor.
 //!
-//! This process never opens display or input devices. It runs due tasks while
-//! another foreground domain is active and leaves the resulting ink in a
-//! local queue. The UI consumes that queue only when Master's page is idle.
+//! This process never opens display or input devices. It is the sole owner of
+//! scheduled execution, regardless of which application is foreground, and
+//! leaves resulting ink in a local queue. The UI only consumes that queue when
+//! Master's page is idle; it never issues a competing heartbeat request.
 
 use crate::{memory, oracle, tasks, todos};
 use std::fs::{self, OpenOptions};
@@ -11,13 +12,13 @@ use std::os::fd::AsRawFd;
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const FOREGROUND_MARKER: &str = "/run/remagic/foreground-app";
 const QUEUE_DIR: &str = "/home/root/riddle-data/agent";
 const QUEUE_PATH: &str = "/home/root/riddle-data/agent/pending.tsv";
 const MAX_REPLY_BYTES: usize = 32 * 1024;
 
 pub fn run() -> io::Result<()> {
-    eprintln!("magic-paper-agent: screenless task worker ready");
+    let _scheduler_lease = tasks::acquire_scheduler_lease()?;
+    eprintln!("magic-paper-agent: sole scheduled-task owner ready");
     let oracle = loop {
         match oracle::Oracle::spawn(true) {
             Ok(oracle) => break oracle,
@@ -29,10 +30,6 @@ pub fn run() -> io::Result<()> {
     };
 
     loop {
-        if magicpaper_is_foreground() {
-            std::thread::sleep(Duration::from_secs(2));
-            continue;
-        }
         let Some(mut task_store) = tasks::TaskStore::open() else {
             std::thread::sleep(Duration::from_secs(30));
             continue;
@@ -48,11 +45,10 @@ pub fn run() -> io::Result<()> {
             continue;
         }
 
-        let ids: Vec<u64> = due.iter().map(|task| task.id).collect();
         let context = build_context(&task_store);
         let prompt = tasks::heartbeat_prompt(&due);
         let (tx, rx) = mpsc::channel();
-        oracle.ask_text(&prompt, &context, tx);
+        let request = oracle.ask_text(&prompt, &context, tx);
         let mut reply = String::new();
         let mut failed = false;
         loop {
@@ -70,6 +66,7 @@ pub fn run() -> io::Result<()> {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     eprintln!("magic-paper-agent: task request timed out");
+                    request.cancel();
                     failed = true;
                     break;
                 }
@@ -79,11 +76,16 @@ pub fn run() -> io::Result<()> {
             std::thread::sleep(Duration::from_secs(30));
             continue;
         }
+        if !task_store.complete_due_if_unchanged(&due, unix_now())? {
+            eprintln!(
+                "magic-paper-agent: due task changed while its answer was running; stale result discarded"
+            );
+            continue;
+        }
         queue_reply(reply.trim())?;
-        task_store.mark_ran(&ids, unix_now())?;
         eprintln!(
             "magic-paper-agent: queued {} scheduled result(s)",
-            ids.len()
+            due.len()
         );
     }
 }
@@ -108,10 +110,6 @@ fn build_context(task_store: &tasks::TaskStore) -> oracle::TurnContext {
             .map(|store| store.catalog_lines())
             .unwrap_or_default(),
     }
-}
-
-fn magicpaper_is_foreground() -> bool {
-    fs::read_to_string(FOREGROUND_MARKER).is_ok_and(|value| value.trim() == "magicpaper")
 }
 
 fn queue_reply(reply: &str) -> io::Result<()> {

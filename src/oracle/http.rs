@@ -8,10 +8,57 @@ use std::thread;
 
 use super::{
     base64, emit_local_route, external_ocr_turn_text, json_quote, json_str_field, local_route,
-    paper_answer_needs_rewrite, responses_delta_content, rewrite_paper_tail, sse_delta_content,
-    system_prompt, turn_text, Event, HttpApi, OcrResult, PaddleOcr, RequestCancel, StreamParser,
-    TurnContext, EXTERNAL_OCR_PROTOCOL,
+    log_llm_terminal, nonempty_env, paper_answer_needs_rewrite, responses_delta_content,
+    rewrite_paper_tail, sse_delta_content, system_prompt, turn_text, Event, HttpApi, OcrResult,
+    PaddleOcr, RequestCancel, StreamParser, TurnContext, EXTERNAL_OCR_PROTOCOL,
 };
+
+struct WorkerPermit(Arc<AtomicBool>);
+
+impl Drop for WorkerPermit {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+fn take_worker_permit(gate: &Arc<AtomicBool>) -> Option<WorkerPermit> {
+    gate.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .ok()
+        .map(|_| WorkerPermit(Arc::clone(gate)))
+}
+
+fn concise_error(error: &str) -> String {
+    error
+        .lines()
+        .next()
+        .unwrap_or("unknown error")
+        .chars()
+        .take(240)
+        .collect()
+}
+
+fn send_failure(
+    tx: &Sender<Result<Event, String>>,
+    kind: &str,
+    request_id: u64,
+    domain: &str,
+    terminal: &AtomicBool,
+    stage: &str,
+    error: String,
+) {
+    if !log_llm_terminal(terminal, request_id, domain, "error", stage, None) {
+        return;
+    }
+    if kind != "llm-error" {
+        eprintln!(
+            "magic-paper: event={kind} request={}:{} domain={domain} stage={stage} error={:?}",
+            std::process::id(),
+            request_id,
+            concise_error(&error)
+        );
+    }
+    let _ = tx.send(Err(error));
+}
 
 /// OpenAI-compatible HTTP backend. Responses mode adds hosted web search and
 /// a final paper-editing pass; chat-completions remains available for older
@@ -30,14 +77,18 @@ pub struct HttpOracle {
     pub(super) ocr: Option<PaddleOcr>,
     /// Reused between turns so rapid follow-ups can reuse pooled TLS sockets.
     agent: ureq::Agent,
+    /// At most one OCR+LLM pipeline per process. Cancellation closes its
+    /// receiver immediately, while this gate prevents repeated interruptions
+    /// from accumulating blocked network workers behind it.
+    in_flight: Arc<AtomicBool>,
 }
 
 impl HttpOracle {
     pub fn new(remember: bool) -> std::io::Result<Self> {
-        let key = std::env::var("RIDDLE_OPENAI_KEY")
-            .map_err(|_| std::io::Error::other("RIDDLE_OPENAI_KEY not set"))?;
-        let base = std::env::var("RIDDLE_OPENAI_BASE")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        let key = nonempty_env("RIDDLE_OPENAI_KEY")
+            .ok_or_else(|| std::io::Error::other("RIDDLE_OPENAI_KEY is missing or blank"))?;
+        let base = nonempty_env("RIDDLE_OPENAI_BASE")
+            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
         let base = base.trim_end_matches('/').to_string();
         // A vision-capable default; override with RIDDLE_OPENAI_MODEL.
         let model =
@@ -74,8 +125,13 @@ impl HttpOracle {
             .filter(|s| !s.trim().is_empty());
         let ocr = PaddleOcr::from_env()?;
         let agent = ureq::AgentBuilder::new()
+            // Optional standard proxy support makes the HTTP backend usable
+            // on managed/captive networks without changing its API contract.
+            .try_proxy_from_env(true)
             .timeout_connect(std::time::Duration::from_secs(10))
             .timeout_read(std::time::Duration::from_secs(90))
+            .timeout_write(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(115))
             .build();
         eprintln!(
             "riddle: http oracle base={base} model={model} api={api:?} max_tokens={max_tokens} reasoning={} web_search={} rewrite={} input={}",
@@ -98,35 +154,73 @@ impl HttpOracle {
             remember,
             ocr,
             agent,
+            in_flight: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    fn try_worker_permit(&self) -> Option<WorkerPermit> {
+        take_worker_permit(&self.in_flight)
     }
 
     pub fn ask(
         &self,
+        request_id: u64,
+        domain: &'static str,
         png_path: &str,
         ctx: &TurnContext,
         tx: Sender<Result<Event, String>>,
     ) -> RequestCancel {
         let cancelled = Arc::new(AtomicBool::new(false));
+        let terminal = Arc::new(AtomicBool::new(false));
         let ocr_result: Arc<Mutex<Option<OcrResult>>> = Arc::new(Mutex::new(None));
+        let Some(permit) = self.try_worker_permit() else {
+            send_failure(
+                &tx,
+                "llm-error",
+                request_id,
+                domain,
+                &terminal,
+                "worker-busy",
+                "previous request is still shutting down; write again in a moment".into(),
+            );
+            return RequestCancel::http(request_id, domain, cancelled, terminal, Some(ocr_result));
+        };
         let png = match std::fs::read(png_path) {
             Ok(bytes) => bytes,
             Err(e) => {
-                let _ = tx.send(Err(format!("read image: {e}")));
-                return RequestCancel::http(cancelled, None);
+                send_failure(
+                    &tx,
+                    "ocr-error",
+                    request_id,
+                    domain,
+                    &terminal,
+                    "read-page",
+                    format!("read image: {e}"),
+                );
+                return RequestCancel::http(request_id, domain, cancelled, terminal, None);
             }
         };
         if let Some(ocr) = self.ocr.clone() {
             let oracle = self.clone();
             let ctx = ctx.clone();
             let cancel = Arc::clone(&cancelled);
+            let request_terminal = Arc::clone(&terminal);
             let shared_result = Arc::clone(&ocr_result);
             thread::spawn(move || {
-                let recognized = match ocr.recognize(&png, &cancel) {
+                let permit = permit;
+                let recognized = match ocr.recognize(request_id, domain, &png, &cancel) {
                     Ok(result) => result,
                     Err(error) => {
                         if !cancel.load(Ordering::Acquire) {
-                            let _ = tx.send(Err(error));
+                            send_failure(
+                                &tx,
+                                "ocr-error",
+                                request_id,
+                                domain,
+                                &request_terminal,
+                                "recognize",
+                                error,
+                            );
                         }
                         return;
                     }
@@ -139,59 +233,130 @@ impl HttpOracle {
                 }
                 if recognized.high_confidence() {
                     if let Some(route) = local_route(&recognized.text) {
+                        log_llm_terminal(
+                            &request_terminal,
+                            request_id,
+                            domain,
+                            "done",
+                            "local-route",
+                            None,
+                        );
                         emit_local_route(route, &recognized.text, &tx);
                         return;
                     }
                 }
                 let user_text = external_ocr_turn_text(&ctx, &recognized.text);
                 let catalog_ids = ctx.catalog_ids.clone();
-                oracle.send(user_text, None, &ctx, catalog_ids, tx, cancel, true);
+                oracle.send(
+                    request_id,
+                    domain,
+                    user_text,
+                    None,
+                    &ctx,
+                    catalog_ids,
+                    tx,
+                    cancel,
+                    request_terminal,
+                    permit,
+                    true,
+                );
             });
-            return RequestCancel::http(cancelled, Some(ocr_result));
+            return RequestCancel::http(request_id, domain, cancelled, terminal, Some(ocr_result));
         }
         let img = base64(&png);
         self.send(
+            request_id,
+            domain,
             turn_text(ctx),
             Some(img),
             ctx,
             ctx.catalog_ids.clone(),
             tx,
             Arc::clone(&cancelled),
+            Arc::clone(&terminal),
+            permit,
             false,
         );
-        RequestCancel::http(cancelled, None)
+        RequestCancel::http(request_id, domain, cancelled, terminal, None)
     }
 
-    pub fn ask_text(&self, prompt: &str, ctx: &TurnContext, tx: Sender<Result<Event, String>>) {
+    pub fn ask_text(
+        &self,
+        request_id: u64,
+        domain: &'static str,
+        prompt: &str,
+        ctx: &TurnContext,
+        tx: Sender<Result<Event, String>>,
+    ) -> RequestCancel {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let terminal = Arc::new(AtomicBool::new(false));
+        let Some(permit) = self.try_worker_permit() else {
+            send_failure(
+                &tx,
+                "llm-error",
+                request_id,
+                domain,
+                &terminal,
+                "worker-busy",
+                "previous request is still shutting down; retry shortly".into(),
+            );
+            return RequestCancel::http(request_id, domain, cancelled, terminal, None);
+        };
         self.send(
+            request_id,
+            domain,
             prompt.to_string(),
             None,
             ctx,
             Vec::new(),
             tx,
-            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&cancelled),
+            Arc::clone(&terminal),
+            permit,
             false,
         );
+        RequestCancel::http(request_id, domain, cancelled, terminal, None)
     }
 
     fn send(
         &self,
+        request_id: u64,
+        domain: &'static str,
         user_text: String,
         image: Option<String>,
         ctx: &TurnContext,
         catalog_ids: Vec<u64>,
         tx: Sender<Result<Event, String>>,
         cancelled: Arc<AtomicBool>,
+        terminal: Arc<AtomicBool>,
+        permit: WorkerPermit,
         external_ocr: bool,
     ) {
+        eprintln!(
+            "magic-paper: event=llm-start request={}:{} domain={domain} backend=http api={:?} input={}",
+            std::process::id(),
+            request_id,
+            self.api,
+            if external_ocr {
+                "ocr-text"
+            } else if image.is_some() {
+                "page-image"
+            } else {
+                "text"
+            }
+        );
         if self.api == HttpApi::Responses {
             self.send_responses(
+                request_id,
+                domain,
                 user_text,
                 image,
                 ctx,
                 catalog_ids,
                 tx,
                 cancelled,
+                terminal,
+                permit,
                 external_ocr,
             );
             return;
@@ -232,6 +397,7 @@ impl HttpOracle {
 
         let agent = self.agent.clone();
         thread::spawn(move || {
+            let _permit = permit;
             // Guard rails on the socket: without them a dropped connection or
             // a stalled SSE stream leaves the diary "thinking" forever. The
             // read timeout is per-read, so a healthy stream can run long —
@@ -273,22 +439,50 @@ impl HttpOracle {
                         eprintln!("riddle: endpoint wants max_completion_tokens; retrying");
                         request("max_completion_tokens")
                     } else {
-                        let _ = tx.send(Err(format!("http 400: {}", detail.trim())));
+                        send_failure(
+                            &tx,
+                            "llm-error",
+                            request_id,
+                            domain,
+                            &terminal,
+                            "request",
+                            format!("http 400: {}", detail.trim()),
+                        );
                         return;
                     }
                 }
                 other => other,
             };
 
+            if cancelled.load(Ordering::Acquire) {
+                return;
+            }
+
             let reader = match resp {
                 Ok(r) => r.into_reader(),
                 Err(ureq::Error::Status(code, r)) => {
                     let detail = r.into_string().unwrap_or_default();
-                    let _ = tx.send(Err(format!("http {code}: {}", detail.trim())));
+                    send_failure(
+                        &tx,
+                        "llm-error",
+                        request_id,
+                        domain,
+                        &terminal,
+                        "request",
+                        format!("http {code}: {}", detail.trim()),
+                    );
                     return;
                 }
                 Err(e) => {
-                    let _ = tx.send(Err(format!("request failed: {e}")));
+                    send_failure(
+                        &tx,
+                        "llm-error",
+                        request_id,
+                        domain,
+                        &terminal,
+                        "request",
+                        format!("request failed: {e}"),
+                    );
                     return;
                 }
             };
@@ -311,14 +505,39 @@ impl HttpOracle {
                         );
                         first = false;
                     }
+                    if ev.is_err() {
+                        log_llm_terminal(
+                            &terminal,
+                            request_id,
+                            domain,
+                            "error",
+                            "paper-parse",
+                            None,
+                        );
+                    }
                     let _ = tx.send(ev);
                 }
             };
-            for line in BufReader::new(reader).lines().map_while(Result::ok) {
+            for line in BufReader::new(reader).lines() {
                 if cancelled.load(Ordering::Acquire) {
                     eprintln!("riddle: speculative chat request cancelled");
                     return;
                 }
+                let line = match line {
+                    Ok(line) => line,
+                    Err(error) => {
+                        send_failure(
+                            &tx,
+                            "llm-error",
+                            request_id,
+                            domain,
+                            &terminal,
+                            "stream-read",
+                            format!("response stream failed: {error}"),
+                        );
+                        return;
+                    }
+                };
                 let line = line.trim();
                 let Some(data) = line.strip_prefix("data:") else {
                     continue;
@@ -335,19 +554,48 @@ impl HttpOracle {
                     emit(parser.advance(&acc, false));
                 }
             }
+            if cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            if acc.trim().is_empty() {
+                send_failure(
+                    &tx,
+                    "llm-error",
+                    request_id,
+                    domain,
+                    &terminal,
+                    "empty-response",
+                    "chat completions returned no paper answer".into(),
+                );
+                return;
+            }
             emit(parser.advance(&acc, true));
+            if !cancelled.load(Ordering::Acquire) {
+                log_llm_terminal(
+                    &terminal,
+                    request_id,
+                    domain,
+                    "done",
+                    "chat-completions",
+                    Some(asked.elapsed().as_millis()),
+                );
+            }
             // tx drops here → the diary's receiver disconnects = reply complete.
         });
     }
 
     fn send_responses(
         &self,
+        request_id: u64,
+        domain: &'static str,
         user_text: String,
         image: Option<String>,
         ctx: &TurnContext,
         catalog_ids: Vec<u64>,
         tx: Sender<Result<Event, String>>,
         cancelled: Arc<AtomicBool>,
+        terminal: Arc<AtomicBool>,
+        permit: WorkerPermit,
         external_ocr: bool,
     ) {
         let (base, key, model) = (self.base.clone(), self.key.clone(), self.model.clone());
@@ -416,21 +664,41 @@ impl HttpOracle {
         );
 
         thread::spawn(move || {
+            let _permit = permit;
             let asked = std::time::Instant::now();
             let resp = agent
                 .post(&format!("{base}/responses"))
                 .set("Authorization", &format!("Bearer {key}"))
                 .set("Content-Type", "application/json")
                 .send_string(&body);
+            if cancelled.load(Ordering::Acquire) {
+                return;
+            }
             let reader = match resp {
                 Ok(r) => r.into_reader(),
                 Err(ureq::Error::Status(code, r)) => {
                     let detail = r.into_string().unwrap_or_default();
-                    let _ = tx.send(Err(format!("responses http {code}: {}", detail.trim())));
+                    send_failure(
+                        &tx,
+                        "llm-error",
+                        request_id,
+                        domain,
+                        &terminal,
+                        "request",
+                        format!("responses http {code}: {}", detail.trim()),
+                    );
                     return;
                 }
                 Err(e) => {
-                    let _ = tx.send(Err(format!("responses request failed: {e}")));
+                    send_failure(
+                        &tx,
+                        "llm-error",
+                        request_id,
+                        domain,
+                        &terminal,
+                        "request",
+                        format!("responses request failed: {e}"),
+                    );
                     return;
                 }
             };
@@ -491,17 +759,40 @@ impl HttpOracle {
                             let _ = tx.send(Ok(other));
                         }
                         Err(e) => {
+                            log_llm_terminal(
+                                &terminal,
+                                request_id,
+                                domain,
+                                "error",
+                                "paper-parse",
+                                None,
+                            );
                             let _ = tx.send(Err(e));
                         }
                     }
                 }
             };
 
-            for line in BufReader::new(reader).lines().map_while(Result::ok) {
+            for line in BufReader::new(reader).lines() {
                 if cancelled.load(Ordering::Acquire) {
                     eprintln!("riddle: speculative Responses request cancelled");
                     return;
                 }
+                let line = match line {
+                    Ok(line) => line,
+                    Err(error) => {
+                        send_failure(
+                            &tx,
+                            "llm-error",
+                            request_id,
+                            domain,
+                            &terminal,
+                            "stream-read",
+                            format!("responses stream failed: {error}"),
+                        );
+                        return;
+                    }
+                };
                 let line = line.trim();
                 let Some(data) = line.strip_prefix("data:") else {
                     continue;
@@ -531,17 +822,34 @@ impl HttpOracle {
             if cancelled.load(Ordering::Acquire) {
                 return;
             }
-            deliver(parser.advance(&acc, true));
-            drop(deliver);
-
             if let Some(detail) = failed {
-                let _ = tx.send(Err(format!("responses failed: {detail}")));
+                drop(deliver);
+                send_failure(
+                    &tx,
+                    "llm-error",
+                    request_id,
+                    domain,
+                    &terminal,
+                    "stream",
+                    format!("responses failed: {detail}"),
+                );
                 return;
             }
             if acc.trim().is_empty() {
-                let _ = tx.send(Err("responses returned no paper answer".into()));
+                drop(deliver);
+                send_failure(
+                    &tx,
+                    "llm-error",
+                    request_id,
+                    domain,
+                    &terminal,
+                    "empty-response",
+                    "responses returned no paper answer".into(),
+                );
                 return;
             }
+            deliver(parser.advance(&acc, true));
+            drop(deliver);
 
             if holding_tail {
                 let rewritten = match rewrite_model {
@@ -550,6 +858,9 @@ impl HttpOracle {
                     }
                     None => Err("no paper editor model is configured".into()),
                 };
+                if cancelled.load(Ordering::Acquire) {
+                    return;
+                }
                 match rewritten {
                     Ok(text) if !paper_answer_needs_rewrite(&text) => {
                         if first_paper_event {
@@ -562,10 +873,26 @@ impl HttpOracle {
                         let _ = tx.send(Ok(Event::Ink(text)));
                     }
                     Ok(_) => {
-                        let _ = tx.send(Err("paper editor kept non-paper formatting".into()));
+                        send_failure(
+                            &tx,
+                            "llm-error",
+                            request_id,
+                            domain,
+                            &terminal,
+                            "paper-editor",
+                            "paper editor kept non-paper formatting".into(),
+                        );
                     }
                     Err(e) => {
-                        let _ = tx.send(Err(format!("paper editor failed: {e}")));
+                        send_failure(
+                            &tx,
+                            "llm-error",
+                            request_id,
+                            domain,
+                            &terminal,
+                            "paper-editor",
+                            format!("paper editor failed: {e}"),
+                        );
                     }
                 }
                 if let Some(transcript) = held_transcript {
@@ -573,11 +900,32 @@ impl HttpOracle {
                 }
             }
 
-            eprintln!(
-                "riddle: oracle complete +{}ms search={}",
-                asked.elapsed().as_millis(),
-                if searched { "yes" } else { "no" }
+            log_llm_terminal(
+                &terminal,
+                request_id,
+                domain,
+                "done",
+                if searched {
+                    "responses-search"
+                } else {
+                    "responses"
+                },
+                Some(asked.elapsed().as_millis()),
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_gate_never_queues_more_network_workers() {
+        let gate = Arc::new(AtomicBool::new(false));
+        let first = take_worker_permit(&gate).expect("first request owns the worker");
+        assert!(take_worker_permit(&gate).is_none());
+        drop(first);
+        assert!(take_worker_permit(&gate).is_some());
     }
 }

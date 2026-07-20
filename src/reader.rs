@@ -1,4 +1,4 @@
-//! Local book discovery and the filesystem handoff to KOReader.
+//! Local book discovery and the managed-runtime handoff to KOReader.
 //!
 //! reMarkable stores the human title in `<uuid>.metadata` and the book itself
 //! under the same UUID.  KOReader, on the other hand, wants a real path.  This
@@ -6,14 +6,11 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 pub const REMARKABLE_LIBRARY: &str = "/home/root/.local/share/remarkable/xochitl";
 pub const KOREADER_LIBRARY: &str = "/home/root/koreader";
-pub const HANDOFF_REQUEST: &str = "/run/magicpaper-koreader.request";
-pub const HANDOFF_ERROR: &str = "/run/magicpaper-koreader.error";
-
 const MAX_CANDIDATES: usize = 9;
 const MAX_WALK_DEPTH: usize = 8;
 
@@ -320,9 +317,9 @@ fn json_string_field(document: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Canonicalize and constrain a request before the shell supervisor ever sees
-/// it.  Newlines are forbidden because the handoff is deliberately a simple
-/// one-line file consumed by POSIX shell.
+/// Canonicalize and constrain a request before it crosses into the application
+/// runtime. The manager receives only existing supported books/directories
+/// underneath one of MagicPaper's two known libraries.
 pub fn validated_target(path: &Path) -> io::Result<PathBuf> {
     let canonical = fs::canonicalize(path)?;
     if canonical.to_string_lossy().contains(['\n', '\r']) {
@@ -349,26 +346,6 @@ pub fn validated_target(path: &Path) -> io::Result<PathBuf> {
             "KOReader target is not a supported book or directory",
         ))
     }
-}
-
-pub fn write_handoff(path: &Path) -> io::Result<()> {
-    let target = validated_target(path)?;
-    write_handoff_at(Path::new(HANDOFF_REQUEST), &target)
-}
-
-pub fn take_launch_error() -> Option<String> {
-    let message = fs::read_to_string(HANDOFF_ERROR).ok()?;
-    let _ = fs::remove_file(HANDOFF_ERROR);
-    let message = message.trim();
-    (!message.is_empty()).then(|| message.to_string())
-}
-
-fn write_handoff_at(request: &Path, target: &Path) -> io::Result<()> {
-    let temporary = request.with_extension("request.tmp");
-    let mut file = fs::File::create(&temporary)?;
-    writeln!(file, "{}", target.display())?;
-    file.sync_all()?;
-    fs::rename(temporary, request)
 }
 
 #[cfg(test)]
@@ -474,15 +451,5 @@ mod tests {
         );
         fs::remove_dir_all(rm).unwrap();
         fs::remove_dir_all(ko).unwrap();
-    }
-
-    #[test]
-    fn handoff_file_is_replaced_atomically() {
-        let dir = temp("handoff");
-        let request = dir.join("request");
-        write_handoff_at(&request, Path::new("/safe/book.epub")).unwrap();
-        assert_eq!(fs::read_to_string(&request).unwrap(), "/safe/book.epub\n");
-        assert!(!request.with_extension("request.tmp").exists());
-        fs::remove_dir_all(dir).unwrap();
     }
 }

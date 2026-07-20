@@ -5,8 +5,10 @@
 //! deliberately separate from page memories: it is small, explicit, survives
 //! restarts, and can be checked without spending an oracle request.
 
-use std::io;
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 
 mod parser;
 
@@ -67,15 +69,90 @@ pub struct TaskStore {
     pub entries: Vec<Task>,
 }
 
+/// Process-lifetime lease held by the screenless task agent. Its advisory lock
+/// lets every UI mode (managed QTFB or legacy takeover) prove that it must not
+/// run a second scheduler.
+pub struct SchedulerLease(File);
+
+impl Drop for SchedulerLease {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+fn task_dir() -> PathBuf {
+    std::env::var("RIDDLE_TASKS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/home/root/riddle-data/tasks"))
+}
+
+fn scheduler_lock_file(dir: &Path) -> io::Result<File> {
+    std::fs::create_dir_all(&dir)?;
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(dir.join("scheduler.lock"))
+}
+
+fn acquire_scheduler_lease_in(dir: &Path) -> io::Result<SchedulerLease> {
+    let file = scheduler_lock_file(dir)?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let error = io::Error::last_os_error();
+        return Err(io::Error::new(
+            if error.kind() == io::ErrorKind::WouldBlock {
+                io::ErrorKind::AlreadyExists
+            } else {
+                error.kind()
+            },
+            format!("task scheduler lease unavailable: {error}"),
+        ));
+    }
+    Ok(SchedulerLease(file))
+}
+
+pub fn acquire_scheduler_lease() -> io::Result<SchedulerLease> {
+    acquire_scheduler_lease_in(&task_dir())
+}
+
+/// Fail closed: if ownership cannot be checked, the interactive UI must not
+/// risk issuing duplicate scheduled API requests.
+fn external_scheduler_active_in(dir: &Path) -> bool {
+    let Ok(file) = scheduler_lock_file(dir) else {
+        return true;
+    };
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return true;
+    }
+    unsafe {
+        libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+    }
+    false
+}
+
+pub fn external_scheduler_active() -> bool {
+    external_scheduler_active_in(&task_dir())
+}
+
+struct TaskLock(File);
+
+impl Drop for TaskLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
 impl TaskStore {
     pub fn open() -> Option<Self> {
         match std::env::var("RIDDLE_TASKS").as_deref() {
             Ok("off") | Ok("0") | Ok("no") | Ok("false") => return None,
             _ => {}
         }
-        let dir = std::env::var("RIDDLE_TASKS_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/home/root/riddle-data/tasks"));
+        let dir = task_dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
             eprintln!("magic-paper: tasks disabled ({}: {e})", dir.display());
             return None;
@@ -92,7 +169,27 @@ impl TaskStore {
         self.dir.join("index.tsv")
     }
 
+    fn lock_exclusive(&self) -> io::Result<TaskLock> {
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(self.dir.join("index.lock"))?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(TaskLock(file))
+    }
+
     fn load(&mut self) {
+        let Ok(_lock) = self.lock_exclusive() else {
+            return;
+        };
+        self.load_unlocked();
+    }
+
+    fn load_unlocked(&mut self) {
+        self.entries.clear();
         let Ok(text) = std::fs::read_to_string(self.index_path()) else {
             return;
         };
@@ -147,7 +244,13 @@ impl TaskStore {
             ));
         }
         let tmp = self.dir.join("index.tsv.new");
-        std::fs::write(&tmp, out)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp)?;
+        file.write_all(out.as_bytes())?;
+        file.sync_all()?;
         std::fs::rename(tmp, self.index_path())
     }
 
@@ -162,6 +265,10 @@ impl TaskStore {
         let Some(command) = parse_command(text)? else {
             return Ok(None);
         };
+        let _lock = self
+            .lock_exclusive()
+            .map_err(|error| format!("lock task store: {error}"))?;
+        self.load_unlocked();
         let old_entries = self.entries.clone();
         let change = match command {
             TaskCommand::Add {
@@ -255,6 +362,10 @@ impl TaskStore {
 
     /// Delete directly from the local task panel, without an oracle turn.
     pub fn delete_number(&mut self, number: usize) -> Result<Task, String> {
+        let _lock = self
+            .lock_exclusive()
+            .map_err(|error| format!("lock task store: {error}"))?;
+        self.load_unlocked();
         let index = self.index(number)?;
         let task = self.entries.remove(index);
         if let Err(e) = self.persist() {
@@ -267,6 +378,10 @@ impl TaskStore {
     /// Toggle from the paper list. Enabling starts a fresh full interval so a
     /// task disabled for a while never fires immediately or replays backlog.
     pub fn toggle_number(&mut self, number: usize, now: u64) -> Result<Task, String> {
+        let _lock = self
+            .lock_exclusive()
+            .map_err(|error| format!("lock task store: {error}"))?;
+        self.load_unlocked();
         let index = self.index(number)?;
         let before = self.entries[index].clone();
         self.entries[index].paused = !self.entries[index].paused;
@@ -296,18 +411,32 @@ impl TaskStore {
             .min()
     }
 
-    /// Advance only tasks whose output completed successfully. Missed periods
-    /// are intentionally skipped instead of flooding the page after downtime.
-    pub fn mark_ran(&mut self, ids: &[u64], now: u64) -> io::Result<()> {
-        if ids.is_empty() {
-            return Ok(());
+    /// Atomically advance a completed due batch only if every task is still
+    /// byte-for-byte the task that produced the request. A concurrent delete,
+    /// pause, resume, modification, or another scheduler completion makes the
+    /// batch stale, so its output must be discarded rather than resurrecting
+    /// old state or advancing a replacement task.
+    pub fn complete_due_if_unchanged(&mut self, expected: &[Task], now: u64) -> io::Result<bool> {
+        if expected.is_empty() {
+            return Ok(false);
         }
-        for task in &mut self.entries {
-            if ids.contains(&task.id) {
+        let _lock = self.lock_exclusive()?;
+        self.load_unlocked();
+        if expected.iter().any(|snapshot| {
+            self.entries
+                .iter()
+                .find(|task| task.id == snapshot.id)
+                .is_none_or(|current| current != snapshot || current.paused)
+        }) {
+            return Ok(false);
+        }
+        for snapshot in expected {
+            if let Some(task) = self.entries.iter_mut().find(|task| task.id == snapshot.id) {
                 task.next_due = now.saturating_add(task.interval_secs);
             }
         }
-        self.persist()
+        self.persist()?;
+        Ok(true)
     }
 
     /// A fresh catalog sent with every handwritten turn, so the oracle can
@@ -436,6 +565,15 @@ mod tests {
         }
     }
 
+    fn reopen(dir: &std::path::Path) -> TaskStore {
+        let mut store = TaskStore {
+            dir: dir.to_path_buf(),
+            entries: Vec::new(),
+        };
+        store.load();
+        store
+    }
+
     #[test]
     fn parses_simplified_and_traditional_task_commands() {
         assert_eq!(
@@ -511,7 +649,9 @@ mod tests {
         let task = add(&mut s, "任务 每五分钟讲一个黑暗冷笑话", 1000);
         assert!(s.due(1299).is_empty());
         assert_eq!(s.due(1300), vec![task.clone()]);
-        s.mark_ran(&[task.id], 1301).unwrap();
+        assert!(s
+            .complete_due_if_unchanged(std::slice::from_ref(&task), 1301)
+            .unwrap());
         assert!(s.due(1600).is_empty());
         assert_eq!(s.due(1601).len(), 1);
 
@@ -608,5 +748,119 @@ mod tests {
             .unwrap_err()
             .contains("at most 9"));
         let _ = std::fs::remove_dir_all(s.dir);
+    }
+
+    #[test]
+    fn stale_agent_completion_cannot_resurrect_ui_changes() {
+        let mut ui = tmp_store("agent-ui-race");
+        let task = add(&mut ui, "任务 每五分钟提醒喝水", 1000);
+        let dir = ui.dir.clone();
+        let mut agent = reopen(&dir);
+        let due_snapshot = vec![task.clone()];
+
+        ui.apply_from_transcript("修改任务 1 每十分钟提醒休息", 1300)
+            .unwrap();
+        assert!(!agent
+            .complete_due_if_unchanged(&due_snapshot, 1400)
+            .unwrap());
+        let current = reopen(&dir);
+        assert_eq!(current.entries[0].instruction, "提醒休息");
+        assert_eq!(current.entries[0].interval_secs, 600);
+        assert_eq!(current.entries[0].next_due, 1900);
+
+        let modified = current.entries[0].clone();
+        ui.delete_number(1).unwrap();
+        assert!(!agent.complete_due_if_unchanged(&[modified], 2000).unwrap());
+        assert!(reopen(&dir).entries.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn paused_task_is_not_advanced_by_stale_agent_store() {
+        let mut ui = tmp_store("pause-race");
+        let task = add(&mut ui, "任务 每五分钟提醒喝水", 1000);
+        let dir = ui.dir.clone();
+        let mut stale_agent = reopen(&dir);
+        ui.toggle_number(1, 1200).unwrap();
+        assert!(!stale_agent
+            .complete_due_if_unchanged(std::slice::from_ref(&task), 1300)
+            .unwrap());
+        let current = reopen(&dir);
+        assert!(current.entries[0].paused);
+        assert_eq!(current.entries[0].next_due, task.next_due);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_one_concurrent_scheduler_can_complete_a_due_snapshot() {
+        let mut original = tmp_store("double-complete");
+        let task = add(&mut original, "任务 每五分钟提醒喝水", 1000);
+        let dir = original.dir.clone();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for now in [1301, 1302] {
+            let dir = dir.clone();
+            let task = task.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let mut store = reopen(&dir);
+                barrier.wait();
+                store.complete_due_if_unchanged(&[task], now).unwrap()
+            }));
+        }
+        barrier.wait();
+        let results: Vec<bool> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| **result).count(), 1);
+        assert_eq!(reopen(&dir).entries.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_additions_reload_under_lock_and_keep_unique_ids() {
+        let original = tmp_store("concurrent-add");
+        let dir = original.dir.clone();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for (text, now) in [
+            ("任务 每五分钟提醒喝水", 1000),
+            ("任务 每十分钟提醒休息", 1001),
+        ] {
+            let dir = dir.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let mut store = reopen(&dir);
+                barrier.wait();
+                store.apply_from_transcript(text, now).unwrap();
+            }));
+        }
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let current = reopen(&dir);
+        assert_eq!(current.entries.len(), 2);
+        assert_ne!(current.entries[0].id, current.entries[1].id);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn scheduler_lease_excludes_every_other_ui_or_agent_owner() {
+        let store = tmp_store("scheduler-lease");
+        let dir = store.dir.clone();
+        drop(store);
+        let owner = acquire_scheduler_lease_in(&dir).expect("first scheduler owns the lease");
+        assert!(external_scheduler_active_in(&dir));
+        let error = match acquire_scheduler_lease_in(&dir) {
+            Ok(_) => panic!("a second scheduler acquired the same lease"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        drop(owner);
+        assert!(!external_scheduler_active_in(&dir));
+        assert!(acquire_scheduler_lease_in(&dir).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

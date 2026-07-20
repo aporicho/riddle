@@ -11,6 +11,8 @@ mod pen;
 mod power;
 mod qtfb;
 mod reader;
+mod runtime_control;
+mod runtime_env;
 mod storage;
 mod surface;
 mod touch;

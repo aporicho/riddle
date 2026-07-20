@@ -8,8 +8,8 @@
 //! built with --features takeover and launched with xochitl stopped.
 
 use crate::{
-    agent, display, fb, fonts, ink, memory, oracle, pen, power, qtfb, reader, tasks, todos, touch,
-    ui,
+    agent, display, fb, fonts, ink, memory, oracle, pen, power, qtfb, reader, runtime_control,
+    runtime_env, tasks, todos, touch, ui,
 };
 
 use std::path::PathBuf;
@@ -27,25 +27,285 @@ pub(super) const PNG_PATH: &str = "/tmp/riddle-page.png";
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum RunOutcome {
     Closed,
-    OpenReader(PathBuf),
 }
 
 /// Begin reading a tentative page while its ink is still visible. The page is
 /// not committed until the adaptive fast/slow deadline; more pen input
 /// invalidates this request.
 const IDLE_PREASK: Duration = Duration::from_millis(1000);
+/// A new pressure-bearing event after this silence starts a new stroke, but
+/// elapsed time alone never releases a stationary pen.
+const QTFB_ORPHAN_GAP: Duration = Duration::from_millis(900);
 const DRINK_STAGES: u32 = 14;
 const DRINK_STAGE_DELAY: Duration = Duration::from_millis(50);
 /// How long the diary waits on a silent oracle before giving up on the turn.
 /// Generous: thinking models can lead with a long silence.
 const ORACLE_PATIENCE: Duration = Duration::from_secs(120);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QtfbPenTransition {
+    Hover,
+    Release,
+    Draw {
+        close_orphan: bool,
+        recovered_press: bool,
+    },
+}
+
+fn qtfb_pen_transition(
+    input_type: i32,
+    pressure: i32,
+    pen_down: bool,
+    last_pressure_event: Option<Instant>,
+    now: Instant,
+) -> QtfbPenTransition {
+    if input_type == qtfb::INPUT_PEN_RELEASE
+        || (input_type == qtfb::INPUT_PEN_UPDATE && pressure == 0 && pen_down)
+    {
+        return QtfbPenTransition::Release;
+    }
+    if input_type == qtfb::INPUT_PEN_UPDATE && pressure == 0 {
+        return QtfbPenTransition::Hover;
+    }
+    let close_orphan = pen_down
+        && last_pressure_event
+            .is_some_and(|last| now.saturating_duration_since(last) >= QTFB_ORPHAN_GAP);
+    QtfbPenTransition::Draw {
+        close_orphan,
+        recovered_press: !pen_down || close_orphan,
+    }
+}
+
+#[derive(Default)]
+struct PenTrace {
+    next_id: u64,
+    active: Option<ActivePenTrace>,
+}
+
+struct ActivePenTrace {
+    id: u64,
+    source: &'static str,
+    started: Instant,
+    first_ink: Option<Instant>,
+    presented: bool,
+    presses: u32,
+    updates: u32,
+    releases: u32,
+    recovered_press: u32,
+    recovered_release: u32,
+}
+
+impl PenTrace {
+    fn begin(&mut self, source: &'static str, x: i32, y: i32) {
+        if self.active.is_some() {
+            return;
+        }
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let id = self.next_id;
+        self.active = Some(ActivePenTrace {
+            id,
+            source,
+            started: Instant::now(),
+            first_ink: None,
+            presented: false,
+            presses: 0,
+            updates: 0,
+            releases: 0,
+            recovered_press: 0,
+            recovered_release: 0,
+        });
+        eprintln!("magic-paper: event=pen-session-start session={id} source={source} x={x} y={y}");
+    }
+
+    fn qtfb_edge(&mut self, input_type: i32, recovered: bool) {
+        let Some(trace) = self.active.as_mut() else {
+            return;
+        };
+        match input_type {
+            qtfb::INPUT_PEN_PRESS => trace.presses += 1,
+            qtfb::INPUT_PEN_UPDATE => trace.updates += 1,
+            qtfb::INPUT_PEN_RELEASE => trace.releases += 1,
+            _ => {}
+        }
+        if recovered {
+            trace.recovered_press += 1;
+        }
+    }
+
+    fn ink_changed(&mut self) -> bool {
+        if let Some(trace) = self.active.as_mut() {
+            if trace.first_ink.is_none() {
+                trace.first_ink = Some(Instant::now());
+                return true;
+            }
+        }
+        false
+    }
+
+    fn presented(&mut self) {
+        let Some(trace) = self.active.as_mut() else {
+            return;
+        };
+        if trace.presented {
+            return;
+        }
+        let Some(first_ink) = trace.first_ink else {
+            return;
+        };
+        trace.presented = true;
+        eprintln!(
+            "magic-paper: event=local-ink-presented session={} latency_ms={}",
+            trace.id,
+            first_ink.elapsed().as_millis()
+        );
+    }
+
+    fn recovered_release(&mut self) {
+        if let Some(trace) = self.active.as_mut() {
+            trace.recovered_release += 1;
+        }
+    }
+
+    fn finish(&mut self, reason: &str) -> Option<u64> {
+        let trace = self.active.take()?;
+        eprintln!(
+            "magic-paper: event=pen-session-finish session={} reason={reason} source={} duration_ms={} presses={} updates={} releases={} recovered_press={} recovered_release={}",
+            trace.id,
+            trace.source,
+            trace.started.elapsed().as_millis(),
+            trace.presses,
+            trace.updates,
+            trace.releases,
+            trace.recovered_press,
+            trace.recovered_release,
+        );
+        Some(trace.id)
+    }
+}
+
+/// Cancel and detach any answer that could compete with a new physical pen
+/// press. Dropping its `OracleTurn` closes the old receiver, which is the stale
+/// result barrier even for a backend that cannot abort its process instantly.
+fn interrupt_output_for_pen(
+    state: &mut State,
+    surf: &mut crate::surface::Surface,
+    disp: &display::Display,
+    user_ink: &mut ink::Ink,
+) -> bool {
+    let old = std::mem::replace(state, State::Listening { last_pen: None });
+    let (region, request) = match old {
+        State::Drinking { region, rx, .. } => (Some(region), Some(rx)),
+        State::Thinking { rx, .. } => (None, Some(rx)),
+        State::Replying { plan, rx, .. } => (Some(plan.region), rx),
+        other => {
+            *state = other;
+            return false;
+        }
+    };
+    if let Some(request) = request {
+        request.cancel("user-input-priority");
+    }
+    if let Some(region) = region.filter(|region| !region.is_empty()) {
+        let (x, y, w, h) = region.rect();
+        surf.fill_rect(x as usize, y as usize, w as usize, h as usize, WHITE);
+        disp.update(x, y, w, h, true);
+    }
+    user_ink.clear();
+    eprintln!("magic-paper: event=output-interrupted reason=user-input");
+    true
+}
+
+fn finish_forwarded_pen(
+    state: &mut State,
+    store: &mut Option<memory::MemoryStore>,
+    task_store: &mut Option<tasks::TaskStore>,
+    todo_store: &mut Option<todos::TodoStore>,
+    next_heartbeat: &mut Option<Instant>,
+    surf: &mut crate::surface::Surface,
+    font: &mut fonts::FontBook,
+    disp: &display::Display,
+    user_ink: &mut ink::Ink,
+) -> Option<PathBuf> {
+    if matches!(
+        state,
+        State::TaskList { .. }
+            | State::TodoList { .. }
+            | State::HistoryList { .. }
+            | State::FontList { .. }
+            | State::ReaderList { .. }
+    ) {
+        return finish_paper_list_stroke(
+            state,
+            store,
+            task_store,
+            todo_store,
+            next_heartbeat,
+            surf,
+            font,
+            disp,
+        );
+    }
+    user_ink.pen_up();
+    if let State::Listening { last_pen } = state {
+        *last_pen = Some(Instant::now());
+    }
+    None
+}
+
+fn request_reader(font: &fonts::FontBook, path: &std::path::Path) -> State {
+    let target = match reader::validated_target(path) {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("magic-paper: rejected KOReader target: {error}");
+            return State::Replying {
+                plan: plan_reply(font, "無法開啟：書籍路徑不在可用書庫中。", None),
+                next: Instant::now(),
+                rx: None,
+                page_full: false,
+            };
+        }
+    };
+    match runtime_control::open_reader(&target) {
+        Ok(()) => {
+            eprintln!(
+                "magic-paper: runtime accepted KOReader request — {}",
+                target.display()
+            );
+            // The runtime will move this QTFB surface to the background. Keep
+            // the process and today's page alive for an instant return.
+            State::Listening { last_pen: None }
+        }
+        Err(error) => {
+            eprintln!("magic-paper: KOReader runtime request failed: {error}");
+            let reason = match error.kind() {
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+                    "應用管理器控制服務尚未運行"
+                }
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                    "應用管理器響應超時"
+                }
+                std::io::ErrorKind::PermissionDenied => "應用管理器控制通道權限錯誤",
+                _ => "應用管理器拒絕了啟動請求",
+            };
+            let reply = format!("無法開啟閱讀器：{reason}。請返回管理器後重試。");
+            State::Replying {
+                plan: plan_reply(font, &reply, None),
+                next: Instant::now(),
+                rx: None,
+                page_full: false,
+            }
+        }
+    }
+}
+
 use super::context::build_ctx;
 use super::lists::{
     accept_transcript, apply_local_command, finish_paper_list_stroke, HISTORY_VISIBLE,
 };
 use super::reply::{append_reply, conjure, oracle_excuse, plan_reply, region_all_white};
-use super::state::{cancel_speculative, idle_commit_delay, SpeculativeRequest, State, TurnKind};
+use super::state::{
+    cancel_speculative, idle_commit_delay, OracleTurn, SpeculativeRequest, State, TurnKind,
+};
 use super::timing::{heartbeat_deadline, heartbeat_retry_interval, unix_now};
 
 pub(super) fn run() -> std::io::Result<RunOutcome> {
@@ -54,6 +314,12 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
     let (disp, mut surf) = display::Display::open()?;
     fb::init_screen(surf.w, surf.h);
     let takeover = matches!(disp, display::Display::Quill);
+    // QTFB itself proves that a display host owns this process. Environment
+    // flags cover managed takeover sessions and make the ownership explicit,
+    // but a missing manifest flag must never re-enable raw grabs/heartbeats in
+    // a hosted window.
+    let runtime_managed = runtime_env::is_managed() || !takeover;
+    let agent_queue_mode = runtime_managed || tasks::external_scheduler_active();
     eprintln!(
         "riddle: display {} ({}x{} stride {})",
         if takeover { "quill/takeover" } else { "qtfb" },
@@ -62,12 +328,20 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
         surf.stride
     );
 
-    let mut pen_dev = match pen::PenDevice::open() {
-        Ok(p) => Some(p),
-        Err(e) => {
-            eprintln!("riddle: raw pen unavailable ({e}), falling back to qtfb pen events");
-            None
+    // A hosted QTFB application must never EVIOCGRAB the physical marker:
+    // doing so starves the runtime's Qt input path and makes app switching
+    // unreliable.  Full takeover still uses the high-resolution raw device.
+    let mut pen_dev = if takeover {
+        match pen::PenDevice::open() {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("riddle: raw pen unavailable ({e})");
+                None
+            }
         }
+    } else {
+        eprintln!("riddle: hosted QTFB input enabled; raw input devices left ungrabbed");
+        None
     };
     // Takeover mode: touch is ours too; 5-finger tap = quit.
     let mut touch_dev = if takeover {
@@ -76,13 +350,12 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
         None
     };
     // Takeover mode: the power button is ours too (sleep page + suspend).
-    let manager_owns_power = std::env::var_os("REMAGIC_MANAGED").is_some();
-    let mut power_dev = if takeover && !manager_owns_power {
+    let mut power_dev = if takeover && !runtime_managed {
         power::PowerButton::open()
             .map_err(|e| eprintln!("riddle: no power button ({e})"))
             .ok()
     } else {
-        if manager_owns_power {
+        if runtime_managed {
             eprintln!("riddle: Remagic manager owns the power-button lifecycle");
         }
         None
@@ -134,15 +407,9 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
 
     let mut user_ink = ink::Ink::new();
     let mut state = State::Listening { last_pen: None };
-    if let Some(error) = reader::take_launch_error() {
-        eprintln!("magic-paper: KOReader handoff reported: {error}");
-        state = State::Replying {
-            plan: plan_reply(&font, &error, None),
-            next: Instant::now(),
-            rx: None,
-        };
-    }
     let mut pen_down = false;
+    let mut last_qtfb_pen_event: Option<Instant> = None;
+    let mut pen_trace = PenTrace::default();
     let mut speculative: Option<SpeculativeRequest> = None;
     let mut speculative_attempted = false;
     // The turn being remembered: strokes captured at commit, transcript and
@@ -153,10 +420,11 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
     let mut turn_transcript: Option<String> = None;
     let mut turn_failed = false;
     let mut turn_kind = TurnKind::User;
-    let mut turn_task_ids: Vec<u64> = Vec::new();
+    let mut turn_tasks: Vec<tasks::Task> = Vec::new();
+    let mut _ui_scheduler_lease: Option<tasks::SchedulerLease> = None;
     // Under Remagic the screenless agent owns scheduled execution. The UI
     // only consumes queued results, so a timer can never race Master's pen.
-    let mut next_heartbeat = if manager_owns_power {
+    let mut next_heartbeat = if agent_queue_mode {
         None
     } else {
         heartbeat_deadline(&task_store)
@@ -169,18 +437,22 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
     let mut stylus_on = false;
     let mut stylus_tapped = false;
     let mut ink_dirty = BBox::empty();
+    let mut ink_flush_urgent = false;
     let mut last_flush = Instant::now();
     let mut reader_target: Option<PathBuf> = None;
+    // Only one forwarded finger drives paper controls. Other simultaneous
+    // touch IDs are ignored; handwriting itself remains pen-only.
+    let mut primary_touch: Option<i32> = None;
     // Takeover swaps are cheap and synchronous; qtfb needs coalescing.
     let flush_every = if takeover {
         Duration::from_millis(8)
     } else {
-        Duration::from_millis(35)
+        Duration::from_millis(16)
     };
 
     eprintln!("riddle: the diary is open");
 
-    'main: loop {
+    loop {
         if sigterm.load(Ordering::Relaxed) {
             break;
         }
@@ -259,7 +531,11 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                 power_grace = Instant::now() + Duration::from_secs(3);
                 // Recalculate from wall-clock time: tasks may have become due
                 // while the tablet slept.
-                next_heartbeat = heartbeat_deadline(&task_store);
+                next_heartbeat = if agent_queue_mode {
+                    None
+                } else {
+                    heartbeat_deadline(&task_store)
+                };
             }
         }
 
@@ -290,12 +566,13 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                             &disp,
                         ) {
                             reader_target = Some(path);
-                            break 'main;
+                            break;
                         }
                         continue;
                     }
                     if pen_down {
                         pen_down = false;
+                        last_qtfb_pen_event = None;
                         user_ink.pen_up();
                         if let State::Listening { ref mut last_pen } = state {
                             *last_pen = Some(Instant::now());
@@ -303,8 +580,20 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                     }
                     continue;
                 }
+                if matches!(
+                    &state,
+                    State::Drinking { .. } | State::Thinking { .. } | State::Replying { .. }
+                ) && interrupt_output_for_pen(&mut state, &mut surf, &disp, &mut user_ink)
+                {
+                    _ui_scheduler_lease = None;
+                    turn_kind = TurnKind::User;
+                    turn_tasks.clear();
+                    turn_reply.clear();
+                    turn_transcript = None;
+                }
                 match state {
                     State::Listening { ref mut last_pen } => {
+                        pen_trace.begin("raw", s.x, s.y);
                         cancel_speculative(&mut speculative, "writing resumed");
                         speculative_attempted = false;
                         pen_down = true;
@@ -318,10 +607,12 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                         if !d.is_empty() {
                             ink_dirty.add(d.x0, d.y0, 0);
                             ink_dirty.add(d.x1, d.y1, 0);
+                            ink_flush_urgent |= pen_trace.ink_changed();
                         }
                         *last_pen = Some(Instant::now());
                     }
                     State::Lingering { region, .. } | State::FadingReply { region, .. } => {
+                        pen_trace.begin("raw", s.x, s.y);
                         let (x, y, w, h) = region.rect();
                         surf.fill_rect(x as usize, y as usize, w as usize, h as usize, WHITE);
                         disp.update(x, y, w, h, true);
@@ -336,6 +627,7 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                         if !d.is_empty() {
                             ink_dirty.add(d.x0, d.y0, 0);
                             ink_dirty.add(d.x1, d.y1, 0);
+                            ink_flush_urgent |= pen_trace.ink_changed();
                         }
                         state = State::Listening {
                             last_pen: Some(Instant::now()),
@@ -371,61 +663,218 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
             Err(_) => break, // qtfb window closed
         };
         for ev in events {
-            if pen_dev.is_some() {
+            if matches!(
+                ev.input_type,
+                qtfb::INPUT_PEN_PRESS | qtfb::INPUT_PEN_UPDATE | qtfb::INPUT_PEN_RELEASE
+            ) {
+                let now = Instant::now();
+                let transition = qtfb_pen_transition(
+                    ev.input_type,
+                    ev.pressure_percent(),
+                    pen_down,
+                    last_qtfb_pen_event,
+                    now,
+                );
+                match transition {
+                    QtfbPenTransition::Hover => continue,
+                    QtfbPenTransition::Release => {
+                        pen_trace.qtfb_edge(ev.input_type, false);
+                        if ev.input_type == qtfb::INPUT_PEN_UPDATE {
+                            pen_trace.recovered_release();
+                            eprintln!(
+                                "magic-paper: event=pen-release-recovered source=qtfb reason=pressure-zero"
+                            );
+                        }
+                        stylus_on = false;
+                        last_qtfb_pen_event = None;
+                        if pen_down {
+                            pen_down = false;
+                            if let Some(path) = finish_forwarded_pen(
+                                &mut state,
+                                &mut store,
+                                &mut task_store,
+                                &mut todo_store,
+                                &mut next_heartbeat,
+                                &mut surf,
+                                &mut font,
+                                &disp,
+                                &mut user_ink,
+                            ) {
+                                reader_target = Some(path);
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    QtfbPenTransition::Draw {
+                        close_orphan,
+                        recovered_press: _,
+                    } => {
+                        if close_orphan {
+                            pen_trace.recovered_release();
+                            eprintln!(
+                                "magic-paper: event=pen-release-recovered source=qtfb reason=new-pressure-after-gap"
+                            );
+                            pen_down = false;
+                            stylus_on = false;
+                            if let Some(path) = finish_forwarded_pen(
+                                &mut state,
+                                &mut store,
+                                &mut task_store,
+                                &mut todo_store,
+                                &mut next_heartbeat,
+                                &mut surf,
+                                &mut font,
+                                &disp,
+                                &mut user_ink,
+                            ) {
+                                reader_target = Some(path);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                let recovered_press = matches!(
+                    transition,
+                    QtfbPenTransition::Draw {
+                        recovered_press: true,
+                        ..
+                    }
+                );
+                if matches!(
+                    &state,
+                    State::Drinking { .. } | State::Thinking { .. } | State::Replying { .. }
+                ) && interrupt_output_for_pen(&mut state, &mut surf, &disp, &mut user_ink)
+                {
+                    _ui_scheduler_lease = None;
+                    turn_kind = TurnKind::User;
+                    turn_tasks.clear();
+                    turn_reply.clear();
+                    turn_transcript = None;
+                }
+                stylus_on = true;
+                stylus_tapped = true;
+                last_qtfb_pen_event = Some(now);
+                if matches!(
+                    &state,
+                    State::Listening { .. } | State::Lingering { .. } | State::FadingReply { .. }
+                ) {
+                    pen_trace.begin("qtfb", ev.x, ev.y);
+                    pen_trace.qtfb_edge(ev.input_type, recovered_press);
+                }
+                if let State::TaskList { ref mut panel }
+                | State::TodoList { ref mut panel }
+                | State::HistoryList { ref mut panel }
+                | State::ReaderList { ref mut panel, .. } = state
+                {
+                    pen_down = true;
+                    let d = panel.pen_point(&mut surf, ev.x, ev.y);
+                    if !d.is_empty() {
+                        ink_dirty.add(d.x0, d.y0, 0);
+                        ink_dirty.add(d.x1, d.y1, 0);
+                    }
+                } else if let State::FontList { ref mut panel } = state {
+                    pen_down = true;
+                    let d = panel.pen_point(&mut surf, ev.x, ev.y);
+                    if !d.is_empty() {
+                        ink_dirty.add(d.x0, d.y0, 0);
+                        ink_dirty.add(d.x1, d.y1, 0);
+                    }
+                } else if let State::Listening { ref mut last_pen } = state {
+                    cancel_speculative(&mut speculative, "writing resumed");
+                    speculative_attempted = false;
+                    pen_down = true;
+                    let d = match ev.pen_tool() {
+                        pen::Tool::Pen => {
+                            let r = 2 + ev.pressure_percent() / 45;
+                            user_ink.pen_point(&mut surf, ev.x, ev.y, r)
+                        }
+                        pen::Tool::Eraser => user_ink.erase_point(&mut surf, ev.x, ev.y, 22),
+                    };
+                    if !d.is_empty() {
+                        ink_dirty.add(d.x0, d.y0, 0);
+                        ink_dirty.add(d.x1, d.y1, 0);
+                        ink_flush_urgent |= pen_trace.ink_changed();
+                    }
+                    *last_pen = Some(Instant::now());
+                } else if let State::Lingering { region, .. } | State::FadingReply { region, .. } =
+                    state
+                {
+                    let (x, y, w, h) = region.rect();
+                    surf.fill_rect(x as usize, y as usize, w as usize, h as usize, WHITE);
+                    disp.update(x, y, w, h, true);
+                    pen_down = true;
+                    let d = match ev.pen_tool() {
+                        pen::Tool::Pen => {
+                            let r = 2 + ev.pressure_percent() / 45;
+                            user_ink.pen_point(&mut surf, ev.x, ev.y, r)
+                        }
+                        pen::Tool::Eraser => user_ink.erase_point(&mut surf, ev.x, ev.y, 22),
+                    };
+                    if !d.is_empty() {
+                        ink_dirty.add(d.x0, d.y0, 0);
+                        ink_dirty.add(d.x1, d.y1, 0);
+                        ink_flush_urgent |= pen_trace.ink_changed();
+                    }
+                    state = State::Listening {
+                        last_pen: Some(Instant::now()),
+                    };
+                }
                 continue;
             }
             match ev.input_type {
-                qtfb::INPUT_PEN_PRESS | qtfb::INPUT_PEN_UPDATE => {
-                    stylus_on = true;
-                    stylus_tapped = true;
-                    if let State::TaskList { ref mut panel }
-                    | State::TodoList { ref mut panel }
-                    | State::HistoryList { ref mut panel }
-                    | State::ReaderList { ref mut panel, .. } = state
-                    {
-                        pen_down = true;
-                        let d = panel.pen_point(&mut surf, ev.x, ev.y);
-                        if !d.is_empty() {
-                            ink_dirty.add(d.x0, d.y0, 0);
-                            ink_dirty.add(d.x1, d.y1, 0);
+                qtfb::INPUT_TOUCH_PRESS => {
+                    if primary_touch.is_none() {
+                        primary_touch = Some(ev.dev_id);
+                        stylus_on = true;
+                        stylus_tapped = true;
+                    }
+                    if primary_touch == Some(ev.dev_id) {
+                        match state {
+                            State::TaskList { ref mut panel }
+                            | State::TodoList { ref mut panel }
+                            | State::HistoryList { ref mut panel }
+                            | State::ReaderList { ref mut panel, .. } => {
+                                let d = panel.pen_point(&mut surf, ev.x, ev.y);
+                                if !d.is_empty() {
+                                    ink_dirty.add(d.x0, d.y0, 0);
+                                    ink_dirty.add(d.x1, d.y1, 0);
+                                }
+                            }
+                            State::FontList { ref mut panel } => {
+                                let d = panel.pen_point(&mut surf, ev.x, ev.y);
+                                if !d.is_empty() {
+                                    ink_dirty.add(d.x0, d.y0, 0);
+                                    ink_dirty.add(d.x1, d.y1, 0);
+                                }
+                            }
+                            _ => {}
                         }
-                    } else if let State::FontList { ref mut panel } = state {
-                        pen_down = true;
-                        let d = panel.pen_point(&mut surf, ev.x, ev.y);
-                        if !d.is_empty() {
-                            ink_dirty.add(d.x0, d.y0, 0);
-                            ink_dirty.add(d.x1, d.y1, 0);
-                        }
-                    } else if let State::Listening { ref mut last_pen } = state {
-                        cancel_speculative(&mut speculative, "writing resumed");
-                        speculative_attempted = false;
-                        pen_down = true;
-                        let r = 2 + ev.d.clamp(0, 100) / 45;
-                        let d = user_ink.pen_point(&mut surf, ev.x, ev.y, r);
-                        if !d.is_empty() {
-                            ink_dirty.add(d.x0, d.y0, 0);
-                            ink_dirty.add(d.x1, d.y1, 0);
-                        }
-                        *last_pen = Some(Instant::now());
-                    } else if let State::Lingering { region, .. }
-                    | State::FadingReply { region, .. } = state
-                    {
-                        let (x, y, w, h) = region.rect();
-                        surf.fill_rect(x as usize, y as usize, w as usize, h as usize, WHITE);
-                        disp.update(x, y, w, h, true);
-                        pen_down = true;
-                        let r = 2 + ev.d.clamp(0, 100) / 45;
-                        let d = user_ink.pen_point(&mut surf, ev.x, ev.y, r);
-                        if !d.is_empty() {
-                            ink_dirty.add(d.x0, d.y0, 0);
-                            ink_dirty.add(d.x1, d.y1, 0);
-                        }
-                        state = State::Listening {
-                            last_pen: Some(Instant::now()),
-                        };
                     }
                 }
-                qtfb::INPUT_PEN_RELEASE => {
+                qtfb::INPUT_TOUCH_UPDATE if primary_touch == Some(ev.dev_id) => match state {
+                    State::TaskList { ref mut panel }
+                    | State::TodoList { ref mut panel }
+                    | State::HistoryList { ref mut panel }
+                    | State::ReaderList { ref mut panel, .. } => {
+                        let d = panel.pen_point(&mut surf, ev.x, ev.y);
+                        if !d.is_empty() {
+                            ink_dirty.add(d.x0, d.y0, 0);
+                            ink_dirty.add(d.x1, d.y1, 0);
+                        }
+                    }
+                    State::FontList { ref mut panel } => {
+                        let d = panel.pen_point(&mut surf, ev.x, ev.y);
+                        if !d.is_empty() {
+                            ink_dirty.add(d.x0, d.y0, 0);
+                            ink_dirty.add(d.x1, d.y1, 0);
+                        }
+                    }
+                    _ => {}
+                },
+                qtfb::INPUT_TOUCH_RELEASE if primary_touch == Some(ev.dev_id) => {
+                    primary_touch = None;
                     stylus_on = false;
                     if matches!(
                         &state,
@@ -435,7 +884,6 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                             | State::FontList { .. }
                             | State::ReaderList { .. }
                     ) {
-                        pen_down = false;
                         if let Some(path) = finish_paper_list_stroke(
                             &mut state,
                             &mut store,
@@ -447,15 +895,7 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                             &disp,
                         ) {
                             reader_target = Some(path);
-                            break 'main;
-                        }
-                        continue;
-                    }
-                    if pen_down {
-                        pen_down = false;
-                        user_ink.pen_up();
-                        if let State::Listening { ref mut last_pen } = state {
-                            *last_pen = Some(Instant::now());
+                            break;
                         }
                     }
                 }
@@ -463,12 +903,18 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
             }
         }
 
+        if let Some(path) = reader_target.take() {
+            state = request_reader(&font, &path);
+        }
+
         // ---- coalesced ink flush ----
-        if !ink_dirty.is_empty() && last_flush.elapsed() >= flush_every {
+        if !ink_dirty.is_empty() && (ink_flush_urgent || last_flush.elapsed() >= flush_every) {
             let (x, y, w, h) = ink_dirty.rect();
             disp.update(x, y, w, h, true);
             ink_dirty = BBox::empty();
             last_flush = Instant::now();
+            ink_flush_urgent = false;
+            pen_trace.presented();
         }
 
         // ---- state machine ----
@@ -485,11 +931,13 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                         // Everything was erased before the pause: nothing to
                         // commit (and no phantom "?" from erased strokes).
                         cancel_speculative(&mut speculative, "page was erased");
+                        pen_trace.finish("page-erased");
                         user_ink.clear();
                         State::Listening { last_pen: None }
                     } else if ui::help::looks_like_question_mark(user_ink.stroke_list()) {
                         // Absorb the "?" and open the guide instead of asking.
                         cancel_speculative(&mut speculative, "guide gesture");
+                        pen_trace.finish("guide-gesture");
                         let (qx, qy, qw, qh) = user_ink.bbox.rect();
                         surf.fill_rect(qx as usize, qy as usize, qw as usize, qh as usize, WHITE);
                         disp.update(qx, qy, qw, qh, false);
@@ -506,12 +954,14 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                         // No spirit at all: don't eat ink that nothing will
                         // answer — leave the writing and put the reason below.
                         cancel_speculative(&mut speculative, "oracle unavailable");
+                        pen_trace.finish("oracle-unavailable");
                         let y = (user_ink.bbox.y1 + 90).min(screen_h() as i32 - 400);
                         let plan = plan_reply(&font, &oracle_excuse("no oracle"), Some(y));
                         State::Replying {
                             plan,
                             next: Instant::now(),
                             rx: None,
+                            page_full: false,
                         }
                     } else {
                         // Remember this page: strokes now (they're cleared
@@ -525,30 +975,37 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                         turn_transcript = None;
                         turn_failed = false;
                         turn_kind = TurnKind::User;
-                        turn_task_ids.clear();
+                        turn_tasks.clear();
+                        let pen_session = pen_trace.finish("idle-commit").unwrap_or(0);
                         let rx = if let Some(request) = speculative.take() {
                             eprintln!(
-                                "riddle: committing page with speculative request already running"
+                                "magic-paper: event=idle-commit request={} session={pen_session} speculative=true strokes={}",
+                                request.request_id(),
+                                turn_strokes.len()
                             );
-                            request.rx
+                            request
                         } else {
                             if let Err(e) = user_ink.to_png(&surf, PNG_PATH) {
                                 eprintln!("riddle: rasterize failed: {e}");
                             }
                             let (tx, rx) = mpsc::channel();
-                            if let Some(ref o) = oracle {
-                                let _ = o.ask(
-                                    PNG_PATH,
-                                    &build_ctx(&store, &task_store, &todo_store),
-                                    tx,
-                                );
-                            }
+                            let cancel = if let Some(ref o) = oracle {
+                                o.ask(PNG_PATH, &build_ctx(&store, &task_store, &todo_store), tx)
+                            } else {
+                                unreachable!("oracle was checked before committing the page")
+                            };
+                            let request = OracleTurn::new(rx, cancel);
+                            eprintln!(
+                                "magic-paper: event=idle-commit request={} session={pen_session} speculative=false strokes={}",
+                                request.request_id(),
+                                turn_strokes.len()
+                            );
                             // The backend reads the page synchronously before
                             // ask() returns, so the PNG is no longer needed.
                             if std::env::var_os("RIDDLE_KEEP_PAGE").is_none() {
                                 let _ = std::fs::remove_file(PNG_PATH);
                             }
-                            rx
+                            request
                         };
                         let region = user_ink.bbox;
                         State::Drinking {
@@ -580,11 +1037,13 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                                             &build_ctx(&store, &task_store, &todo_store),
                                             tx,
                                         );
-                                        speculative = Some(SpeculativeRequest { rx, cancel });
+                                        let request = SpeculativeRequest::new(rx, cancel);
                                         eprintln!(
-                                            "riddle: speculative oracle started after {}ms idle",
-                                            IDLE_PREASK.as_millis()
+                                            "magic-paper: event=ocr-preask request={} idle_ms={}",
+                                            request.request_id(),
+                                            IDLE_PREASK.as_millis(),
                                         );
+                                        speculative = Some(request);
                                     }
                                     Err(e) => eprintln!(
                                         "riddle: speculative rasterize failed; will retry at commit: {e}"
@@ -598,7 +1057,7 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                     }
                     State::Listening { last_pen }
                 }
-                _ if manager_owns_power
+                _ if agent_queue_mode
                     && !pen_down
                     && !stylus_tapped
                     && user_ink.is_empty()
@@ -614,6 +1073,7 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                                 plan: plan_reply(&font, &reply, None),
                                 next: Instant::now(),
                                 rx: None,
+                                page_full: false,
                             }
                         }
                         Ok(None) => State::Listening { last_pen },
@@ -626,6 +1086,7 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                 _ if !pen_down
                     && !stylus_tapped
                     && user_ink.is_empty()
+                    && !runtime_managed
                     && next_heartbeat.is_some_and(|deadline| Instant::now() >= deadline) =>
                 {
                     let now = unix_now();
@@ -636,24 +1097,41 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                         next_heartbeat = heartbeat_deadline(&task_store);
                         State::Listening { last_pen }
                     } else if let Some(ref o) = oracle {
-                        next_heartbeat = Some(Instant::now() + heartbeat_retry_interval());
-                        turn_id = 0;
-                        turn_strokes.clear();
-                        turn_reply.clear();
-                        turn_transcript = None;
-                        turn_failed = false;
-                        turn_kind = TurnKind::Heartbeat;
-                        turn_task_ids = due.iter().map(|t| t.id).collect();
-                        let prompt = tasks::heartbeat_prompt(&due);
-                        let (tx, rx) = mpsc::channel();
-                        o.ask_text(&prompt, &build_ctx(&store, &task_store, &todo_store), tx);
-                        eprintln!(
-                            "magic-paper: heartbeat — executing {} due task(s)",
-                            turn_task_ids.len()
-                        );
-                        State::Thinking {
-                            rx,
-                            since: Instant::now(),
+                        match tasks::acquire_scheduler_lease() {
+                            Err(error) => {
+                                next_heartbeat = Some(Instant::now() + heartbeat_retry_interval());
+                                eprintln!(
+                                    "magic-paper: heartbeat delegated to external agent: {error}"
+                                );
+                                State::Listening { last_pen }
+                            }
+                            Ok(lease) => {
+                                _ui_scheduler_lease = Some(lease);
+                                next_heartbeat = Some(Instant::now() + heartbeat_retry_interval());
+                                turn_id = 0;
+                                turn_strokes.clear();
+                                turn_reply.clear();
+                                turn_transcript = None;
+                                turn_failed = false;
+                                turn_kind = TurnKind::Heartbeat;
+                                let prompt = tasks::heartbeat_prompt(&due);
+                                turn_tasks = due;
+                                let (tx, rx) = mpsc::channel();
+                                let cancel = o.ask_text(
+                                    &prompt,
+                                    &build_ctx(&store, &task_store, &todo_store),
+                                    tx,
+                                );
+                                let rx = OracleTurn::new(rx, cancel);
+                                eprintln!(
+                                    "magic-paper: heartbeat — executing {} due task(s)",
+                                    turn_tasks.len()
+                                );
+                                State::Thinking {
+                                    rx,
+                                    since: Instant::now(),
+                                }
+                            }
                         }
                     } else {
                         next_heartbeat = Some(Instant::now() + heartbeat_retry_interval());
@@ -716,6 +1194,7 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                                         plan,
                                         next: Instant::now(),
                                         rx: None,
+                                        page_full: false,
                                     }
                                 }
                             }
@@ -806,8 +1285,7 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                                             "magic-paper: handing page to KOReader — {}",
                                             path.display()
                                         );
-                                        reader_target = Some(path);
-                                        break 'main;
+                                        request_reader(&font, &path)
                                     }
                                     reader::Lookup::Choose(books) => {
                                         let lines: Vec<String> =
@@ -839,6 +1317,7 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                                             plan,
                                             next: Instant::now(),
                                             rx: None,
+                                            page_full: false,
                                         }
                                     }
                                 }
@@ -850,6 +1329,7 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                                     plan,
                                     next: Instant::now(),
                                     rx: None,
+                                    page_full: false,
                                 }
                             }
                         },
@@ -871,6 +1351,7 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                                 plan,
                                 next: Instant::now(),
                                 rx: None,
+                                page_full: false,
                             }
                         }
                         Ok(Event::Ink(text)) => {
@@ -880,6 +1361,7 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                                 plan,
                                 next: Instant::now(),
                                 rx: Some(rx),
+                                page_full: false,
                             }
                         }
                         Ok(Event::Transcript(t)) => {
@@ -897,6 +1379,11 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                             State::Thinking { rx, since }
                         }
                         Err(e) => {
+                            eprintln!(
+                                "magic-paper: event=turn-error request={} stage=first-event error={:?}",
+                                rx.request_id(),
+                                e.lines().next().unwrap_or("unknown error")
+                            );
                             eprintln!("riddle: oracle failed: {e}");
                             turn_failed = true;
                             let plan = plan_reply(&font, &oracle_excuse(&e), None);
@@ -904,6 +1391,7 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                                 plan,
                                 next: Instant::now(),
                                 rx: None,
+                                page_full: false,
                             }
                         }
                     }
@@ -913,45 +1401,111 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                         // The oracle never answered (stalled stream, dead pi):
                         // say so instead of leaving a blank page forever.
                         eprintln!(
-                            "riddle: oracle timed out after {}s",
+                            "magic-paper: event=turn-error request={} stage=timeout timeout_seconds={}",
+                            rx.request_id(),
                             ORACLE_PATIENCE.as_secs()
                         );
+                        rx.cancel("ui-timeout");
                         let plan = plan_reply(&font, &oracle_excuse("timed out"), None);
                         State::Replying {
                             plan,
                             next: Instant::now(),
                             rx: None,
+                            page_full: false,
                         }
                     } else {
                         State::Thinking { rx, since }
                     }
                 }
-                Err(mpsc::TryRecvError::Disconnected) => State::Listening { last_pen: None },
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    eprintln!(
+                        "magic-paper: event=turn-stream-closed request={} phase=thinking",
+                        rx.request_id()
+                    );
+                    if turn_kind == TurnKind::Heartbeat {
+                        _ui_scheduler_lease = None;
+                    }
+                    State::Listening { last_pen: None }
+                }
             },
 
             State::Replying {
                 mut plan,
                 next,
                 mut rx,
+                mut page_full,
             } => {
                 // More of the reply may still be streaming in: append each
                 // new chunk below what is already planned, mid-animation.
                 if let Some(ref r) = rx {
-                    let drop_rx = match r.try_recv() {
+                    let close_rx = match r.try_recv() {
                         Ok(Ok(Event::Ink(more))) => {
-                            if plan.next_y > screen_h() as i32 - 200 {
-                                // The page is full: let the rest go unwritten
-                                // rather than inking below the visible page.
-                                eprintln!(
-                                    "riddle: reply reached the page bottom; trailing text dropped"
-                                );
-                                true
+                            if !turn_reply.is_empty() {
+                                turn_reply.push(' ');
+                            }
+                            turn_reply.push_str(&more);
+                            if page_full || plan.next_y > screen_h() as i32 - 200 {
+                                // Stop adding visible strokes, but keep the
+                                // stream connected: its tail contains the
+                                // faithful transcript and may contain a local
+                                // control directive that must still be saved.
+                                if !page_full {
+                                    page_full = true;
+                                    eprintln!(
+                                        "riddle: reply reached the page bottom; draining hidden stream tail"
+                                    );
+                                }
+                                false
                             } else {
-                                turn_reply.push_str(" ");
-                                turn_reply.push_str(&more);
                                 append_reply(&font, &mut plan, &more);
                                 false
                             }
+                        }
+                        Ok(Ok(Event::LocalCommand(command))) => {
+                            turn_transcript = Some(command.clone());
+                            let (reply, tasks_changed) =
+                                apply_local_command(&command, &mut task_store, &mut todo_store);
+                            if tasks_changed {
+                                next_heartbeat = heartbeat_deadline(&task_store);
+                            }
+                            if !turn_reply.is_empty() {
+                                turn_reply.push(' ');
+                            }
+                            turn_reply.push_str(&reply);
+                            if !page_full && plan.next_y <= screen_h() as i32 - 200 {
+                                append_reply(&font, &mut plan, &reply);
+                            }
+                            false
+                        }
+                        Ok(Ok(Event::Reader(path_query))) => {
+                            // Normally directives are the first event. Keep
+                            // this path correct if a provider emits one after
+                            // prose: resolve and notify the runtime without
+                            // abandoning the stream's transcript.
+                            match reader::Catalog::open()
+                                .map(|catalog| catalog.lookup(path_query.as_deref()))
+                            {
+                                Ok(reader::Lookup::Open(path)) => {
+                                    let _ = runtime_control::open_reader(&path).map_err(|error| {
+                                        eprintln!(
+                                            "magic-paper: delayed KOReader request failed: {error}"
+                                        )
+                                    });
+                                }
+                                Ok(reader::Lookup::Choose(_) | reader::Lookup::Missing) => {
+                                    eprintln!(
+                                        "magic-paper: delayed reader directive was ambiguous"
+                                    );
+                                }
+                                Err(error) => {
+                                    eprintln!("magic-paper: delayed reader catalog failed: {error}")
+                                }
+                            }
+                            false
+                        }
+                        Ok(Ok(Event::FullRefresh)) => {
+                            disp.full_refresh(surf.w, surf.h);
+                            false
                         }
                         Ok(Ok(Event::Transcript(t))) => {
                             if accept_transcript(
@@ -971,23 +1525,34 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                             | Event::TodoList
                             | Event::FontList
                             | Event::HistoryList
-                            | Event::Help
-                            | Event::Reader(_)
-                            | Event::FullRefresh
-                            | Event::LocalCommand(_),
+                            | Event::Help,
                         )) => {
-                            eprintln!("riddle: page directive mid-reply ignored");
+                            // Modal directives cannot replace an answer whose
+                            // strokes are already on paper. They are still
+                            // drained so a following transcript is retained.
+                            eprintln!("riddle: modal directive arrived after visible prose");
                             false
                         }
                         Ok(Err(e)) => {
+                            eprintln!(
+                                "magic-paper: event=turn-error request={} stage=mid-reply error={:?}",
+                                r.request_id(),
+                                e.lines().next().unwrap_or("unknown error")
+                            );
                             eprintln!("riddle: oracle failed mid-reply: {e}");
                             turn_failed = true;
                             true
                         }
-                        Err(mpsc::TryRecvError::Disconnected) => true,
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            eprintln!(
+                                "magic-paper: event=turn-stream-closed request={} phase=reply",
+                                r.request_id()
+                            );
+                            true
+                        }
                         Err(mpsc::TryRecvError::Empty) => false,
                     };
-                    if drop_rx {
+                    if close_rx {
                         rx = None;
                     }
                 }
@@ -1033,21 +1598,55 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                                 }
                                 TurnKind::Heartbeat => {
                                     if let Some(ref mut s) = task_store {
-                                        if let Err(e) = s.mark_ran(&turn_task_ids, unix_now()) {
-                                            eprintln!("magic-paper: could not advance tasks: {e}");
-                                        } else {
-                                            next_heartbeat = heartbeat_deadline(&task_store);
-                                            eprintln!(
-                                                "magic-paper: completed {} heartbeat task(s)",
-                                                turn_task_ids.len()
-                                            );
+                                        match s.complete_due_if_unchanged(&turn_tasks, unix_now()) {
+                                            Err(e) => eprintln!(
+                                                "magic-paper: could not advance tasks: {e}"
+                                            ),
+                                            Ok(false) => eprintln!(
+                                                "magic-paper: heartbeat result discarded because its task changed"
+                                            ),
+                                            Ok(true) => {
+                                                next_heartbeat = heartbeat_deadline(&task_store);
+                                                eprintln!(
+                                                    "magic-paper: completed {} heartbeat task(s)",
+                                                    turn_tasks.len()
+                                                );
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
+                        // The lease covers the whole scheduled request, not
+                        // only successful output. Release it after an error,
+                        // empty answer, or stale task snapshot as well, so a
+                        // failed heartbeat can never disable scheduling for
+                        // the rest of this UI process.
+                        if turn_kind == TurnKind::Heartbeat {
+                            _ui_scheduler_lease = None;
+                        }
+                        // This is the end-to-end UI completion boundary: the
+                        // response stream is closed, every planned stroke has
+                        // been submitted to the display, and persistence/task
+                        // advancement above has finished.  Integration tests
+                        // and lifecycle handoffs must wait for this event,
+                        // rather than the worker's earlier `llm-done` log.
+                        eprintln!(
+                            "magic-paper: event=turn-render-complete kind={} reply_chars={} transcript_chars={} page_full={} memory_enabled={}",
+                            match turn_kind {
+                                TurnKind::User => "user",
+                                TurnKind::Heartbeat => "heartbeat",
+                            },
+                            turn_reply.chars().count(),
+                            turn_transcript
+                                .as_deref()
+                                .map(|text| text.chars().count())
+                                .unwrap_or(0),
+                            page_full,
+                            store.is_some(),
+                        );
                         turn_strokes = Vec::new();
-                        turn_task_ids.clear();
+                        turn_tasks.clear();
                         let chars: usize = plan.strokes.iter().map(|s| s.len()).sum();
                         let linger = Duration::from_millis(4000 + (chars as u64) * 2);
                         let region = plan.region;
@@ -1060,10 +1659,16 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
                             plan,
                             next: Instant::now() + Duration::from_millis(14),
                             rx,
+                            page_full,
                         }
                     }
                 } else {
-                    State::Replying { plan, next, rx }
+                    State::Replying {
+                        plan,
+                        next,
+                        rx,
+                        page_full,
+                    }
                 }
             }
 
@@ -1233,14 +1838,100 @@ pub(super) fn run() -> std::io::Result<RunOutcome> {
         };
 
         stylus_tapped = false;
-        std::thread::sleep(Duration::from_millis(2));
+        let wait = match &state {
+            State::Listening { last_pen: None }
+            | State::TaskList { .. }
+            | State::TodoList { .. }
+            | State::FontList { .. }
+            | State::HistoryList { .. }
+            | State::ReaderList { .. } => Duration::from_millis(25),
+            State::Thinking { .. } => Duration::from_millis(4),
+            _ => Duration::from_millis(2),
+        };
+        disp.wait(wait);
     }
 
     eprintln!("riddle: the diary closes");
     cancel_speculative(&mut speculative, "diary closed");
+    pen_trace.finish("diary-closed");
     disp.terminate();
-    Ok(match reader_target {
-        Some(path) => RunOutcome::OpenReader(path),
-        None => RunOutcome::Closed,
-    })
+    Ok(RunOutcome::Closed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stationary_contact_has_no_time_driven_release() {
+        let started = Instant::now();
+        assert_eq!(
+            qtfb_pen_transition(
+                qtfb::INPUT_PEN_UPDATE,
+                40,
+                true,
+                Some(started),
+                started + Duration::from_millis(500),
+            ),
+            QtfbPenTransition::Draw {
+                close_orphan: false,
+                recovered_press: false,
+            }
+        );
+        // No idle-loop watchdog exists: elapsed time is considered only when
+        // another physical event arrives.
+    }
+
+    #[test]
+    fn pressure_zero_update_is_release_only_while_down() {
+        let now = Instant::now();
+        assert_eq!(
+            qtfb_pen_transition(qtfb::INPUT_PEN_UPDATE, 0, true, Some(now), now),
+            QtfbPenTransition::Release
+        );
+        assert_eq!(
+            qtfb_pen_transition(qtfb::INPUT_PEN_UPDATE, 0, false, None, now),
+            QtfbPenTransition::Hover
+        );
+    }
+
+    #[test]
+    fn pressure_event_after_long_gap_closes_lost_release_first() {
+        let started = Instant::now();
+        assert_eq!(
+            qtfb_pen_transition(
+                qtfb::INPUT_PEN_UPDATE,
+                40,
+                true,
+                Some(started),
+                started + QTFB_ORPHAN_GAP,
+            ),
+            QtfbPenTransition::Draw {
+                close_orphan: true,
+                recovered_press: true,
+            }
+        );
+        assert_eq!(
+            qtfb_pen_transition(
+                qtfb::INPUT_PEN_UPDATE,
+                40,
+                false,
+                None,
+                started + Duration::from_secs(5),
+            ),
+            QtfbPenTransition::Draw {
+                close_orphan: false,
+                recovered_press: true,
+            }
+        );
+    }
+
+    #[test]
+    fn only_first_visible_point_requests_urgent_flush() {
+        let mut trace = PenTrace::default();
+        trace.begin("test", 10, 20);
+        assert!(trace.ink_changed());
+        assert!(!trace.ink_changed());
+        trace.finish("test");
+    }
 }

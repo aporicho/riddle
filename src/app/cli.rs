@@ -83,38 +83,6 @@ pub(crate) fn entry() {
     }
     match run() {
         Ok(RunOutcome::Closed) => {}
-        Ok(RunOutcome::OpenReader(path)) => {
-            if std::env::var_os("REMAGIC_MANAGED").is_some() {
-                let manager = "/home/root/apps/remagic/bin/remagicctl";
-                match std::process::Command::new(manager)
-                    .args(["launch", "koreader", "--open-path"])
-                    .arg(&path)
-                    .status()
-                {
-                    Ok(status) if status.success() => {
-                        eprintln!(
-                            "magic-paper: Remagic is opening KOReader — {}",
-                            path.display()
-                        );
-                        return;
-                    }
-                    Ok(status) => {
-                        eprintln!("magic-paper: Remagic KOReader request failed: {status}");
-                        std::process::exit(1);
-                    }
-                    Err(error) => {
-                        eprintln!("magic-paper: could not contact Remagic: {error}");
-                        std::process::exit(1);
-                    }
-                }
-            }
-            if let Err(error) = crate::reader::write_handoff(&path) {
-                eprintln!("magic-paper: could not prepare KOReader handoff: {error}");
-                std::process::exit(1);
-            }
-            eprintln!("magic-paper: KOReader handoff ready — {}", path.display());
-            std::process::exit(42);
-        }
         Err(e) => {
             eprintln!("riddle: fatal: {e}");
             std::process::exit(1);

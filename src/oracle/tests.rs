@@ -1,6 +1,15 @@
 use super::*;
 
 #[test]
+fn api_credentials_are_trimmed_and_blank_values_are_rejected() {
+    assert_eq!(
+        trim_nonempty("  key-value \n".into()).as_deref(),
+        Some("key-value")
+    );
+    assert_eq!(trim_nonempty(" \t\n ".into()), None);
+}
+
+#[test]
 fn persona_keeps_magicpaper_identity_and_direct_answers() {
     let prompt = system_prompt(true);
     assert!(prompt.contains("Your full and only name is MagicPaper"));
@@ -157,7 +166,13 @@ fn high_confidence_local_routes_choose_fast_commit() {
     assert_eq!(local_route("reader"), None);
     assert_eq!(local_route("TODO 买牛奶"), Some(LocalRoute::Command));
     let shared = Arc::new(Mutex::new(Some(result)));
-    let handle = RequestCancel::http(Arc::new(AtomicBool::new(false)), Some(shared));
+    let handle = RequestCancel::http(
+        1,
+        "test",
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        Some(shared),
+    );
     assert_eq!(handle.recommended_commit_ms(), Some(2200));
 }
 
@@ -167,7 +182,13 @@ fn uncertain_ocr_uses_slow_commit() {
         text: "什么是INTP".into(),
         min_confidence: Some(0.73),
     })));
-    let handle = RequestCancel::http(Arc::new(AtomicBool::new(false)), Some(shared));
+    let handle = RequestCancel::http(
+        2,
+        "test",
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        Some(shared),
+    );
     assert_eq!(handle.recommended_commit_ms(), Some(2600));
 }
 
@@ -302,9 +323,41 @@ fn parser_waits_for_closing_quote_after_chinese_period() {
 #[test]
 fn request_cancel_sets_shared_flag() {
     let flag = Arc::new(AtomicBool::new(false));
-    let handle = RequestCancel::http(Arc::clone(&flag), None);
-    handle.cancel();
+    let handle = RequestCancel::http(
+        42,
+        "test",
+        Arc::clone(&flag),
+        Arc::new(AtomicBool::new(false)),
+        None,
+    );
+    assert_eq!(handle.request_id(), 42);
+    assert!(handle.cancel());
+    assert!(!handle.cancel());
     assert!(flag.load(Ordering::Acquire));
+}
+
+#[test]
+fn request_has_exactly_one_terminal_llm_outcome() {
+    let terminal = AtomicBool::new(false);
+    assert!(log_llm_terminal(
+        &terminal, 9, "test", "error", "first", None,
+    ));
+    assert!(!log_llm_terminal(
+        &terminal,
+        9,
+        "test",
+        "done",
+        "late",
+        Some(1),
+    ));
+    assert!(!log_llm_terminal(
+        &terminal,
+        9,
+        "test",
+        "cancelled",
+        "later",
+        None,
+    ));
 }
 
 #[test]

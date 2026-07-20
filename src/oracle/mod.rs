@@ -15,9 +15,44 @@
 //! Selection: set `RIDDLE_OPENAI_KEY` (and optionally `RIDDLE_OPENAI_BASE` /
 //! `RIDDLE_OPENAI_MODEL`) to use HTTP; otherwise riddle falls back to pi.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_request_id() -> u64 {
+    NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+pub(super) fn log_llm_terminal(
+    terminal: &AtomicBool,
+    request_id: u64,
+    domain: &str,
+    outcome: &str,
+    stage: &str,
+    latency_ms: Option<u128>,
+) -> bool {
+    if terminal
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    match latency_ms {
+        Some(latency_ms) => eprintln!(
+            "magic-paper: event=llm-{outcome} request={}:{} domain={domain} stage={stage} latency_ms={latency_ms}",
+            std::process::id(),
+            request_id,
+        ),
+        None => eprintln!(
+            "magic-paper: event=llm-{outcome} request={}:{} domain={domain} stage={stage}",
+            std::process::id(),
+            request_id,
+        ),
+    }
+    true
+}
 
 const DATA_DIR: &str = "/home/root/riddle-data";
 const NODE_BIN: &str = "/home/root/node/bin";
@@ -91,29 +126,79 @@ pub enum Event {
 /// receiver already prevents stale ink; this flag also makes the worker stop
 /// reading and close its connection at the next network event.
 pub struct RequestCancel {
+    request_id: u64,
+    domain: &'static str,
     cancelled: Option<Arc<AtomicBool>>,
+    terminal: Option<Arc<AtomicBool>>,
     ocr_result: Option<Arc<Mutex<Option<OcrResult>>>>,
 }
 
 impl RequestCancel {
-    fn http(cancelled: Arc<AtomicBool>, ocr_result: Option<Arc<Mutex<Option<OcrResult>>>>) -> Self {
+    fn http(
+        request_id: u64,
+        domain: &'static str,
+        cancelled: Arc<AtomicBool>,
+        terminal: Arc<AtomicBool>,
+        ocr_result: Option<Arc<Mutex<Option<OcrResult>>>>,
+    ) -> Self {
         Self {
+            request_id,
+            domain,
             cancelled: Some(cancelled),
+            terminal: Some(terminal),
             ocr_result,
         }
     }
 
-    fn inactive() -> Self {
+    fn inactive(request_id: u64, domain: &'static str) -> Self {
         Self {
+            request_id,
+            domain,
             cancelled: None,
+            terminal: None,
             ocr_result: None,
         }
     }
 
-    pub fn cancel(&self) {
+    #[cfg(test)]
+    pub(crate) fn testing(request_id: u64, cancelled: Arc<AtomicBool>) -> Self {
+        Self::http(
+            request_id,
+            "test",
+            cancelled,
+            Arc::new(AtomicBool::new(false)),
+            None,
+        )
+    }
+
+    pub fn request_id(&self) -> u64 {
+        self.request_id
+    }
+
+    /// Returns true only for the first effective cancellation.  Callers use
+    /// this to keep structured cancellation logs free of duplicate noise.
+    pub fn cancel(&self) -> bool {
+        self.cancel_with_reason("caller")
+    }
+
+    pub fn cancel_with_reason(&self, reason: &str) -> bool {
         if let Some(flag) = &self.cancelled {
-            flag.store(true, Ordering::Release);
+            let first = !flag.swap(true, Ordering::AcqRel);
+            if first {
+                if let Some(terminal) = &self.terminal {
+                    log_llm_terminal(
+                        terminal,
+                        self.request_id,
+                        self.domain,
+                        "cancelled",
+                        reason,
+                        None,
+                    );
+                }
+            }
+            return first;
         }
+        false
     }
 
     /// The speculative OCR worker publishes this before it routes locally or
@@ -136,12 +221,23 @@ pub enum Oracle {
     Pi(PiOracle),
 }
 
+pub(super) fn nonempty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| trim_nonempty(value))
+}
+
+fn trim_nonempty(value: String) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
 pub fn paddle_ocr_test(png_path: &str) -> Result<String, String> {
     let ocr = PaddleOcr::from_env()
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "RIDDLE_OCR_TOKEN is not set".to_string())?;
     let png = std::fs::read(png_path).map_err(|error| format!("read image: {error}"))?;
-    ocr.recognize(&png, &AtomicBool::new(false))
+    ocr.recognize(0, "cli", &png, &AtomicBool::new(false))
         .map(|result| result.text)
 }
 
@@ -150,7 +246,7 @@ impl Oracle {
     /// `RIDDLE_OPENAI_KEY` is set (the zero-setup path), otherwise pi.
     /// `remember` teaches the model the memory protocol (catalog + ⁂).
     pub fn spawn(remember: bool) -> std::io::Result<Self> {
-        if std::env::var("RIDDLE_OPENAI_KEY").is_ok() {
+        if nonempty_env("RIDDLE_OPENAI_KEY").is_some() {
             eprintln!("riddle: oracle = OpenAI-compatible HTTP");
             Ok(Oracle::Http(HttpOracle::new(remember)?))
         } else {
@@ -167,11 +263,13 @@ impl Oracle {
         ctx: &TurnContext,
         tx: Sender<Result<Event, String>>,
     ) -> RequestCancel {
+        let request_id = next_request_id();
         match self {
-            Oracle::Http(o) => o.ask(png_path, ctx, tx),
+            Oracle::Http(o) => o.ask(request_id, "handwriting", png_path, ctx, tx),
             Oracle::Pi(o) => {
+                eprintln!("magic-paper: event=llm-start request={request_id} backend=pi");
                 o.ask(png_path, ctx, tx);
-                RequestCancel::inactive()
+                RequestCancel::inactive(request_id, "handwriting")
             }
         }
     }
@@ -189,10 +287,20 @@ impl Oracle {
     }
 
     /// Send an internal text-only turn, used by MagicPaper's heartbeat.
-    pub fn ask_text(&self, prompt: &str, ctx: &TurnContext, tx: Sender<Result<Event, String>>) {
+    pub fn ask_text(
+        &self,
+        prompt: &str,
+        ctx: &TurnContext,
+        tx: Sender<Result<Event, String>>,
+    ) -> RequestCancel {
+        let request_id = next_request_id();
         match self {
-            Oracle::Http(o) => o.ask_text(prompt, ctx, tx),
-            Oracle::Pi(o) => o.ask_text(prompt, ctx, tx),
+            Oracle::Http(o) => o.ask_text(request_id, "scheduled", prompt, ctx, tx),
+            Oracle::Pi(o) => {
+                eprintln!("magic-paper: event=llm-start request={request_id} backend=pi");
+                o.ask_text(prompt, ctx, tx);
+                RequestCancel::inactive(request_id, "scheduled")
+            }
         }
     }
 }

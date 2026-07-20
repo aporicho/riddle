@@ -11,25 +11,58 @@ use crate::ui;
 const IDLE_COMMIT_FAST: Duration = Duration::from_millis(2200);
 const IDLE_COMMIT_SLOW: Duration = Duration::from_millis(2600);
 
-pub(super) type OracleRx = mpsc::Receiver<Result<Event, String>>;
-
-pub(super) struct SpeculativeRequest {
-    pub(super) rx: OracleRx,
-    pub(super) cancel: oracle::RequestCancel,
+/// A response channel and its cancellation flag are one owned object.  When a
+/// UI transition drops the turn, its worker is cancelled as well, so a late
+/// OCR/model result can never be consumed by a newer handwritten page.
+pub(super) struct OracleTurn {
+    rx: mpsc::Receiver<Result<Event, String>>,
+    cancel: oracle::RequestCancel,
 }
+
+impl OracleTurn {
+    pub(super) fn new(
+        rx: mpsc::Receiver<Result<Event, String>>,
+        cancel: oracle::RequestCancel,
+    ) -> Self {
+        Self { rx, cancel }
+    }
+
+    pub(super) fn request_id(&self) -> u64 {
+        self.cancel.request_id()
+    }
+
+    pub(super) fn recommended_commit_ms(&self) -> Option<u64> {
+        self.cancel.recommended_commit_ms()
+    }
+
+    pub(super) fn try_recv(&self) -> Result<Result<Event, String>, mpsc::TryRecvError> {
+        self.rx.try_recv()
+    }
+
+    pub(super) fn cancel(&self, reason: &str) {
+        self.cancel.cancel_with_reason(reason);
+    }
+}
+
+impl Drop for OracleTurn {
+    fn drop(&mut self) {
+        // Normal completion commonly drops an already-finished worker.  Keep
+        // that path silent; explicit interruption calls `cancel()` first and
+        // supplies a useful reason in the structured log.
+        self.cancel.cancel_with_reason("receiver-dropped");
+    }
+}
+
+pub(super) type SpeculativeRequest = OracleTurn;
 
 pub(super) fn cancel_speculative(pending: &mut Option<SpeculativeRequest>, reason: &str) {
     if let Some(request) = pending.take() {
-        request.cancel.cancel();
-        eprintln!("riddle: speculative oracle discarded ({reason})");
+        request.cancel(reason);
     }
 }
 
 pub(super) fn idle_commit_delay(pending: &Option<SpeculativeRequest>) -> Duration {
-    match pending
-        .as_ref()
-        .and_then(|request| request.cancel.recommended_commit_ms())
-    {
+    match pending.as_ref().and_then(OracleTurn::recommended_commit_ms) {
         Some(2200) => IDLE_COMMIT_FAST,
         _ => IDLE_COMMIT_SLOW,
     }
@@ -43,16 +76,20 @@ pub(super) enum State {
         stage: u32,
         next: Instant,
         region: BBox,
-        rx: OracleRx,
+        rx: OracleTurn,
     },
     Thinking {
-        rx: OracleRx,
+        rx: OracleTurn,
         since: Instant,
     },
     Replying {
         plan: WritePlan,
         next: Instant,
-        rx: Option<OracleRx>,
+        rx: Option<OracleTurn>,
+        /// The visible page has no room for more strokes.  The receiver must
+        /// nevertheless stay alive so the faithful transcript and local
+        /// directives at the stream tail are still applied and remembered.
+        page_full: bool,
     },
     Lingering {
         until: Instant,
@@ -132,4 +169,25 @@ pub(super) struct WritePlan {
     pub(super) region: BBox,
     /// Where the next streamed chunk's first line starts.
     pub(super) next_y: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn dropping_turn_cancels_worker_and_rejects_late_result() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let turn = OracleTurn::new(
+            rx,
+            oracle::RequestCancel::testing(77, Arc::clone(&cancelled)),
+        );
+        assert_eq!(turn.request_id(), 77);
+        drop(turn);
+        assert!(cancelled.load(Ordering::Acquire));
+        assert!(tx.send(Ok(Event::Ink("stale".into()))).is_err());
+    }
 }
