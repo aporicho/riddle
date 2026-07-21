@@ -9,12 +9,23 @@ use crate::{memory, oracle, tasks, todos};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const QUEUE_DIR: &str = "/home/root/riddle-data/agent";
-const QUEUE_PATH: &str = "/home/root/riddle-data/agent/pending.tsv";
 const MAX_REPLY_BYTES: usize = 32 * 1024;
+
+fn queue_dir() -> PathBuf {
+    crate::runtime_env::persistent_path(
+        "RIDDLE_AGENT_QUEUE_DIR",
+        "agent",
+        "/home/root/riddle-data/agent",
+    )
+}
+
+fn queue_path() -> PathBuf {
+    queue_dir().join("pending.tsv")
+}
 
 pub fn run() -> io::Result<()> {
     let _scheduler_lease = tasks::acquire_scheduler_lease()?;
@@ -113,12 +124,13 @@ fn build_context(task_store: &tasks::TaskStore) -> oracle::TurnContext {
 }
 
 fn queue_reply(reply: &str) -> io::Result<()> {
-    fs::create_dir_all(QUEUE_DIR)?;
+    fs::create_dir_all(queue_dir())?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .read(true)
-        .open(QUEUE_PATH)?;
+        .truncate(false)
+        .open(queue_path())?;
     lock(&file)?;
     writeln!(file, "{}\t{}", unix_now(), escape(reply))?;
     file.sync_all()?;
@@ -127,12 +139,13 @@ fn queue_reply(reply: &str) -> io::Result<()> {
 }
 
 pub(crate) fn take_pending() -> io::Result<Option<String>> {
-    fs::create_dir_all(QUEUE_DIR)?;
+    fs::create_dir_all(queue_dir())?;
     let mut file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
-        .open(QUEUE_PATH)?;
+        .truncate(false)
+        .open(queue_path())?;
     lock(&file)?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;

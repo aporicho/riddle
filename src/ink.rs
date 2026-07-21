@@ -2,7 +2,66 @@
 //! for the oracle.
 
 use crate::fb::BBox;
-use crate::surface::{Surface, BLACK, WHITE};
+use crate::platform::RefreshIntent;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::surface::{PixFmt, Surface, BLACK, WHITE};
+
+/// Immutable raw page snapshot. Copying the crop is cheap and bounded; luma
+/// conversion, downsampling, and PNG compression can safely run on a worker
+/// after the live shared framebuffer starts changing again.
+pub struct PageCapture {
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+    format: PixFmt,
+    max_edge: usize,
+}
+
+impl PageCapture {
+    pub fn encode_png(&self, cancelled: &AtomicBool) -> std::io::Result<Vec<u8>> {
+        let factor = self.width.max(self.height).div_ceil(self.max_edge).max(1);
+        let width = (self.width / factor).max(1);
+        let height = (self.height / factor).max(1);
+        let mut gray = vec![0_u8; width * height];
+        for output_y in 0..height {
+            if output_y % 16 == 0 && cancelled.load(Ordering::Acquire) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "page encoding cancelled",
+                ));
+            }
+            for output_x in 0..width {
+                let mut sum = 0_u32;
+                for sample_y in 0..factor {
+                    for sample_x in 0..factor {
+                        sum += self.luma(output_x * factor + sample_x, output_y * factor + sample_y)
+                            as u32;
+                    }
+                }
+                gray[output_y * width + output_x] = (sum / (factor * factor) as u32) as u8;
+            }
+        }
+        if cancelled.load(Ordering::Acquire) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "page encoding cancelled",
+            ));
+        }
+        encode_gray_png(&gray, width, height)
+    }
+
+    fn luma(&self, x: usize, y: usize) -> u8 {
+        match self.format {
+            PixFmt::Rgb565 => {
+                let index = (y * self.width + x) * 2;
+                let pixel = self.pixels[index] as u16 | (self.pixels[index + 1] as u16) << 8;
+                (((pixel >> 5) & 0x3f) as u32 * 255 / 63) as u8
+            }
+            PixFmt::Rgb32 => self.pixels[(y * self.width + x) * 4 + 1],
+        }
+    }
+}
 
 pub struct Ink {
     /// Finished strokes as point lists (x, y, radius).
@@ -109,11 +168,8 @@ impl Ink {
         self.last_erase = None;
     }
 
-    /// Rasterize the ink region to a grayscale PNG for the oracle.
-    /// Crops to the ink bounding box and only downsamples when its long side
-    /// exceeds the configured limit. Small handwriting stays at native
-    /// resolution so similar Chinese strokes survive the vision round-trip.
-    pub fn to_png(&self, surf: &Surface, path: &str) -> std::io::Result<()> {
+    /// Snapshot the ink crop without doing PNG work on the UI thread.
+    pub fn capture(&self, surf: &Surface) -> std::io::Result<PageCapture> {
         if self.bbox.is_empty() {
             return Err(std::io::Error::other("no ink"));
         }
@@ -127,35 +183,29 @@ impl Ink {
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|&v| v >= 400)
             .unwrap_or(1600);
-        let f = ((x1 - x0).max(y1 - y0)).div_ceil(max_edge).max(1);
-        let (w, h) = (((x1 - x0) / f).max(1), ((y1 - y0) / f).max(1));
-
-        let mut gray = vec![0u8; w * h];
-        for oy in 0..h {
-            for ox in 0..w {
-                let mut acc = 0u32;
-                for sy in 0..f {
-                    for sx in 0..f {
-                        acc +=
-                            surf.luma((x0 + ox * f + sx) as i32, (y0 + oy * f + sy) as i32) as u32;
-                    }
-                }
-                gray[oy * w + ox] = (acc / (f * f) as u32) as u8;
-            }
-        }
-
-        let file = std::fs::File::create(path)?;
-        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
-        enc.set_color(png::ColorType::Grayscale);
-        enc.set_depth(png::BitDepth::Eight);
-        // Fast deflate: encode time matters more than a few KB on the tablet.
-        enc.set_compression(png::Compression::Fast);
-        let mut writer = enc.write_header().map_err(std::io::Error::other)?;
-        writer
-            .write_image_data(&gray)
-            .map_err(std::io::Error::other)?;
-        Ok(())
+        Ok(PageCapture {
+            pixels: surf.copy_rect(x0, y0, x1 - x0, y1 - y0),
+            width: x1 - x0,
+            height: y1 - y0,
+            format: surf.fmt,
+            max_edge,
+        })
     }
+}
+
+fn encode_gray_png(gray: &[u8], width: usize, height: usize) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, width as u32, height as u32);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
+        let mut writer = encoder.write_header().map_err(std::io::Error::other)?;
+        writer
+            .write_image_data(gray)
+            .map_err(std::io::Error::other)?;
+    }
+    Ok(bytes)
 }
 
 /// Deterministic per-pixel hash for the dissolve pattern.
@@ -170,6 +220,7 @@ fn px_hash(x: i32, y: i32) -> u32 {
 /// One pass of the "diary drinks the ink" effect: erase the pixels whose hash
 /// falls in this stage. After `stages` passes the region is clean white.
 pub fn dissolve_pass(surf: &mut Surface, region: BBox, stage: u32, stages: u32) {
+    assert!(stages > 0, "dissolve requires at least one stage");
     if region.is_empty() {
         return;
     }
@@ -180,6 +231,27 @@ pub fn dissolve_pass(surf: &mut Surface, region: BBox, stage: u32, stages: u32) 
             }
         }
     }
+}
+
+/// Render one dissolve frame and select the matching monochrome waveform.
+/// Intermediate frames prioritize motion; the terminal frame explicitly
+/// whites the full dirty rectangle and requests one quality partial cleanup.
+pub fn dissolve_frame(surf: &mut Surface, region: BBox, stage: u32, stages: u32) -> RefreshIntent {
+    dissolve_pass(surf, region, stage, stages);
+    if stage + 1 < stages {
+        return RefreshIntent::Ink;
+    }
+    if !region.is_empty() {
+        let (x, y, width, height) = region.rect();
+        surf.fill_rect(
+            x as usize,
+            y as usize,
+            width as usize,
+            height as usize,
+            WHITE,
+        );
+    }
+    RefreshIntent::MonoQuality
 }
 
 #[cfg(test)]
@@ -238,5 +310,82 @@ mod tests {
         ink.erase_point(&mut s, 102, 100, 30);
         assert!(ink.stroke_list().is_empty());
         assert!(ink.bbox.is_empty());
+    }
+
+    #[test]
+    fn capture_encodes_without_retaining_the_live_surface() {
+        let (_buf, mut surface) = surf();
+        let mut ink = Ink::new();
+        ink.pen_point(&mut surface, 100, 100, 3);
+        ink.pen_up();
+        let capture = ink.capture(&surface).unwrap();
+        surface.fill_rect(0, 0, surface.w, surface.h, WHITE);
+        let bytes = capture.encode_png(&AtomicBool::new(false)).unwrap();
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn cancelled_capture_never_starts_png_compression() {
+        let (_buf, mut surface) = surf();
+        let mut ink = Ink::new();
+        ink.pen_point(&mut surface, 100, 100, 3);
+        ink.pen_up();
+        let capture = ink.capture(&surface).unwrap();
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(
+            capture.encode_png(&cancelled).unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+    }
+
+    fn terminal_dissolve_is_local_and_quality_monochrome(format: PixFmt) {
+        let bytes_per_pixel = match format {
+            PixFmt::Rgb565 => 2,
+            PixFmt::Rgb32 => 4,
+        };
+        let mut buffer = vec![0xff; 20 * 20 * bytes_per_pixel];
+        let mut surface = Surface::new(
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            20,
+            20,
+            20 * bytes_per_pixel,
+            format,
+        );
+        let region = BBox {
+            x0: 5,
+            y0: 6,
+            x1: 14,
+            y1: 13,
+        };
+        surface.fill_rect(5, 6, 10, 8, BLACK);
+        surface.put_px(1, 1, BLACK);
+
+        for stage in 0..3 {
+            assert_eq!(
+                dissolve_frame(&mut surface, region, stage, 4),
+                RefreshIntent::Ink
+            );
+        }
+        assert_eq!(
+            dissolve_frame(&mut surface, region, 3, 4),
+            RefreshIntent::MonoQuality
+        );
+        for y in 6..=13 {
+            for x in 5..=14 {
+                assert_eq!(surface.luma(x, y), 255);
+            }
+        }
+        assert_eq!(surface.luma(1, 1), 0, "cleanup escaped its dirty rect");
+    }
+
+    #[test]
+    fn terminal_dissolve_cleans_rgb565_without_touching_the_rest_of_the_page() {
+        terminal_dissolve_is_local_and_quality_monochrome(PixFmt::Rgb565);
+    }
+
+    #[test]
+    fn terminal_dissolve_cleans_rgb32_without_touching_the_rest_of_the_page() {
+        terminal_dissolve_is_local_and_quality_monochrome(PixFmt::Rgb32);
     }
 }

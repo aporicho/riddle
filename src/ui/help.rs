@@ -96,67 +96,64 @@ pub fn looks_like_question_mark(strokes: &[Vec<(i32, i32, i32)>]) -> bool {
     true
 }
 
-const TITLE: &str = "MagicPaper 使用說明";
+const TITLE: &str = "MagicPaper 使用说明";
 /// Takeover mode: riddle owns touch and the power button.
 const BODY_TAKEOVER: &[&str] = &[
-    "書寫後停筆，MP 會讀取墨跡並回答。",
-    "等待時仍可繼續寫，新筆跡永遠優先。",
+    "书写后停笔，MP 会读取墨迹并回答。",
+    "等待时仍可继续写，新笔迹永远优先。",
     "",
-    "寫「任務」：開啟定時任務列表。",
-    "寫「TODO」：開啟待辦事項列表。",
-    "寫「歷史」：查看最近九段對話。",
-    "寫「字體」：切換字體並校準大小。",
-    "寫「幫助」或 help：開啟本說明。",
-    "寫 read：開啟 KOReader 書庫。",
-    "寫 read 書名：直接開啟指定書籍。",
-    "寫「刷新」或 refresh：全屏清除殘影。",
+    "写「任务」：打开定时任务列表。",
+    "写「TODO」：打开待办事项列表。",
+    "写「历史」：查看最近九段对话。",
+    "写「字体」：切换字体并校准大小。",
+    "写「帮助」或 help：打开本说明。",
+    "写 read：打开 KOReader 书库。",
+    "写 read 书名：直接打开指定书籍。",
+    "写「刷新」或 refresh：全屏清除残影。",
     "",
-    "在列表中橫劃一項即可刪除。",
-    "任務右側：勾為啟用，叉為停用。",
-    "點擊空白處退出列表。",
+    "在列表中横划一项即可删除。",
+    "任务右侧：勾为启用，叉为停用。",
+    "点击空白处退出列表。",
     "",
-    "畫一個大問號也能開啟本說明。",
-    "翻轉筆端可以擦除。",
-    "快速按三次電源鍵進入或退出 MP。",
-    "單按電源鍵可休眠或喚醒。",
-    "五指觸碰仍可緊急退出。",
+    "画一个大问号也能打开本说明。",
+    "翻转笔端可以擦除。",
+    "快速按三次电源键进入或退出 MP。",
+    "单按电源键可休眠或唤醒。",
+    "五指触碰仍可紧急退出。",
 ];
-/// Windowed mode: AppLoad owns the window and xochitl owns the button.
-const BODY_WINDOWED: &[&str] = &[
-    "書寫後停筆，MP 會讀取墨跡並回答。",
-    "等待時仍可繼續寫，新筆跡永遠優先。",
+/// Hosted mode: Remagic owns the device lifecycle and application switching.
+const BODY_HOSTED: &[&str] = &[
+    "书写后停笔，MP 会读取墨迹并回答。",
+    "等待时仍可继续写，新笔迹永远优先。",
     "",
-    "寫「任務」：開啟定時任務列表。",
-    "寫「TODO」：開啟待辦事項列表。",
-    "寫「歷史」：查看最近九段對話。",
-    "寫「字體」：切換字體並校準大小。",
-    "寫「幫助」或 help：開啟本說明。",
-    "寫 read：開啟 KOReader 書庫。",
-    "寫 read 書名：直接開啟指定書籍。",
-    "寫「刷新」或 refresh：全屏清除殘影。",
+    "写「任务」：打开定时任务列表。",
+    "写「TODO」：打开待办事项列表。",
+    "写「历史」：查看最近九段对话。",
+    "写「字体」：切换字体并校准大小。",
+    "写「帮助」或 help：打开本说明。",
+    "写 read：打开 KOReader 书库。",
+    "写 read 书名：直接打开指定书籍。",
+    "写「刷新」或 refresh：全屏清除残影。",
     "",
-    "在列表中橫劃一項即可刪除。",
-    "任務右側：勾為啟用，叉為停用。",
-    "點擊空白處退出列表。",
+    "在列表中横划一项即可删除。",
+    "任务右侧：勾为启用，叉为停用。",
+    "点击空白处退出列表。",
     "",
-    "畫一個大問號也能開啟本說明。",
-    "翻轉筆端可以擦除。",
-    "從 AppLoad 關閉 MagicPaper。",
+    "画一个大问号也能打开本说明。",
+    "翻转笔端可以擦除。",
+    "单按电源键返回应用管理器。",
+    "快速按三次电源键返回原版界面。",
 ];
-const FOOTER: &str = "用筆點一下頁面即可關閉說明";
+const FOOTER: &str = "用笔点一下页面即可关闭说明";
 
 const TITLE_PX: f32 = 72.0;
 const BODY_PX: f32 = 42.0;
 const FOOTER_PX: f32 = 36.0;
 const PAD: usize = 64;
 
-fn fitted_base_sizes(font: &FontBook, body_lines: usize, page_h: usize) -> (f32, f32, f32) {
-    let selected = font.selected();
-    let raw_title_px = font.calibrated_px(selected, TITLE_PX);
-    let raw_body_px = font.calibrated_px(selected, BODY_PX);
-    let raw_footer_px = font.calibrated_px(selected, FOOTER_PX);
+fn fitted_base_sizes(body_lines: usize, page_h: usize) -> (f32, f32, f32) {
     let raw_text_height =
-        raw_title_px * 1.4 + raw_body_px * 1.3 * (body_lines as f32 + 0.5) + raw_footer_px * 1.4;
+        TITLE_PX * 1.4 + BODY_PX * 1.3 * (body_lines as f32 + 0.5) + FOOTER_PX * 1.4;
     let available_text_height = page_h.saturating_sub(2 * PAD + 40) as f32;
     let fit = (available_text_height / raw_text_height).min(1.0);
     (TITLE_PX * fit, BODY_PX * fit, FOOTER_PX * fit)
@@ -173,27 +170,21 @@ pub struct Help {
 }
 
 /// Draw the guide panel centered on the page; returns it for later dismissal.
-/// The gesture list depends on the display mode: only takeover owns the
-/// touchscreen (5-finger exit) and the power button.
+/// The gesture list depends on the display mode: takeover owns raw device
+/// controls, while hosted mode delegates switching and power to Remagic.
 pub fn show(surf: &mut Surface, font: &FontBook, takeover: bool) -> Help {
-    let body = if takeover {
-        BODY_TAKEOVER
-    } else {
-        BODY_WINDOWED
-    };
-    let selected = font.selected();
-    let (title_base_px, body_base_px, footer_base_px) =
-        fitted_base_sizes(font, body.len(), screen_h());
-    let title_px = font.calibrated_px(selected, title_base_px);
-    let body_px = font.calibrated_px(selected, body_base_px);
-    let footer_px = font.calibrated_px(selected, footer_base_px);
+    let body = if takeover { BODY_TAKEOVER } else { BODY_HOSTED };
+    let (title_base_px, body_base_px, footer_base_px) = fitted_base_sizes(body.len(), screen_h());
+    let title_px = title_base_px;
+    let body_px = body_base_px;
+    let footer_px = footer_base_px;
     let title_h = (title_px * 1.4) as usize;
     let line_h = (body_px * 1.3) as usize;
     let footer_h = (footer_px * 1.4) as usize;
 
-    let mut wmax = script::measure(font, TITLE, title_base_px);
+    let mut wmax = script::measure_ui(font, TITLE, title_base_px);
     for l in body {
-        wmax = wmax.max(script::measure(font, l, body_base_px));
+        wmax = wmax.max(script::measure_ui(font, l, body_base_px));
     }
     let pw = (wmax as usize + 2 * PAD).min(screen_w().saturating_sub(40));
     let ph = PAD + title_h + line_h / 2 + body.len() * line_h + footer_h + PAD;
@@ -279,7 +270,7 @@ fn blit_centered(
     panel_w: usize,
     y: usize,
 ) {
-    let line = script::rasterize_line(font, text, px_size);
+    let line = script::rasterize_ui_line(font, text, px_size);
     let x = panel_x + panel_w.saturating_sub(line.width) / 2;
     for row in 0..line.height {
         for col in 0..line.width {
@@ -462,17 +453,16 @@ mod tests {
     }
 
     #[test]
-    fn maximum_font_calibration_still_fits_the_move_manual() {
+    fn handwriting_calibration_does_not_resize_the_ui_manual() {
         let face =
             ab_glyph::FontRef::try_from_slice(include_bytes!("../../fonts/DancingScript.ttf"))
                 .unwrap();
         let mut font = FontBook::for_test(face, None);
         font.set_scale_for_test(crate::fonts::FontId::ChenYuluoyan, 180);
-        let (title, body, footer) = fitted_base_sizes(&font, BODY_TAKEOVER.len(), 1696);
-        let selected = font.selected();
-        let text_height = font.calibrated_px(selected, title) * 1.4
-            + font.calibrated_px(selected, body) * 1.3 * (BODY_TAKEOVER.len() as f32 + 0.5)
-            + font.calibrated_px(selected, footer) * 1.4;
+        let (title, body, footer) = fitted_base_sizes(BODY_TAKEOVER.len(), 1696);
+        let text_height =
+            title * 1.4 + body * 1.3 * (BODY_TAKEOVER.len() as f32 + 0.5) + footer * 1.4;
         assert!(text_height + (2 * PAD) as f32 <= 1656.5);
+        assert_eq!(font.calibrated_px(crate::fonts::FontId::Ui, body), body);
     }
 }

@@ -46,6 +46,7 @@ impl OcrResult {
 
 impl PaddleOcr {
     pub(super) fn from_env() -> std::io::Result<Option<Self>> {
+        crate::runtime_env::require_external_integrations("PaddleOCR")?;
         let token = match std::env::var("RIDDLE_OCR_TOKEN") {
             Ok(token) if !token.trim().is_empty() => token,
             _ => return Ok(None),
@@ -116,7 +117,6 @@ impl PaddleOcr {
                 .map(|duration| duration.as_nanos())
                 .unwrap_or(0)
         );
-        let body = paddle_multipart(png, &self.model, &boundary);
         let started = std::time::Instant::now();
         eprintln!(
             "magic-paper: event=ocr-submit request={}:{} domain={domain} provider=paddle model={} bytes={}",
@@ -125,20 +125,7 @@ impl PaddleOcr {
             self.model,
             png.len()
         );
-        let response = self
-            .agent
-            .post(&self.job_url)
-            .set("Authorization", &format!("bearer {}", self.token))
-            .set(
-                "Content-Type",
-                &format!("multipart/form-data; boundary={boundary}"),
-            )
-            .send_bytes(&body)
-            .map_err(|error| paddle_http_error("submit", error))?
-            .into_string()
-            .map_err(|error| format!("PaddleOCR submit response: {error}"))?;
-        let job_id = json_str_field_loose(&response, "jobId")
-            .ok_or_else(|| "PaddleOCR submit response has no jobId".to_string())?;
+        let job_id = self.submit_job(png, &boundary)?;
         eprintln!(
             "magic-paper: event=ocr-accepted request={}:{} domain={domain} latency_ms={}",
             std::process::id(),
@@ -170,34 +157,7 @@ impl PaddleOcr {
                     sleep_cancellable(self.poll_every, cancelled);
                 }
                 Some("done") => {
-                    let result_url = json_str_field_loose(&status, "jsonUrl")
-                        .ok_or_else(|| "PaddleOCR completed without a jsonUrl".to_string())?;
-                    let jsonl = self
-                        .agent
-                        .get(&result_url)
-                        .call()
-                        .map_err(|error| paddle_http_error("download", error))?
-                        .into_string()
-                        .map_err(|error| format!("PaddleOCR result response: {error}"))?;
-                    let text = extract_paddle_text(&jsonl);
-                    if text.trim().is_empty() {
-                        return Err("PaddleOCR returned no recognized text".into());
-                    }
-                    let min_confidence = extract_paddle_scores(&jsonl).into_iter().reduce(f32::min);
-                    eprintln!(
-                        "magic-paper: event=ocr-done request={}:{} domain={domain} latency_ms={} chars={} min_confidence={}",
-                        std::process::id(),
-                        request_id,
-                        started.elapsed().as_millis(),
-                        text.chars().count(),
-                        min_confidence
-                            .map(|score| format!("{score:.3}"))
-                            .unwrap_or_else(|| "unknown".into())
-                    );
-                    return Ok(OcrResult {
-                        text,
-                        min_confidence,
-                    });
+                    return self.finish_job(&status, request_id, domain, started);
                 }
                 Some("failed") => {
                     let reason = json_str_field_loose(&status, "errorMsg")
@@ -208,5 +168,60 @@ impl PaddleOcr {
                 None => return Err("PaddleOCR status response has no state".into()),
             }
         }
+    }
+
+    fn submit_job(&self, png: &[u8], boundary: &str) -> Result<String, String> {
+        let body = paddle_multipart(png, &self.model, boundary);
+        let response = self
+            .agent
+            .post(&self.job_url)
+            .set("Authorization", &format!("bearer {}", self.token))
+            .set(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={boundary}"),
+            )
+            .send_bytes(&body)
+            .map_err(|error| paddle_http_error("submit", error))?
+            .into_string()
+            .map_err(|error| format!("PaddleOCR submit response: {error}"))?;
+        json_str_field_loose(&response, "jobId")
+            .ok_or_else(|| "PaddleOCR submit response has no jobId".to_string())
+    }
+
+    fn finish_job(
+        &self,
+        status: &str,
+        request_id: u64,
+        domain: &str,
+        started: std::time::Instant,
+    ) -> Result<OcrResult, String> {
+        let result_url = json_str_field_loose(status, "jsonUrl")
+            .ok_or_else(|| "PaddleOCR completed without a jsonUrl".to_string())?;
+        let jsonl = self
+            .agent
+            .get(&result_url)
+            .call()
+            .map_err(|error| paddle_http_error("download", error))?
+            .into_string()
+            .map_err(|error| format!("PaddleOCR result response: {error}"))?;
+        let text = extract_paddle_text(&jsonl);
+        if text.trim().is_empty() {
+            return Err("PaddleOCR returned no recognized text".into());
+        }
+        let min_confidence = extract_paddle_scores(&jsonl).into_iter().reduce(f32::min);
+        eprintln!(
+            "magic-paper: event=ocr-done request={}:{} domain={domain} latency_ms={} chars={} min_confidence={}",
+            std::process::id(),
+            request_id,
+            started.elapsed().as_millis(),
+            text.chars().count(),
+            min_confidence
+                .map(|score| format!("{score:.3}"))
+                .unwrap_or_else(|| "unknown".into())
+        );
+        Ok(OcrResult {
+            text,
+            min_confidence,
+        })
     }
 }

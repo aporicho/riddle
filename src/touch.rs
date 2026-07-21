@@ -106,17 +106,6 @@ impl TouchDevice {
         Err(io::Error::new(io::ErrorKind::NotFound, "no touch device"))
     }
 
-    /// Drain and discard touch input, then cancel every partial gesture. Used
-    /// for palm rejection while the marker is in digitizer proximity.
-    pub fn suppress(&mut self) {
-        let _ = self.drain();
-        self.slots = [Slot::default(); MAX_SLOTS];
-        self.max_fingers = 0;
-        self.frame_y = None;
-        self.total_motion = 0;
-        self.quit_sent = false;
-    }
-
     /// Compatibility helper for takeover apps that only use five-finger exit.
     pub fn drain_check_quit(&mut self) -> bool {
         self.drain().contains(&Gesture::Quit)

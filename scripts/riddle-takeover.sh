@@ -83,7 +83,11 @@ echo "$WAKELOCK" > /sys/power/wake_lock 2>/dev/null || true
 #   RIDDLE_OPENAI_MODEL=gpt-4o-mini                  # optional
 # Without it, riddle falls back to the pi backend (if pi is installed).
 CONFIG=${RIDDLE_CONFIG:-/home/root/.config/riddle/oracle.env}
-if [ -r "$CONFIG" ]; then
+if [ "${RIDDLE_TEST_MODE:-}" = 1 ]; then
+    # Device automation must not even parse the owner's credential file. The
+    # Rust process independently selects its deterministic offline backend.
+    unset RIDDLE_OPENAI_KEY RIDDLE_OCR_TOKEN
+elif [ -r "$CONFIG" ]; then
     set -a; . "$CONFIG"; set +a
 elif [ -r "$HERE/oracle.env" ]; then
     set -a; . "$HERE/oracle.env"; set +a
@@ -209,7 +213,7 @@ while true; do
     # proprietary engine) comes from the device's scenegraph plugin directory.
     LD_LIBRARY_PATH="$HERE:/home/root/quill:/usr/lib/plugins/scenegraph" \
         PAPERTERM_SHELL= HOME=/home/root \
-        "$HERE/riddle"
+        "$HERE/riddle" --legacy-takeover
     status=$?
 
     if [ "$status" -eq 42 ]; then

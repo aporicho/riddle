@@ -18,6 +18,12 @@ pub fn rasterize_line(fonts: &FontBook, text: &str, px: f32) -> Line {
     rasterize_line_with(fonts, fonts.selected(), text, px)
 }
 
+/// Rasterize fixed interface text with the dedicated UI face. Handwriting
+/// selection and calibration must never change menus, lists or help pages.
+pub fn rasterize_ui_line(fonts: &FontBook, text: &str, px: f32) -> Line {
+    rasterize_line_with(fonts, FontId::Ui, text, px)
+}
+
 pub fn rasterize_line_with(fonts: &FontBook, primary: FontId, text: &str, px: f32) -> Line {
     let selected: Vec<(FontId, char)> = text
         .chars()
@@ -90,6 +96,10 @@ pub fn rasterize_line_with(fonts: &FontBook, primary: FontId, text: &str, px: f3
 /// Measure the advance width of text at `px` without rasterizing.
 pub fn measure(fonts: &FontBook, text: &str, px: f32) -> f32 {
     measure_with(fonts, fonts.selected(), text, px)
+}
+
+pub fn measure_ui(fonts: &FontBook, text: &str, px: f32) -> f32 {
+    measure_with(fonts, FontId::Ui, text, px)
 }
 
 pub fn measure_with(fonts: &FontBook, primary: FontId, text: &str, px: f32) -> f32 {
@@ -461,5 +471,23 @@ mod tests {
         assert!(calibrated_width > normal_width * 1.45);
         assert!(calibrated.width > normal.width);
         assert!(calibrated.height > normal.height);
+    }
+
+    #[test]
+    fn handwriting_calibration_never_changes_ui_metrics() {
+        let mut font = FontBook::for_test(
+            ab_glyph::FontRef::try_from_slice(include_bytes!(
+                "../../fonts/ChenYuluoyan-2.0-Thin.ttf"
+            ))
+            .unwrap(),
+            None,
+        );
+        let before = measure_ui(&font, "字体与大小", 80.0);
+        let before_raster = rasterize_ui_line(&font, "帮助", 80.0);
+        font.set_scale_for_test(FontId::ChenYuluoyan, 180);
+        assert_eq!(measure_ui(&font, "字体与大小", 80.0), before);
+        let after_raster = rasterize_ui_line(&font, "帮助", 80.0);
+        assert_eq!(after_raster.width, before_raster.width);
+        assert_eq!(after_raster.height, before_raster.height);
     }
 }

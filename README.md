@@ -1,421 +1,182 @@
-# MagicPaper (MP) — living magical paper for reMarkable Paper Pro Move
+# MagicPaper (MP)
 
-Write on the page with your pen. After a pause, MagicPaper **drinks your ink** —
-your words fade into the paper — the page thinks for a moment, and an answer
-writes itself back in a flowing hand, stroke by stroke, then fades away.
+MagicPaper 是为 reMarkable Paper Pro Move 设计的纸面 AI 应用：用户直接用笔书写，墨迹在停笔后淡出，回答再以手写动画写回纸面。它没有键盘、聊天气泡或网页界面。
 
-No screen glow, no keyboard, no chat UI. Just ink appearing on paper.
+本项目由 Maxime Rivest 的 [`riddle`](https://github.com/MaximeRivest/riddle) 演进而来，并保留原项目历史和 MIT 署名。0.7.0 的正式运行方式是作为 Remagic Manager 托管的驻留应用；AppLoad、镇纸和旧独占脚本都不是其运行依赖。
 
-This fork is based on Maxime Rivest's original
-[`riddle`](https://github.com/MaximeRivest/riddle) project and its
-[demo](https://x.com/MaximeRivest).
+## 与上游 riddle 的主要区别
 
-## How this fork differs from upstream
+| 方面 | 上游 | MagicPaper 0.7.0 |
+|---|---|---|
+| 设备与运行方式 | Paper Pro、AppLoad/独占模式 | Paper Pro Move，由 Remagic 提供 QTFB、笔/触摸与生命周期 |
+| 定位 | Tom Riddle 日记 | 中文优先的纸面助手，简称 MP |
+| OCR | 回答模型直接看整页 | 可提前 1 秒提交 PP-OCRv6，再由回答模型结合上下文纠错 |
+| 回答 | 基础对话 | 计算直答、问答、长期对话、按需后台检索、纸面化整理，中文默认繁体 |
+| 记忆 | 简短上下文 | 最近 20 轮、最多 400 页本地记忆及可删除历史 |
+| 自动化 | 无 | 最多 9 个周期任务、TODO、智能心跳及后台 agent |
+| 纸面 UI | 单一字体 | 固定方正屏显雅宋 UI；回答使用三种可切换、独立校准的手写体 |
+| 阅读联动 | 无 | `read` 打开 KOReader 书库，`read 书名` 打开匹配书籍 |
+| 性能 | 同步处理较多 | PNG、字形描边和回答排版移出 UI 线程；25 Hz 合并刷新，无等待圆点 |
 
-MagicPaper 0.6.0 turns the original Tom Riddle diary into a Chinese-first,
-Move-tested personal paper assistant while preserving the ink-only interface.
+## 系统边界
 
-| Area | Upstream riddle | This MagicPaper fork |
-|------|-----------------|----------------------|
-| Device | reMarkable Paper Pro (`ferrari`) | Tested on Paper Pro Move (`chiappa`, OS 3.27), with standalone systemd launch/restore services |
-| Identity | Tom Riddle's diary | MagicPaper (MP), the writer's concise magical servant |
-| Entry and exit | AppLoad / five-finger exit | Three quick power presses enter or leave MP; one press still sleeps/wakes |
-| AI path | pi or chat-completions | Responses API with vision, low reasoning, automatic background web search, and AI paper-ready editing |
-| OCR path | Answer model reads the page image | Optional fast PP-OCRv6 first stage; the answer model then receives corrected text only |
-| Handwriting recognition | Compact vision image | PP-OCRv6 plus contextual correction, optional PaddleOCR-VL fallback, or cropped high-detail vision with ambiguity and arithmetic checks |
-| Reply appearance | Dancing Script | Three switchable Chinese handwriting fonts, independent 50–180% size calibration, per-glyph fallback, Traditional Chinese replies, and Chinese-aware wrapping |
-| Memory | Short recent context plus saved pages | 20 recent dialogue turns, up to 400 saved pages, and a 40-page recall catalog |
-| Automation | Conversation and page recall | Persistent recurring tasks, paper-native task/TODO/history lists, checkbox enable/disable, and due-time-aware smart heartbeat scheduling |
-| Reading | Not integrated | Handwrite `read` for KOReader's library or `read 书名` to open a matched EPUB/PDF; exiting KOReader returns to MP |
-| Perceived latency | Request starts after the 2.8-second commit | OCR starts speculatively after one idle second; high-confidence complete input commits at 2.2s and uncertain input at 2.6s |
-| E-ink behavior | Thinking indicator and broader refreshes | No pulsing wait dot; reply-region cleanup avoids a distracting full-screen refresh after every answer |
-| Manual ghost clearing | None | Handwrite `刷新`, `刷新屏幕`, `重新整理`, or `refresh` for one local full-panel refresh |
+MagicPaper 只负责页面状态、笔迹解释、AI 请求、回答渲染和自己的持久数据。它不拥有物理面板、原始输入、前台切换、进程监督或系统恢复。
 
-The upstream commit history and MIT attribution are intentionally retained.
+正式启动时，Remagic 必须提供：
 
-### 🪄 New to this? Start here
+- `REMAGIC_RUNTIME_PROFILE=qtfb_compat`；
+- 稳定且唯一的 `QTFB_KEY` surface；
+- v2 双向 lifecycle 通道；
+- 经过 manifest 限定的 HOME/XDG、字体、证书和网络环境。
 
-You need a **reMarkable Paper Pro Move** in developer mode with a launcher installed.
-If that sounds like a lot, it isn't — **[remagic](https://github.com/maximerivest/remagic)**
-walks you through turning on developer mode and sets up everything with one
-command. Come back here, drop MagicPaper in, and start writing.
+缺少任一托管契约时应用会在打开显示或输入前失败，不会退回到偷偷抢占设备的模式。`--legacy-takeover` 仍保留给明确的兼容实验，但不能在 Remagic 托管进程中启用。
 
-Already have xovi + AppLoad? The remagic catalog installs the upstream app;
-to get the MagicPaper changes in this fork, [build this source](#building)
-and stage its bundle as described below.
+```text
+笔事件 ──► Remagic display host ──► QTFB surface ──► MagicPaper 输入状态机
+                                                        │
+                       停笔 1.0 s ─► 推测 OCR（可取消）  │
+                       停笔 2.2/2.6 s ─► 提交当前回合   │
+                                                        ▼
+本地命令 ◄── 纠错文字 ◄── PP-OCRv6（可选） ──► 回答模型/记忆/搜索
+    │                                                   │
+    └──────── 本地页面                                  ▼
+                                     离屏排版与字形描边 ─► 25 Hz 合并写回
+```
 
-### Install upstream with remagic
+任何新笔迹、前后台命令或关闭命令都会使旧回合失效；迟到的 OCR、网络流或后台排版结果不能覆盖新页面。进入后台前应用保存状态并报告 `state_saved`、`background_ready`；召回时沿用同一进程和页面；关闭时保存后报告 `shutdown_complete`。
+
+## 纸面命令
+
+| 写下 | 结果 |
+|---|---|
+| `任务`、`task` | 打开周期任务列表 |
+| `任务 每五分钟讲一个黑暗冷笑话` | 新增周期任务 |
+| `暂停任务 2` / `恢复任务 2` | 禁用或启用第 2 项 |
+| `修改任务 2 每十分钟提醒喝水` | 修改第 2 项 |
+| `删除任务 2` | 删除第 2 项 |
+| `TODO 买牛奶` | 新增 TODO |
+| `TODO` | 打开 TODO 列表 |
+| `历史` | 打开最近对话历史 |
+| `字体` | 打开字体与每字体字号校准页 |
+| `帮助`、`help` 或大问号 | 打开内置说明 |
+| `read` | 让 Remagic 打开 KOReader 书库 |
+| `read 书名` | 打开唯一匹配书籍；歧义时显示候选列表 |
+| `刷新`、`刷新屏幕`、`重新整理`、`refresh` | 执行一次完整刷新清除残影，不请求 API |
+
+任务列表右侧方框在勾与叉之间切换启用状态。任务、TODO 或历史项目上划线可删除；点击列表空白处退出。周期任务最多 9 个，最短间隔 5 分钟；TODO 不触发 API。智能心跳只在最近任务到期时请求回答，失败后按配置重试，不轮询消耗 API。
+
+## 一次书写回合
+
+1. 笔迹立即画入共享 surface；UI 线程只做必要的输入和轻量合成。
+2. 停笔 1 秒后可推测性提交 OCR。继续书写会取消本地等待，并以新页面重新计时。
+3. 完整、高置信输入在约 2.2 秒提交；模糊或未完成输入等待约 2.6 秒。
+4. 14 段吸墨动画保留，每段 50 ms。等待时纸面保持空白，不显示闪烁圆点。
+5. OCR 候选先按对话、任务和中文语境纠错；算式如 `122+456=?` 直接回答 `122+456=578`。
+6. 普通知识问题直接作答；确需时模型可在后台检索，最终只输出整理后的纸面文字，不展示 URL、引用标记或搜索元数据。
+7. 回答流按句进入离屏排版，按所选字体生成描边，再以最多 25 Hz 的节奏合并提交局部更新。
+
+## 字体、记忆和数据
+
+固定界面文字使用 `FZPingXianYaSong.ttf`（方正屏显雅宋），不受手写字体选择或字号校准影响。回答文字内置辰宇落雁体；部署包另含黄油拾叁体与 851 远星夜行手写体，851 是默认选择。写下 `字体` 后可分别在 50%–180% 范围校准三种回答字体的视觉大小；字体页只有专门的回答预览样例使用对应手写体。缺字由 `CoverageFallback.ttf` 中性完整字库逐字补齐。
+
+默认持久数据位于：
+
+```text
+/home/root/riddle-data/
+├── memories/       对话、转写和原始笔迹
+├── tasks/          周期任务
+├── todos/          TODO
+├── preferences/    字体及每字体字号
+└── agent/          前后台回答交接队列
+```
+
+配置默认位于 `/home/root/.config/riddle/oracle.env`。安装、升级和自动化测试不得覆盖真实记忆、任务、TODO、字体配置或 API 配置。
+
+## OCR 与回答后端
+
+复制示例配置并只在设备上填写密钥：
 
 ```sh
-remagic install riddle     # checksum-verified download → AppLoad
-remagic config riddle      # settings form in your browser (+ QR for phone)
+install -m 600 oracle.env.example /home/root/.config/riddle/oracle.env
 ```
 
-Then in **AppLoad**: tap **Reload**, then **MagicPaper**. Write, and rest your
-pen. (Or install it from the **Store** app right on the tablet.)
-
-### Install this fork's bundle
-
-This fork does not currently publish a prebuilt GitHub release. Build it with
-the takeover instructions below; `scripts/make-bundle.sh` produces the
-self-contained `dist/riddle` directory.
-
-1. Build and stage `dist/riddle` using [Building](#building).
-2. Copy the folder to your tablet:
-   `scp -O -r dist/riddle root@10.11.99.1:/home/root/xovi/exthome/appload/`
-3. Add an API key: `cp oracle.env.example oracle.env` in that folder and put your `RIDDLE_OPENAI_KEY` in it (any OpenAI-compatible key). Or skip it to use [pi](#option-b--pi-the-power-path).
-4. In **AppLoad**: tap **Reload**, then **MagicPaper**. Write, and rest your pen.
-
-> ⚠️ **This modifies your device.** The prebuilt bundle and the catalog build
-> run in **takeover mode**: opening MagicPaper stops the whole reMarkable UI
-> and takes the screen. Leave with a **5-finger tap** — xochitl restarts
-> automatically. It runs as root and drives the e-ink engine directly. This
-> fork has been tested on a **reMarkable Paper Pro Move** (chiappa,
-> aarch64, OS 3.27). It may not work on other models or OS versions, and you use
-> it entirely at your own risk. Not affiliated with reMarkable AS. Keep SSH
-> access working before you install anything — if anything ever wedges:
-> `ssh root@10.11.99.1 'systemctl start xochitl'`.
-
-## How it works
-
-```
- pen ── raw strokes ──► MagicPaper ── idle 1s ──► speculative PNG request
-                              │
-                              └── idle 2.2/2.6s ─► 14-stage ink drinking
-                              │                         │
-                              │            ┌────────────┴────────────┐
-                              │            ▼                         ▼
-                              │       PP-OCRv6 text          direct vision image
-                              │            └────────────┬────────────┘
-                              │                         ▼
-                              │                  Responses oracle
-                              ▼                         │ answer text
- reply strokes ◄── selected font + 851 fallback ◄──────┘
-   │
-   ▼
- display backend
-   ├── qtfb        — windowed, inside xochitl (build-from-source flavour)
-   └── quill       — full takeover: xochitl stopped, vendor e-ink engine
-                     driven directly for instant ink (lowest latency there
-                     is; what the prebuilt bundle runs)
-```
-
-- **This repository** — the app (Rust). Pen input, ink surface, handwriting
-  synthesis (rasterize → Zhang-Suen thinning → stroke tracing → animated
-  replay), the oracle process manager, and both display backends.
-- **[Quill](https://github.com/MaximeRivest/quill)** — the sibling takeover display host (C/C++). A
-  clean-room, MIT-licensed adapter over the vendor `libqsgepaper.so` waveform
-  engine, exposed as a small C ABI (`quill_init` / `quill_buffer` / `quill_swap`)
-  that riddle links against with `--features takeover`. Also carries a small
-  family of demos (`scribble`, a pen-to-glass latency test, plus map, image,
-  and GIF renderers).
-
-## Gestures
-
-| Do this | And |
-|---------|-----|
-| Write, then rest the pen | MagicPaper drinks your ink and replies |
-| Write *"show me what I wrote about…"* | The remembered page **rises through the paper**: the date, your own handwriting rewriting itself stroke by stroke, and MP's old reply — all in faded ink. Touch the pen anywhere and today's page returns |
-| Write *"what do you remember?"* | MP answers with a handwritten list of remembered moments |
-| Flip the marker | Erase |
-| Draw a large **?** | Summon the built-in guide |
-| Write `read` | Open the existing library in KOReader |
-| Write `read 书名` | Open one matching EPUB/PDF directly; ambiguous names show a pen-selectable list |
-| Write `刷新` or `refresh` | Perform one full-screen e-ink refresh to clear ghosting, without contacting the oracle |
-| Tap five fingers at once | Leave the diary *(takeover mode)* |
-| Power button once | The page turns to *"The diary sleeps."*, then the tablet suspends; press again to wake exactly where you were *(takeover mode)* |
-| Power button three times quickly | Open the standalone diary from xochitl, or leave it while the diary is open |
-
-In the windowed (qtfb) flavour, xochitl keeps the touchscreen and the power
-button: close the diary from AppLoad instead.
-
-One second without pen input begins reading a tentative page while the original
-ink remains visible, including when PaddleOCR is enabled. Writing again cancels
-the local wait and starts over with the latest page; the remote service may
-still count the abandoned OCR job. High-confidence complete input and local
-commands commit after 2.2 seconds; uncertain or incomplete input waits 2.6
-seconds. The drink animation then retains all 14 stages at 50ms each.
-Clean completed sentences begin writing as soon as they stream back. The blank
-paper itself is the waiting state — there is no pulsing status dot.
-
-## Tasks and TODOs
-
-Recurring tasks and unscheduled TODOs are separate persistent lists. Write the
-bare word `任务`, `任務`, or `task` to open the recurring-task page. Write the
-bare word `TODO` in any capitalization to open the TODO page. On either page,
-draw a horizontal line through an entry to delete it, or tap outside the rows
-to return to the blank paper. Task rows also have a right-hand status box: a
-check is active, a cross is paused, and tapping it toggles the state locally.
-
-| Handwritten command | Effect |
-|---------------------|--------|
-| `任务 每五分钟讲一个黑暗冷笑话` | Add an active recurring task |
-| `暂停任务 2` | Pause recurring task 2 |
-| `恢复任务 2` | Resume task 2 after one fresh full interval |
-| `修改任务 2 每十分钟提醒我喝水` | Replace task 2's interval and instruction |
-| `删除任务 2` | Delete recurring task 2 without opening the list |
-| `TODO 买牛奶` | Add “买牛奶” to the unscheduled TODO list |
-
-Recurring tasks are limited to nine entries and have a minimum interval of
-five minutes. Paused tasks remain visible but cannot become due. Resuming, or
-modifying an active task, starts a fresh interval; missed runs are never
-replayed. The smart heartbeat computes the nearest active due time and makes
-no oracle/API request until then. Failed delivery retries after 30 seconds.
-TODOs are limited to twenty visible entries and never participate in the
-heartbeat.
-
-## KOReader handoff
-
-The takeover build can switch directly from MagicPaper to an installed
-KOReader without enabling Paperweight's MCP/CLI access. A bare `read` opens
-`/home/root/.local/share/remarkable/xochitl`; `read` followed by a title joins
-the human-readable `visibleName` in each `.metadata` file to its UUID-named
-EPUB/PDF. It also searches ordinary EPUB/PDF files below `/home/root/koreader`.
-Exact and unique partial matches open immediately. Ambiguous matches show up to
-nine choices; tap a row with the pen or tap blank paper to cancel.
-
-The standalone takeover script supervises the handoff. MagicPaper fully
-releases Quill and raw input before KOReader starts. While MagicPaper owns the
-panel, xochitl is runtime-masked so a vendor recovery job cannot start a
-second display engine over it; the volatile mask is removed on exit and is
-also cleared by every reboot. The supervisor briefly restores xochitl as the
-display host and injects Paperweight's local einkface client directly;
-this does not require enabling Paperweight CLI or MCP. When KOReader exits, the
-supervisor stops the host again and relaunches MagicPaper. Both
-the Rust side and shell side restrict requested paths to the two book-library
-roots. A missing reader, invalid target, or KOReader crash returns to MP with a
-paper-visible error; the existing systemd `ExecStopPost` still restores
-xochitl if the whole session stops unexpectedly. The supported Move package is
-the `aarch64` KOReader build described in the
-[upstream installation guide](https://github.com/koreader/koreader/wiki/Installation-on-Remarkable).
-
-## MagicPaper remembers
-
-Every finished page is kept — your actual pen strokes, a transcription, and
-MP's reply — so MagicPaper can do three things:
-
-- **Follow the conversation.** Recent pages ride along with each request, so
-  MP remembers what you wrote yesterday (both backends, same behavior).
-- **Conjure the past.** Ask in ink — *"show me the page about the garden"*,
-  *"find what I wrote on Tuesday"* — and the diary rewrites that page in
-  front of you, in your own hand, dated, in faded ink. No buttons, no lists,
-  no chrome: the pen is the only interface.
-- **Answer from memory.** *"What do you remember?"* gets a handwritten index.
-
-Memories live only on the tablet, in plain files under
-`/home/root/riddle-data/memories` (delete the folder and the diary forgets;
-the last ~400 pages are kept). `RIDDLE_MEMORY=off` in `oracle.env` turns all
-of it off — no storage, and nothing extra sent with requests. Set
-`RIDDLE_TZ_OFFSET` (hours from UTC) so memory dates read right.
-
-## The oracle (the "spirit" in the diary)
-
-The diary's replies come from a vision LLM that reads your handwriting from the
-committed page (sent as an inline PNG). There are **two backends**, chosen at
-startup — pick whichever you have:
-
-### Option A — any OpenAI-compatible API (easiest, zero setup)
-
-Set an API key and riddle talks straight to an OpenAI-compatible HTTP API.
-Legacy chat-completions works with OpenRouter, Groq and local servers;
-Responses mode adds model-managed background web search and paper-ready
-answer editing. No extra software runs on the tablet.
+OpenAI-compatible HTTP 后端的核心变量：
 
 ```sh
-export RIDDLE_OPENAI_KEY="sk-..."                       # required
-export RIDDLE_OPENAI_BASE="https://api.openai.com/v1"   # optional (default)
-export RIDDLE_OPENAI_MODEL="gpt-5.6-terra"              # vision only needed without separate OCR
-export RIDDLE_OPENAI_API="responses"                    # or chat_completions
-export RIDDLE_OPENAI_REASONING="low"                    # thinking models only
-export RIDDLE_WEB_SEARCH="auto"                         # Responses mode
-export RIDDLE_PAPER_REWRITE_MODEL="gpt-5.6-luna"        # rare format fallback
-export RIDDLE_OPENAI_MAX_TOKENS="2000"                  # runaway guard
-export RIDDLE_MEMORY_TURNS="20"                         # continuous dialogue
+RIDDLE_OPENAI_KEY=...
+RIDDLE_OPENAI_BASE=https://example.com/v1
+RIDDLE_OPENAI_MODEL=your-model
+RIDDLE_OPENAI_API=responses          # 或 chat_completions
+RIDDLE_OPENAI_REASONING=low
+RIDDLE_WEB_SEARCH=auto
+RIDDLE_OPENAI_MAX_TOKENS=2000
 ```
 
-Without separate OCR, the answer model must be vision-capable. A standalone install reads
-`/home/root/.config/riddle/oracle.env`; legacy AppLoad bundles also accept an
-`oracle.env` next to the binary. See `oracle.env.example`. Example with
-OpenRouter:
+可选 PaddleOCR：
 
 ```sh
-export RIDDLE_OPENAI_KEY="$OPENROUTER_API_KEY"
-export RIDDLE_OPENAI_BASE="https://openrouter.ai/api/v1"
-export RIDDLE_OPENAI_MODEL="openai/gpt-4o-mini"
+RIDDLE_OCR_TOKEN=...
+RIDDLE_OCR_URL=https://paddleocr.aistudio-app.com/api/v2/ocr/jobs
+RIDDLE_OCR_MODEL=PP-OCRv6
+RIDDLE_OCR_POLL_MS=250
+RIDDLE_OCR_TIMEOUT_SECONDS=60
 ```
 
-Two gotchas with reasoning models: set `RIDDLE_OPENAI_REASONING=low` for
-faster first ink (some providers reject the field on non-reasoning models —
-leave it unset there), and keep
-`RIDDLE_OPENAI_MAX_TOKENS` roomy — hidden reasoning tokens count against it,
-and a tight cap starves the visible reply.
+`RIDDLE_OCR_SPECULATIVE=off` 可关闭一秒预请求，避免停顿后继续书写造成已计费但弃用的远端任务。没有 HTTP 密钥时也可使用常驻 `pi --mode rpc` 后端；完整变量和注释见 `oracle.env.example`。
 
-Verify your setup before launching the diary:
+密钥不得提交到 Git。若密钥曾出现在终端日志、聊天或仓库历史中，应立即在提供商控制台撤销并重建。
+
+无屏诊断：
 
 ```sh
-riddle --oracle-test path/to/handwriting.png   # prints the streamed reply
+riddle --ocr-test handwriting.png
+riddle --oracle-test handwriting.png
 ```
 
-### Optional PaddleOCR handwriting stage
+## 确定性测试模式
 
-Set an AI Studio token to make `PP-OCRv6` read the committed page first.
-MagicPaper submits the PNG as a multipart job, polls until it is ready, reads
-the ordered `rec_texts` strings from the returned JSONL, and sends only that
-text to the OpenAI-compatible answer model. The answer model still performs
-contextual OCR correction, reasoning, background search, and paper-ready
-writing. `PaddleOCR-VL-1.6` remains selectable for document-layout images.
+设置精确值 `RIDDLE_TEST_MODE=1` 后，MagicPaper 使用确定性离线回答，并拒绝 HTTP、PaddleOCR、pi 和外部阅读器调用。`RIDDLE_DATA_DIR` 可把所有持久状态重定向到临时目录；也可按组件覆盖：
+
+- `RIDDLE_AGENT_QUEUE_DIR`
+- `RIDDLE_PI_DATA_DIR`、`RIDDLE_PI_HOME`
+- `RIDDLE_MEMORY_DIR`
+- `RIDDLE_TASKS_DIR`
+- `RIDDLE_TODOS_DIR`
+- `RIDDLE_PREFERENCES_DIR`
+- `RIDDLE_REMARKABLE_LIBRARY`、`RIDDLE_KOREADER_LIBRARY`
+
+测试模式在没有显式路径时也不会回退到 `/home/root`。Remagic 的设备验收通过临时 manifest 和 systemd runtime drop-in 使用生产二进制、生产显示栈和隔离数据，测试结束后比较真实数据指纹并恢复原会话。
+
+## 构建与交付
+
+提交前运行完整本地门禁：
 
 ```sh
-export RIDDLE_OCR_TOKEN="your-aistudio-access-token"
-export RIDDLE_OCR_URL="https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
-export RIDDLE_OCR_MODEL="PP-OCRv6"
-export RIDDLE_OCR_POLL_MS="250"
-export RIDDLE_OCR_TIMEOUT_SECONDS="60"
+./scripts/check.sh
 ```
 
-Test OCR without spending an answer-model request:
+它会执行架构检查、格式检查、全部 target 测试、Clippy `-D warnings` 和 release/all-features 编译检查。
+
+正式设备包由同级 `remagic-manager` 统一构建和部署，它负责交叉编译、字体资源、QTFB shim、manifest、systemd 服务、校验和与事务安装：
 
 ```sh
-riddle --ocr-test path/to/handwriting.png
+cd ../remagic-manager
+./scripts/build-bundle.sh
+./scripts/deploy-usb.sh
 ```
 
-Speculative OCR is on by default: MP submits after one second of idle time,
-hiding 1.8 seconds of the commit delay. Set `RIDDLE_OCR_SPECULATIVE=off` if
-avoiding possible paid orphan jobs after a mid-sentence pause matters more than
-latency. Never commit a real OCR token to the repository.
+旧独占构建仍可通过 `build-takeover.sh` 和 `scripts/make-bundle.sh` 生成；兼容包会校验并打包 `${MAGICPAPER_UI_FONT:-$HOME/Downloads/方正屏显雅宋.TTF}`，但它只作为显式兼容路径，不参与 Remagic 的应用切换、驻留、故障恢复和自动化验收。
 
-Latency depends on OCR job time, the selected answer model, and whether search
-is needed. The earlier direct-vision Terra configuration began a searched
-quotation at about 7.2 seconds and completed at about 8.7 seconds. HTTPS is
-built into riddle (pure Rust, no extra libraries).
+## 模块划分
 
-### Option B — pi (the power path)
-
-If you already run [`pi`](https://github.com/badlogic/pi-mono), riddle will use
-a resident `pi --mode rpc` process kept warm (Node + your subscription auth
-loaded once), so each turn pays only model latency. Used automatically when
-`RIDDLE_OPENAI_KEY` is **not** set. Defaults (override in `oracle.env`):
-pi at `/home/root/node/bin` (`RIDDLE_PI_BIN_DIR`), provider `openai-codex`
-(`RIDDLE_PI_PROVIDER`), model `gpt-5.4-mini` (`RIDDLE_PI_MODEL`).
-
-Both stream the reply sentence-by-sentence, so the quill starts writing seconds
-before the model finishes. The persona prompt lives in `src/oracle.rs`.
-
-With the HTTP backend, the most recent 20 page/reply pairs are sent as
-continuous dialogue on every turn. Both backends also receive the fresh
-40-page recall catalog; the full local archive retains up to 400 pages.
-
-If the oracle can't answer — missing key, refused key, no Wi-Fi — MP writes
-the reason on the page instead of a reply, and the full error goes to the
-journal (`journalctl -u riddle-takeover`).
-
-## Building
-
-Cross-compiled from x86_64. Two flavours:
-
-### Windowed (AppLoad/qtfb) — build from source
-
-The bundles above are the takeover flavour; the windowed flavour must be
-built. Requires [xovi + AppLoad](https://github.com/asivery/rm-appload) on
-the device.
-
-```sh
-git clone https://github.com/aporicho/riddle
-cd riddle
-cargo build --release --target aarch64-unknown-linux-gnu
+```text
+src/app/          回合编排、生命周期、输入优先级、列表与回答控制
+src/oracle/       HTTP/pi/Paddle、流解析、本地路由、提示词和确定性后端
+src/storage/      记忆、任务与 TODO 领域模型
+src/appearance/   字体、标定与手写描边
+src/ui/           纸面列表、帮助和字体设置
+src/qtfb/         共享 surface、输入与非阻塞提交适配
+src/platform.rs   与设备无关的 token、refresh intent 等平台契约
 ```
 
-Install the binary to `/home/root/xovi/exthome/appload/riddle/` with an
-`external.manifest.json` that sets `"qtfb": true` and points `"application"`
-at the binary itself (the manifest in this repo is the takeover one — AppLoad
-only hands riddle a window, via `QTFB_KEY`, when `qtfb` is true).
-
-### Takeover on Paper Pro Move
-
-Requires the chiappa reMarkable SDK toolchain (tested with 3.27) because the
-linked vendor Qt libs need its glibc, **and** `libqsgepaper.so` pulled from
-*your own device* (it is proprietary and not distributed here):
-
-```sh
-# Keep the quill-move and riddle repositories beside each other.
-cd quill-move
-RM_SDK=~/rm-sdk-chiappa-3.27 ./build.sh
-cd ../riddle
-RM_SDK=~/rm-sdk-chiappa-3.27 QUILL_DIR=../quill-move ./build-takeover.sh
-MAGICPAPER_BUTTER_FONT=/path/to/ButterShiSan.ttf \
-MAGICPAPER_851_FONT=/path/to/851LakeusNightWriting.ttf \
-QUILL_DIR=../quill-move ./scripts/make-bundle.sh
-```
-
-The two `MAGICPAPER_*_FONT` variables are optional local TTF resources. They
-are copied into `dist/riddle/fonts/` but never committed to this repository.
-With both installed, handwrite **字体** or **字體**, tap a row to select it, or
-drag that row's scale from 50% to 180% to calibrate the font's visual size.
-851 is the default. Selection and the three independent calibration values are
-saved under `/home/root/riddle-data/preferences/`. Measurement, wrapping,
-rendering, and per-glyph fallback all use the same calibrated size, so fallback
-characters stay aligned instead of becoming unexpectedly large or small.
-Do not publish a bundle containing fonts unless their licenses permit it.
-
-Handwrite **历史** or **歷史** to open the nine newest local dialogue pages;
-strike through a row to delete that memory and its saved strokes. In the task
-list, the right-hand box is a direct local control: a check means active and a
-cross means paused. User pen events are drained before commit, heartbeat, and
-fade timers; touching an old lingering/fading reply clears it immediately and
-starts the new stroke instead of making the writer wait.
-
-Handwrite **帮助**, **幫助**, or **help** to open the device-local Chinese
-instruction manual without an answer-model request. Drawing one large `?`
-continues to open the same manual.
-
-Handwrite **刷新**, **刷新屏幕**, **重新整理**, or **refresh** to request one
-full-panel refresh locally. This is intentionally explicit: routine reply
-cleanup remains region-only, while the command provides an immediate way to
-remove accumulated ghosting.
-
-The staged `dist/riddle/` is self-contained (binary, `libquill.so`, launch
-scripts, manifest) — copy it to
-`/home/root/xovi/exthome/appload/riddle/`, or publish it to the catalog with
-`remagic publish dist/riddle`. Launching via AppLoad (`appload-launch.sh`)
-detaches into a transient systemd unit, stops xochitl, runs the diary, and
-**always restores xochitl on exit** — leave with a 5-finger tap or SIGTERM
-(`systemctl stop riddle-takeover`); one power press sleeps and wakes the
-diary without leaving it, while three quick presses enter/exit. The unit's stop hook restarts xochitl even if
-riddle dies uncleanly. If anything wedges:
-`ssh root@10.11.99.1 'systemctl start xochitl'`.
-
-## What leaves the device
-
-- Each committed page is rasterized to a small grayscale PNG and sent to the
-  oracle **you** configured — nothing else ever leaves the tablet, and there
-  is no telemetry.
-- The PNG (`/tmp/riddle-page.png`) is deleted as soon as the oracle has read
-  it; set `RIDDLE_KEEP_PAGE=1` to keep the last page around for debugging.
-- riddle never writes replies to disk. The pi backend, however, keeps its own
-  session history in its data dir — the HTTP backend keeps nothing.
-- MP stays in character by design: the persona prompt (see `src/oracle/`)
-  tells the model it is living magical paper and nothing else.
-
-## Source layout
-
-The binary entry is intentionally tiny. Device state and interaction live in
-`src/app/`; model backends, OCR, streaming, and local routes live in
-`src/oracle/`; local KOReader title discovery and guarded handoff live in
-`src/reader.rs`; reusable paper panels live in `src/ui/`; appearance and text
-tracing live in `src/appearance/`; persistent memory, tasks, and TODOs live in
-`src/storage/`. This keeps feature work out of a single multi-thousand-line
-file while preserving one central, auditable input-priority loop.
-
-## Fonts
-
-The redistributable fallback is
-[ChenYuluoyan 2.0 Thin](https://github.com/Chenyu-otf/chenyuluoyan_thin),
-with character-aware line wrapping for unspaced Chinese text (SIL OFL 1.1;
-see `fonts/OFL-ChenYuluoyan.txt`). Optional local fonts remain outside Git and
-must be used according to their own licenses.
-
-## License
-
-MIT for everything in this repository (see `LICENSE`). The vendor libraries it
-interposes (`libqsgepaper.so`, Qt) are **not** included and must come from
-your own device/SDK.
+默认生产文件以 400 行为目标、500 行为门禁，函数以 60/100 行为目标/门禁；测试文件默认上限 800 行。这些数字是审查预算，不是机械拆分规则。职责高度内聚、拆分会降低可读性的文件可在 `architecture-exceptions.tsv` 中登记精确路径、独立上限和理由，禁止通配符或整目录豁免。详见 `docs/ARCHITECTURE_STANDARDS.md`。

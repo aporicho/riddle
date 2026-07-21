@@ -5,6 +5,13 @@ use std::path::PathBuf;
 
 const MAX_TODOS: usize = 20;
 
+/// True only for the complete `TODO <text>` add grammar.  In particular,
+/// product names such as `todoist` and questions beginning with `todo` are not
+/// intercepted by the device-local command router.
+pub(crate) fn is_local_add_command(text: &str) -> bool {
+    parse_add(text).is_some()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Todo {
     pub id: u64,
@@ -22,9 +29,11 @@ impl TodoStore {
             Ok("off") | Ok("0") | Ok("no") | Ok("false") => return None,
             _ => {}
         }
-        let dir = std::env::var("RIDDLE_TODOS_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/home/root/riddle-data/todos"));
+        let dir = crate::runtime_env::persistent_path(
+            "RIDDLE_TODOS_DIR",
+            "todos",
+            "/home/root/riddle-data/todos",
+        );
         if let Err(e) = std::fs::create_dir_all(&dir) {
             eprintln!("magic-paper: TODOs disabled ({}: {e})", dir.display());
             return None;
@@ -137,9 +146,7 @@ impl TodoStore {
 
 fn parse_add(transcript: &str) -> Option<String> {
     let text = transcript.trim();
-    let Some(prefix) = text.get(..4) else {
-        return None;
-    };
+    let prefix = text.get(..4)?;
     if !prefix.eq_ignore_ascii_case("todo") {
         return None;
     }

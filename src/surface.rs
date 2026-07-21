@@ -8,6 +8,10 @@ pub enum PixFmt {
     /// 2 bytes/px, little-endian RGB565 (Move qtfb FBFMT_RMPPM_RGB565).
     Rgb565,
     /// 4 bytes/px, QImage Format_RGB32: bytes B,G,R,0xFF.
+    #[cfg_attr(
+        not(any(feature = "takeover", test)),
+        expect(dead_code, reason = "constructed only by takeover and test surfaces")
+    )]
     Rgb32,
 }
 
@@ -114,33 +118,6 @@ impl Surface {
         for row in y..y1 {
             for col in x..x1 {
                 self.put_px(col as i32, row as i32, c);
-            }
-        }
-    }
-
-    /// Invert the RGB of a rect (cursor/pressed-key feedback).
-    pub fn invert_rect(&mut self, x: usize, y: usize, w: usize, h: usize) {
-        let x1 = (x + w).min(self.w);
-        let y1 = (y + h).min(self.h);
-        let (stride, fmt) = (self.stride, self.fmt);
-        let buf = self.buf();
-        for row in y..y1 {
-            match fmt {
-                PixFmt::Rgb565 => {
-                    let s = row * stride + x * 2;
-                    let e = row * stride + x1 * 2;
-                    for b in &mut buf[s..e] {
-                        *b = !*b;
-                    }
-                }
-                PixFmt::Rgb32 => {
-                    for col in x..x1 {
-                        let i = row * stride + col * 4;
-                        buf[i] = !buf[i];
-                        buf[i + 1] = !buf[i + 1];
-                        buf[i + 2] = !buf[i + 2];
-                    }
-                }
             }
         }
     }

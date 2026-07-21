@@ -37,60 +37,8 @@ impl StreamParser {
         }
         let effective = self.sentinel.unwrap_or(full.len());
 
-        if !self.route_checked {
-            let lead = full[self.delivered..effective].trim_start();
-            if lead.starts_with(SHOW_OPEN) {
-                let Some(close_rel) = lead.find(SHOW_CLOSE) else {
-                    if !done {
-                        return out;
-                    }
-                    out.push(Err("unfinished conjuring directive".into()));
-                    return out;
-                };
-                let inner = &lead[SHOW_OPEN.len_utf8()..close_rel];
-                self.route_checked = true;
-                self.emitted_any = true;
-                self.delivered = effective;
-                let directive = inner.trim().to_ascii_lowercase();
-                if directive == "tasks" || directive == "task" {
-                    out.push(Ok(Event::TaskList));
-                } else if directive == "todos" || directive == "todo" {
-                    out.push(Ok(Event::TodoList));
-                } else if directive == "fonts" || directive == "font" {
-                    out.push(Ok(Event::FontList));
-                } else if directive == "history" || directive == "histories" {
-                    out.push(Ok(Event::HistoryList));
-                } else if directive == "help" || directive == "manual" {
-                    out.push(Ok(Event::Help));
-                } else if directive == "read" || directive == "reader" {
-                    out.push(Ok(Event::Reader(None)));
-                } else if let Some(title) = directive
-                    .strip_prefix("read:")
-                    .or_else(|| directive.strip_prefix("reader:"))
-                    .map(str::trim)
-                    .filter(|title| !title.is_empty())
-                {
-                    out.push(Ok(Event::Reader(Some(title.to_string()))));
-                } else if directive == "refresh" {
-                    out.push(Ok(Event::FullRefresh));
-                } else {
-                    let n: Option<usize> = directive
-                        .strip_prefix("show")
-                        .map(|rest| rest.trim_start_matches([':', ' ']))
-                        .and_then(|rest| rest.trim().parse().ok());
-                    match n.and_then(|n| self.catalog_ids.get(n.wrapping_sub(1)).copied()) {
-                        Some(id) => out.push(Ok(Event::Show(id))),
-                        None => out.push(Err(format!("the diary lost that page ({inner})"))),
-                    }
-                }
-            } else if lead.is_empty() {
-                if !done {
-                    return out;
-                }
-                self.route_checked = true;
-            } else {
-                self.route_checked = true;
-            }
+        if !self.route_checked && !self.route_first(full, effective, done, &mut out) {
+            return out;
         }
 
         if self.delivered < effective {
@@ -134,6 +82,66 @@ impl StreamParser {
         }
         let _ = self.showed;
         out
+    }
+
+    fn route_first(
+        &mut self,
+        full: &str,
+        effective: usize,
+        done: bool,
+        out: &mut Vec<Result<Event, String>>,
+    ) -> bool {
+        let lead = full[self.delivered..effective].trim_start();
+        if !lead.starts_with(SHOW_OPEN) {
+            if lead.is_empty() && !done {
+                return false;
+            }
+            self.route_checked = true;
+            return true;
+        }
+        let Some(close_rel) = lead.find(SHOW_CLOSE) else {
+            if done {
+                out.push(Err("unfinished conjuring directive".into()));
+            }
+            return false;
+        };
+        let inner = &lead[SHOW_OPEN.len_utf8()..close_rel];
+        self.route_checked = true;
+        self.emitted_any = true;
+        self.delivered = effective;
+        out.push(route_directive(inner, &self.catalog_ids));
+        true
+    }
+}
+
+fn route_directive(inner: &str, catalog_ids: &[u64]) -> Result<Event, String> {
+    let directive = inner.trim().to_ascii_lowercase();
+    match directive.as_str() {
+        "tasks" | "task" => Ok(Event::TaskList),
+        "todos" | "todo" => Ok(Event::TodoList),
+        "fonts" | "font" => Ok(Event::FontList),
+        "history" | "histories" => Ok(Event::HistoryList),
+        "help" | "manual" => Ok(Event::Help),
+        "read" | "reader" => Ok(Event::Reader(None)),
+        "refresh" => Ok(Event::FullRefresh),
+        _ => {
+            if let Some(title) = directive
+                .strip_prefix("read:")
+                .or_else(|| directive.strip_prefix("reader:"))
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+            {
+                return Ok(Event::Reader(Some(title.to_string())));
+            }
+            let number = directive
+                .strip_prefix("show")
+                .map(|rest| rest.trim_start_matches([':', ' ']))
+                .and_then(|rest| rest.trim().parse::<usize>().ok());
+            number
+                .and_then(|number| catalog_ids.get(number.wrapping_sub(1)).copied())
+                .map(Event::Show)
+                .ok_or_else(|| format!("the diary lost that page ({inner})"))
+        }
     }
 }
 

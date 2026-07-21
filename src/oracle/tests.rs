@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn explicit_test_mode_selects_only_the_offline_backend() {
+    let oracle = Oracle::spawn_for_mode(true, true).unwrap();
+    assert!(oracle.is_deterministic());
+    assert!(!oracle.supports_speculative());
+}
+
+#[test]
+fn offline_backend_returns_deterministic_ink_and_transcript() {
+    let oracle = Oracle::spawn_for_mode(true, true).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _cancel = oracle.ask(
+        "/path/that/must/not/be/read.png",
+        &TurnContext::default(),
+        tx,
+    );
+    assert_eq!(rx.recv().unwrap(), Ok(Event::Ink("測試回覆".into())));
+    assert_eq!(rx.recv().unwrap(), Ok(Event::Transcript("測試輸入".into())));
+    assert!(rx.recv().is_err());
+}
+
+#[test]
 fn api_credentials_are_trimmed_and_blank_values_are_rejected() {
     assert_eq!(
         trim_nonempty("  key-value \n".into()).as_deref(),
@@ -165,6 +186,8 @@ fn high_confidence_local_routes_choose_fast_commit() {
     );
     assert_eq!(local_route("reader"), None);
     assert_eq!(local_route("TODO 买牛奶"), Some(LocalRoute::Command));
+    assert_eq!(local_route("任务管理有什么意义？"), None);
+    assert_eq!(local_route("todoist是什么"), None);
     let shared = Arc::new(Mutex::new(Some(result)));
     let handle = RequestCancel::http(
         1,
@@ -200,6 +223,12 @@ fn arithmetic_fast_path_preserves_the_written_equation() {
         Some("(12+8)×3=60".into())
     );
     assert_eq!(evaluate_arithmetic("7÷2="), Some("7÷2=3.5".into()));
+    assert_eq!(
+        evaluate_arithmetic("9007199254740993+1=?"),
+        Some("9007199254740993+1=9007199254740994".into())
+    );
+    assert_eq!(evaluate_arithmetic("0.1+0.2"), Some("0.1+0.2=0.3".into()));
+    assert_eq!(evaluate_arithmetic("1÷3"), Some("1÷3=1/3".into()));
     assert_eq!(evaluate_arithmetic("什么是 1+1"), None);
 }
 

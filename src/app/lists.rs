@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use crate::platform::RefreshIntent;
 use crate::surface::Surface;
 use crate::{display, fonts, memory, reader, tasks, todos, ui};
 
@@ -11,200 +12,255 @@ use super::timing::{heartbeat_deadline, unix_now};
 
 pub(super) const HISTORY_VISIBLE: usize = 9;
 
+pub(super) struct PaperListContext<'a> {
+    pub memory_store: &'a mut Option<memory::MemoryStore>,
+    pub task_store: &'a mut Option<tasks::TaskStore>,
+    pub todo_store: &'a mut Option<todos::TodoStore>,
+    pub next_heartbeat: &'a mut Option<Instant>,
+    pub surf: &'a mut Surface,
+    pub font: &'a mut fonts::FontBook,
+    pub disp: &'a display::Display,
+}
+
 pub(super) fn finish_paper_list_stroke(
     state: &mut State,
-    memory_store: &mut Option<memory::MemoryStore>,
-    task_store: &mut Option<tasks::TaskStore>,
-    todo_store: &mut Option<todos::TodoStore>,
-    next_heartbeat: &mut Option<Instant>,
+    context: PaperListContext<'_>,
+) -> Option<PathBuf> {
+    let PaperListContext {
+        memory_store,
+        task_store,
+        todo_store,
+        next_heartbeat,
+        surf,
+        font,
+        disp,
+    } = context;
+    if matches!(state, State::FontList { .. }) {
+        finish_font_stroke(state, surf, font, disp);
+        return None;
+    }
+    if matches!(state, State::ReaderList { .. }) {
+        return finish_reader_stroke(state, surf, font, disp);
+    }
+    let mut stores = ListStores {
+        memory: memory_store,
+        tasks: task_store,
+        todos: todo_store,
+        next_heartbeat,
+    };
+    finish_stored_list_stroke(state, &mut stores, surf, font, disp);
+    None
+}
+
+struct ListStores<'a> {
+    memory: &'a mut Option<memory::MemoryStore>,
+    tasks: &'a mut Option<tasks::TaskStore>,
+    todos: &'a mut Option<todos::TodoStore>,
+    next_heartbeat: &'a mut Option<Instant>,
+}
+
+fn finish_font_stroke(
+    state: &mut State,
     surf: &mut Surface,
     font: &mut fonts::FontBook,
     disp: &display::Display,
+) {
+    let action = match state {
+        State::FontList { panel } => panel.pen_up(),
+        _ => return,
+    };
+    match action {
+        Some(ui::font_settings::Action::Select(id)) => {
+            if let Err(error) = font.select(id) {
+                eprintln!("magic-paper: could not persist font selection: {error}");
+            }
+            redraw_font_list(state, surf, font, disp);
+            eprintln!("magic-paper: selected font {}", id.stable_id());
+        }
+        Some(ui::font_settings::Action::SetScale(id, percent)) => {
+            if let Err(error) = font.set_scale_percent(id, percent) {
+                eprintln!("magic-paper: could not persist font size calibration: {error}");
+            }
+            redraw_font_list(state, surf, font, disp);
+            eprintln!(
+                "magic-paper: calibrated font {} to {}%",
+                id.stable_id(),
+                font.scale_percent(id)
+            );
+        }
+        Some(ui::font_settings::Action::Dismiss) => {
+            let old = std::mem::replace(state, State::Listening { last_pen: None });
+            if let State::FontList { panel } = old {
+                panel.dismiss(surf);
+            }
+            disp.present_all(surf.w, surf.h, RefreshIntent::Content);
+            eprintln!("magic-paper: font list dismissed");
+        }
+        Some(ui::font_settings::Action::Redraw) => redraw_font_list(state, surf, font, disp),
+        None => {}
+    }
+}
+
+fn redraw_font_list(
+    state: &mut State,
+    surf: &mut Surface,
+    font: &fonts::FontBook,
+    disp: &display::Display,
+) {
+    if let State::FontList { panel } = state {
+        panel.redraw(surf, font);
+    }
+    disp.present_all(surf.w, surf.h, RefreshIntent::Content);
+}
+
+fn finish_reader_stroke(
+    state: &mut State,
+    surf: &mut Surface,
+    font: &fonts::FontBook,
+    disp: &display::Display,
 ) -> Option<PathBuf> {
-    if matches!(state, State::FontList { .. }) {
-        let action = match state {
-            State::FontList { panel } => panel.pen_up(),
-            _ => None,
-        };
-        match action {
-            Some(ui::font_settings::Action::Select(id)) => {
-                if let Err(error) = font.select(id) {
-                    eprintln!("magic-paper: could not persist font selection: {error}");
-                }
-                if let State::FontList { panel } = state {
-                    panel.redraw(surf, font);
-                }
-                disp.update_all(surf.w, surf.h);
-                eprintln!("magic-paper: selected font {}", id.stable_id());
-            }
-            Some(ui::font_settings::Action::SetScale(id, percent)) => {
-                if let Err(error) = font.set_scale_percent(id, percent) {
-                    eprintln!("magic-paper: could not persist font size calibration: {error}");
-                }
-                if let State::FontList { panel } = state {
-                    panel.redraw(surf, font);
-                }
-                disp.update_all(surf.w, surf.h);
+    let action = match state {
+        State::ReaderList { panel, .. } => panel.pen_up(),
+        _ => return None,
+    };
+    match action {
+        Some(ui::paper_list::Action::Select(number)) => {
+            let path = match state {
+                State::ReaderList { books, .. } => books
+                    .get(number.wrapping_sub(1))
+                    .map(|book| book.path.clone()),
+                _ => None,
+            };
+            if let Some(path) = path {
                 eprintln!(
-                    "magic-paper: calibrated font {} to {}%",
-                    id.stable_id(),
-                    font.scale_percent(id)
+                    "magic-paper: reader candidate {number} selected — {}",
+                    path.display()
                 );
+                return Some(path);
             }
-            Some(ui::font_settings::Action::Dismiss) => {
-                let old = std::mem::replace(state, State::Listening { last_pen: None });
-                match old {
-                    State::FontList { panel } => panel.dismiss(surf),
-                    _ => unreachable!(),
-                }
-                disp.update_all(surf.w, surf.h);
-                eprintln!("magic-paper: font list dismissed");
-            }
-            Some(ui::font_settings::Action::Redraw) => {
-                if let State::FontList { panel } = state {
-                    panel.redraw(surf, font);
-                }
-                disp.update_all(surf.w, surf.h);
-            }
-            None => {}
+            redraw_reader_list(state, surf, font);
+            disp.present_all(surf.w, surf.h, RefreshIntent::Content);
         }
-        return None;
-    }
-
-    if matches!(state, State::ReaderList { .. }) {
-        let action = match state {
-            State::ReaderList { panel, .. } => panel.pen_up(),
-            _ => None,
-        };
-        match action {
-            Some(ui::paper_list::Action::Select(number)) => {
-                let path = match state {
-                    State::ReaderList { books, .. } => books
-                        .get(number.wrapping_sub(1))
-                        .map(|book| book.path.clone()),
-                    _ => None,
-                };
-                if let Some(path) = path {
-                    eprintln!(
-                        "magic-paper: reader candidate {number} selected — {}",
-                        path.display()
-                    );
-                    return Some(path);
-                }
-                redraw_reader_list(state, surf, font);
-                disp.update_all(surf.w, surf.h);
+        Some(ui::paper_list::Action::Dismiss) => {
+            let old = std::mem::replace(state, State::Listening { last_pen: None });
+            if let State::ReaderList { panel, .. } = old {
+                panel.dismiss(surf);
             }
-            Some(ui::paper_list::Action::Dismiss) => {
-                let old = std::mem::replace(state, State::Listening { last_pen: None });
-                match old {
-                    State::ReaderList { panel, .. } => panel.dismiss(surf),
-                    _ => unreachable!(),
-                }
-                disp.update_all(surf.w, surf.h);
-                eprintln!("magic-paper: reader candidates dismissed");
-            }
-            Some(ui::paper_list::Action::Redraw)
-            | Some(ui::paper_list::Action::Delete(_))
-            | Some(ui::paper_list::Action::Toggle(_)) => {
-                redraw_reader_list(state, surf, font);
-                disp.update_all(surf.w, surf.h);
-            }
-            None => {}
+            disp.present_all(surf.w, surf.h, RefreshIntent::Content);
+            eprintln!("magic-paper: reader candidates dismissed");
         }
-        return None;
+        Some(_) => {
+            redraw_reader_list(state, surf, font);
+            disp.present_all(surf.w, surf.h, RefreshIntent::Content);
+        }
+        None => {}
     }
+    None
+}
 
+fn finish_stored_list_stroke(
+    state: &mut State,
+    stores: &mut ListStores<'_>,
+    surf: &mut Surface,
+    font: &fonts::FontBook,
+    disp: &display::Display,
+) {
     let action = match state {
         State::TaskList { panel } | State::TodoList { panel } | State::HistoryList { panel } => {
             panel.pen_up()
         }
         _ => None,
     };
-    let Some(action) = action else {
-        return None;
-    };
+    let Some(action) = action else { return };
     match action {
         ui::paper_list::Action::Delete(number) => {
-            match state {
-                State::TaskList { .. } => match task_store.as_mut() {
-                    Some(store) => match store.delete_number(number) {
-                        Ok(task) => {
-                            eprintln!(
-                                "magic-paper: task {number} deleted from paper list — {}",
-                                task.instruction
-                            );
-                            *next_heartbeat = heartbeat_deadline(task_store);
-                        }
-                        Err(e) => eprintln!("magic-paper: could not delete task {number}: {e}"),
-                    },
-                    None => eprintln!("magic-paper: task storage is disabled"),
-                },
-                State::TodoList { .. } => match todo_store.as_mut() {
-                    Some(store) => match store.delete_number(number) {
-                        Ok(todo) => eprintln!(
-                            "magic-paper: TODO {number} deleted from paper list — {}",
-                            todo.text
-                        ),
-                        Err(e) => eprintln!("magic-paper: could not delete TODO {number}: {e}"),
-                    },
-                    None => eprintln!("magic-paper: TODO storage is disabled"),
-                },
-                State::HistoryList { .. } => match memory_store.as_mut() {
-                    Some(store) => match store.delete_number(number, HISTORY_VISIBLE) {
-                        Ok(entry) => eprintln!(
-                            "magic-paper: history {number} deleted — {}",
-                            entry.transcript
-                        ),
-                        Err(error) => {
-                            eprintln!("magic-paper: could not delete history {number}: {error}")
-                        }
-                    },
-                    None => eprintln!("magic-paper: memory storage is disabled"),
-                },
-                _ => {}
-            }
-            redraw_paper_list(state, memory_store, task_store, todo_store, surf, font);
-            disp.update_all(surf.w, surf.h);
+            delete_stored_row(state, stores, number);
+            redraw_stored_list(state, stores, surf, font, disp);
         }
         ui::paper_list::Action::Toggle(number) => {
-            if let State::TaskList { .. } = state {
-                match task_store.as_mut() {
-                    Some(store) => match store.toggle_number(number, unix_now()) {
-                        Ok(task) => {
-                            eprintln!(
-                                "magic-paper: task {number} {} from paper list",
-                                if task.paused { "disabled" } else { "enabled" }
-                            );
-                            *next_heartbeat = heartbeat_deadline(task_store);
-                        }
-                        Err(error) => {
-                            eprintln!("magic-paper: could not toggle task {number}: {error}")
-                        }
-                    },
-                    None => eprintln!("magic-paper: task storage is disabled"),
-                }
-            }
-            redraw_paper_list(state, memory_store, task_store, todo_store, surf, font);
-            disp.update_all(surf.w, surf.h);
+            toggle_task(stores, number);
+            redraw_stored_list(state, stores, surf, font, disp);
         }
         ui::paper_list::Action::Dismiss => {
             let old = std::mem::replace(state, State::Listening { last_pen: None });
-            match old {
-                State::TaskList { panel }
-                | State::TodoList { panel }
-                | State::HistoryList { panel } => panel.dismiss(surf),
-                _ => unreachable!(),
+            if let State::TaskList { panel }
+            | State::TodoList { panel }
+            | State::HistoryList { panel } = old
+            {
+                panel.dismiss(surf);
             }
-            disp.update_all(surf.w, surf.h);
+            disp.present_all(surf.w, surf.h, RefreshIntent::Content);
             eprintln!("magic-paper: paper list dismissed");
         }
-        ui::paper_list::Action::Redraw => {
-            redraw_paper_list(state, memory_store, task_store, todo_store, surf, font);
-            disp.update_all(surf.w, surf.h);
-        }
+        ui::paper_list::Action::Redraw => redraw_stored_list(state, stores, surf, font, disp),
         ui::paper_list::Action::Select(_) => {}
     }
-    None
+}
+
+fn delete_stored_row(state: &State, stores: &mut ListStores<'_>, number: usize) {
+    match state {
+        State::TaskList { .. } => match stores.tasks.as_mut() {
+            Some(store) => match store.delete_number(number) {
+                Ok(task) => {
+                    eprintln!(
+                        "magic-paper: task {number} deleted from paper list — {}",
+                        task.instruction
+                    );
+                    *stores.next_heartbeat = heartbeat_deadline(stores.tasks);
+                }
+                Err(error) => eprintln!("magic-paper: could not delete task {number}: {error}"),
+            },
+            None => eprintln!("magic-paper: task storage is disabled"),
+        },
+        State::TodoList { .. } => match stores.todos.as_mut() {
+            Some(store) => match store.delete_number(number) {
+                Ok(todo) => eprintln!(
+                    "magic-paper: TODO {number} deleted from paper list — {}",
+                    todo.text
+                ),
+                Err(error) => eprintln!("magic-paper: could not delete TODO {number}: {error}"),
+            },
+            None => eprintln!("magic-paper: TODO storage is disabled"),
+        },
+        State::HistoryList { .. } => match stores.memory.as_mut() {
+            Some(store) => match store.delete_number(number, HISTORY_VISIBLE) {
+                Ok(entry) => eprintln!(
+                    "magic-paper: history {number} deleted — {}",
+                    entry.transcript
+                ),
+                Err(error) => eprintln!("magic-paper: could not delete history {number}: {error}"),
+            },
+            None => eprintln!("magic-paper: memory storage is disabled"),
+        },
+        _ => {}
+    }
+}
+
+fn toggle_task(stores: &mut ListStores<'_>, number: usize) {
+    match stores.tasks.as_mut() {
+        Some(store) => match store.toggle_number(number, unix_now()) {
+            Ok(task) => {
+                eprintln!(
+                    "magic-paper: task {number} {} from paper list",
+                    if task.paused { "disabled" } else { "enabled" }
+                );
+                *stores.next_heartbeat = heartbeat_deadline(stores.tasks);
+            }
+            Err(error) => eprintln!("magic-paper: could not toggle task {number}: {error}"),
+        },
+        None => eprintln!("magic-paper: task storage is disabled"),
+    }
+}
+
+fn redraw_stored_list(
+    state: &mut State,
+    stores: &ListStores<'_>,
+    surf: &mut Surface,
+    font: &fonts::FontBook,
+    disp: &display::Display,
+) {
+    redraw_paper_list(state, stores.memory, stores.tasks, stores.todos, surf, font);
+    disp.present_all(surf.w, surf.h, RefreshIntent::Content);
 }
 
 fn redraw_reader_list(state: &mut State, surf: &mut Surface, font: &fonts::FontBook) {
@@ -213,11 +269,13 @@ fn redraw_reader_list(state: &mut State, surf: &mut Surface, font: &fonts::FontB
         panel.redraw(
             surf,
             font,
-            "選擇要閱讀的書",
-            "沒有相符書籍",
-            "用筆點書名開啟 · 點空白退出",
-            &lines,
-            None,
+            ui::paper_list::Content {
+                title: "选择要阅读的书",
+                empty_text: "没有相符书籍",
+                footer: "用笔点书名打开 · 点空白退出",
+                entries: &lines,
+                enabled: None,
+            },
         );
     }
 }
@@ -243,11 +301,13 @@ fn redraw_paper_list(
             panel.redraw(
                 surf,
                 font,
-                "任務列表",
-                "尚無任務",
-                "橫劃可刪除 · 點右側方框啟用或停用 · 點空白退出",
-                &lines,
-                Some(&enabled),
+                ui::paper_list::Content {
+                    title: "任务列表",
+                    empty_text: "尚无任务",
+                    footer: "横划可删除 · 点右侧方框启用或停用 · 点空白退出",
+                    entries: &lines,
+                    enabled: Some(&enabled),
+                },
             );
         }
         State::TodoList { panel } => {
@@ -258,11 +318,13 @@ fn redraw_paper_list(
             panel.redraw(
                 surf,
                 font,
-                "TODO 列表",
-                "尚無 TODO",
-                "橫劃 TODO 可刪除 · 點擊空白處退出",
-                &lines,
-                None,
+                ui::paper_list::Content {
+                    title: "TODO 列表",
+                    empty_text: "尚无 TODO",
+                    footer: "横划 TODO 可删除 · 点击空白处退出",
+                    entries: &lines,
+                    enabled: None,
+                },
             );
         }
         State::HistoryList { panel } => {
@@ -273,11 +335,13 @@ fn redraw_paper_list(
             panel.redraw(
                 surf,
                 font,
-                "對話歷史",
-                "尚無歷史",
-                "橫劃一段歷史可刪除 · 點擊空白處退出",
-                &lines,
-                None,
+                ui::paper_list::Content {
+                    title: "对话历史",
+                    empty_text: "尚无历史",
+                    footer: "横划一段历史可删除 · 点击空白处退出",
+                    entries: &lines,
+                    enabled: None,
+                },
             );
         }
         _ => {}

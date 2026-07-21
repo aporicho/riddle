@@ -22,6 +22,14 @@ pub enum Action {
     Redraw,
 }
 
+pub struct Content<'a> {
+    pub title: &'a str,
+    pub empty_text: &'a str,
+    pub footer: &'a str,
+    pub entries: &'a [String],
+    pub enabled: Option<&'a [bool]>,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Row {
     number: usize,
@@ -35,6 +43,9 @@ pub struct PaperList {
     rows: Vec<Row>,
     stroke: Vec<(i32, i32)>,
     selectable: bool,
+    page: usize,
+    page_size: usize,
+    total_rows: usize,
 }
 
 impl PaperList {
@@ -48,7 +59,16 @@ impl PaperList {
         enabled: Option<&[bool]>,
     ) -> Self {
         Self::show_with_mode(
-            surf, empty_text, font, title, footer, entries, enabled, false,
+            surf,
+            font,
+            Content {
+                title,
+                empty_text,
+                footer,
+                entries,
+                enabled,
+            },
+            false,
         )
     }
 
@@ -61,17 +81,24 @@ impl PaperList {
         footer: &str,
         entries: &[String],
     ) -> Self {
-        Self::show_with_mode(surf, empty_text, font, title, footer, entries, None, true)
+        Self::show_with_mode(
+            surf,
+            font,
+            Content {
+                title,
+                empty_text,
+                footer,
+                entries,
+                enabled: None,
+            },
+            true,
+        )
     }
 
     fn show_with_mode(
         surf: &mut Surface,
-        empty_text: &str,
         font: &FontBook,
-        title: &str,
-        footer: &str,
-        entries: &[String],
-        enabled: Option<&[bool]>,
+        content: Content<'_>,
         selectable: bool,
     ) -> Self {
         let saved = surf.copy_rect(0, 0, screen_w(), screen_h());
@@ -80,40 +107,57 @@ impl PaperList {
             rows: Vec::new(),
             stroke: Vec::new(),
             selectable,
+            page: 0,
+            page_size: 1,
+            total_rows: 0,
         };
-        panel.redraw(surf, font, title, empty_text, footer, entries, enabled);
+        panel.redraw(surf, font, content);
         panel
     }
 
-    pub fn redraw(
-        &mut self,
-        surf: &mut Surface,
-        font: &FontBook,
-        title: &str,
-        empty_text: &str,
-        footer: &str,
-        entries: &[String],
-        enabled: Option<&[bool]>,
-    ) {
+    pub fn redraw(&mut self, surf: &mut Surface, font: &FontBook, content: Content<'_>) {
+        let Content {
+            title,
+            empty_text,
+            footer,
+            entries,
+            enabled,
+        } = content;
         surf.fill_rect(0, 0, screen_w(), screen_h(), WHITE);
         self.rows.clear();
         self.stroke.clear();
 
         blit_centered(surf, font, title, 88.0, 90);
-        blit_centered(surf, font, footer, 42.0, screen_h().saturating_sub(115));
-
         if entries.is_empty() {
+            blit_centered(surf, font, footer, 42.0, screen_h().saturating_sub(115));
+            self.page = 0;
+            self.page_size = 1;
+            self.total_rows = 0;
             blit_centered(surf, font, empty_text, 68.0, LIST_TOP + 300);
             return;
         }
 
         let available = screen_h().saturating_sub(LIST_TOP + LIST_BOTTOM_PAD);
-        let row_h = (available / entries.len()).clamp(78, 170);
+        self.page_size = (available / 78).max(1);
+        self.total_rows = entries.len();
+        let page_count = entries.len().div_ceil(self.page_size);
+        self.page = self.page.min(page_count.saturating_sub(1));
+        let start = self.page * self.page_size;
+        let end = (start + self.page_size).min(entries.len());
+        let visible = &entries[start..end];
+        let footer = if page_count > 1 {
+            format!("{footer} · 上下划翻页 · {}/{}", self.page + 1, page_count)
+        } else {
+            footer.to_string()
+        };
+        blit_centered(surf, font, &footer, 42.0, screen_h().saturating_sub(115));
+        let row_h = (available / visible.len()).clamp(78, 170);
         let text_px = ((row_h as f32) * 0.36).clamp(40.0, 58.0);
         let has_toggles = enabled.is_some();
         let max_width = screen_w().saturating_sub(SIDE * 2 + if has_toggles { 120 } else { 24 });
-        for (index, entry) in entries.iter().enumerate() {
-            let y0 = LIST_TOP + index * row_h;
+        for (visible_index, entry) in visible.iter().enumerate() {
+            let index = start + visible_index;
+            let y0 = LIST_TOP + visible_index * row_h;
             let y1 = y0 + row_h - 1;
             let text = fit_line(font, entry, text_px, max_width);
             let text_y = y0 + (row_h.saturating_sub(text_px as usize)) / 2;
@@ -181,6 +225,19 @@ impl PaperList {
             {
                 return Some(Action::Delete(row.number));
             }
+        }
+
+        let vertical = y_span >= 140
+            && y_span >= x_span.saturating_mul(2)
+            && (last.1 - first.1).abs() >= (last.0 - first.0).abs().saturating_mul(2);
+        if vertical {
+            let page_count = self.total_rows.div_ceil(self.page_size.max(1));
+            if last.1 < first.1 {
+                self.page = (self.page + 1).min(page_count.saturating_sub(1));
+            } else {
+                self.page = self.page.saturating_sub(1);
+            }
+            return Some(Action::Redraw);
         }
 
         // A small contact outside every task row is the blank-space exit.
@@ -259,14 +316,14 @@ fn draw_status_box(surf: &mut Surface, x: usize, y: usize, size: usize, active: 
 }
 
 fn fit_line(font: &FontBook, text: &str, size: f32, max_width: usize) -> String {
-    if script::measure(font, text, size) as usize <= max_width {
+    if script::measure_ui(font, text, size) as usize <= max_width {
         return text.to_string();
     }
     let mut chars: Vec<char> = text.chars().collect();
     while !chars.is_empty() {
         chars.pop();
         let candidate = format!("{}…", chars.iter().collect::<String>());
-        if script::measure(font, &candidate, size) as usize <= max_width {
+        if script::measure_ui(font, &candidate, size) as usize <= max_width {
             return candidate;
         }
     }
@@ -274,7 +331,7 @@ fn fit_line(font: &FontBook, text: &str, size: f32, max_width: usize) -> String 
 }
 
 fn blit_left(surf: &mut Surface, font: &FontBook, text: &str, size: f32, x: usize, y: usize) {
-    let line = script::rasterize_line(font, text, size);
+    let line = script::rasterize_ui_line(font, text, size);
     for row in 0..line.height {
         for col in 0..line.width {
             if line.mask[row * line.width + col] {
@@ -285,7 +342,7 @@ fn blit_left(surf: &mut Surface, font: &FontBook, text: &str, size: f32, x: usiz
 }
 
 fn blit_centered(surf: &mut Surface, font: &FontBook, text: &str, size: f32, y: usize) {
-    let line = script::rasterize_line(font, text, size);
+    let line = script::rasterize_ui_line(font, text, size);
     let x = screen_w().saturating_sub(line.width) / 2;
     for row in 0..line.height {
         for col in 0..line.width {
@@ -319,6 +376,9 @@ mod tests {
             ],
             stroke: Vec::new(),
             selectable: false,
+            page: 0,
+            page_size: 12,
+            total_rows: 2,
         }
     }
 
@@ -362,5 +422,18 @@ mod tests {
         assert_eq!(panel.pen_up(), Some(Action::Select(2)));
         panel.stroke = vec![(200, 550), (500, 548), (900, 553)];
         assert_eq!(panel.pen_up(), Some(Action::Redraw));
+    }
+
+    #[test]
+    fn vertical_strokes_page_without_deleting_rows() {
+        let mut panel = panel_with_rows();
+        panel.total_rows = 20;
+        panel.page_size = 12;
+        panel.stroke = vec![(500, 1200), (502, 700), (498, 300)];
+        assert_eq!(panel.pen_up(), Some(Action::Redraw));
+        assert_eq!(panel.page, 1);
+        panel.stroke = vec![(500, 300), (502, 700), (498, 1200)];
+        assert_eq!(panel.pen_up(), Some(Action::Redraw));
+        assert_eq!(panel.page, 0);
     }
 }

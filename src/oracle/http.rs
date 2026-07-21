@@ -1,30 +1,52 @@
 //! OpenAI-compatible chat-completions and Responses backend.
 
-use std::io::{BufRead, BufReader};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use crate::ink::PageCapture;
+
 use super::{
-    base64, emit_local_route, external_ocr_turn_text, json_quote, json_str_field, local_route,
-    log_llm_terminal, nonempty_env, paper_answer_needs_rewrite, responses_delta_content,
-    rewrite_paper_tail, sse_delta_content, system_prompt, turn_text, Event, HttpApi, OcrResult,
-    PaddleOcr, RequestCancel, StreamParser, TurnContext, EXTERNAL_OCR_PROTOCOL,
+    base64, emit_local_route, external_ocr_turn_text, local_route, log_llm_terminal, nonempty_env,
+    turn_text, Event, HttpApi, OcrResult, PaddleOcr, RequestCancel, TurnContext,
 };
 
-struct WorkerPermit(Arc<AtomicBool>);
+mod chat;
+mod responses;
+mod worker_pool;
 
-impl Drop for WorkerPermit {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
+use worker_pool::{WorkerLane, WorkerPermit, WorkerPools};
+
+struct HandwritingRequest {
+    request_id: u64,
+    domain: &'static str,
+    source: PageSource,
+    ctx: TurnContext,
+    tx: Sender<Result<Event, String>>,
+    cancelled: Arc<AtomicBool>,
+    terminal: Arc<AtomicBool>,
+    ocr_result: Arc<Mutex<Option<OcrResult>>>,
+    _permit: WorkerPermit,
 }
 
-fn take_worker_permit(gate: &Arc<AtomicBool>) -> Option<WorkerPermit> {
-    gate.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .ok()
-        .map(|_| WorkerPermit(Arc::clone(gate)))
+enum PageSource {
+    File(String),
+    Capture(PageCapture),
+}
+
+struct SendRequest {
+    request_id: u64,
+    domain: &'static str,
+    user_text: String,
+    image: Option<String>,
+    ctx: TurnContext,
+    catalog_ids: Vec<u64>,
+    tx: Sender<Result<Event, String>>,
+    cancelled: Arc<AtomicBool>,
+    terminal: Arc<AtomicBool>,
+    _permit: WorkerPermit,
+    external_ocr: bool,
 }
 
 fn concise_error(error: &str) -> String {
@@ -77,14 +99,12 @@ pub struct HttpOracle {
     pub(super) ocr: Option<PaddleOcr>,
     /// Reused between turns so rapid follow-ups can reuse pooled TLS sockets.
     agent: ureq::Agent,
-    /// At most one OCR+LLM pipeline per process. Cancellation closes its
-    /// receiver immediately, while this gate prevents repeated interruptions
-    /// from accumulating blocked network workers behind it.
-    in_flight: Arc<AtomicBool>,
+    workers: WorkerPools,
 }
 
 impl HttpOracle {
     pub fn new(remember: bool) -> std::io::Result<Self> {
+        crate::runtime_env::require_external_integrations("HTTP oracle")?;
         let key = nonempty_env("RIDDLE_OPENAI_KEY")
             .ok_or_else(|| std::io::Error::other("RIDDLE_OPENAI_KEY is missing or blank"))?;
         let base = nonempty_env("RIDDLE_OPENAI_BASE")
@@ -154,12 +174,12 @@ impl HttpOracle {
             remember,
             ocr,
             agent,
-            in_flight: Arc::new(AtomicBool::new(false)),
+            workers: WorkerPools::default(),
         })
     }
 
-    fn try_worker_permit(&self) -> Option<WorkerPermit> {
-        take_worker_permit(&self.in_flight)
+    fn try_worker_permit(&self, lane: WorkerLane) -> Option<WorkerPermit> {
+        self.workers.acquire(lane)
     }
 
     pub fn ask(
@@ -170,10 +190,76 @@ impl HttpOracle {
         ctx: &TurnContext,
         tx: Sender<Result<Event, String>>,
     ) -> RequestCancel {
+        self.start_handwriting(
+            request_id,
+            domain,
+            PageSource::File(png_path.to_owned()),
+            ctx,
+            tx,
+            WorkerLane::Interactive,
+        )
+        .expect("interactive lane always returns a terminal request handle")
+    }
+
+    pub fn ask_capture(
+        &self,
+        request_id: u64,
+        domain: &'static str,
+        capture: PageCapture,
+        ctx: &TurnContext,
+        tx: Sender<Result<Event, String>>,
+    ) -> RequestCancel {
+        self.start_handwriting(
+            request_id,
+            domain,
+            PageSource::Capture(capture),
+            ctx,
+            tx,
+            WorkerLane::Interactive,
+        )
+        .expect("interactive lane always returns a terminal request handle")
+    }
+
+    pub fn ask_speculative_capture(
+        &self,
+        request_id: u64,
+        domain: &'static str,
+        capture: PageCapture,
+        ctx: &TurnContext,
+        tx: Sender<Result<Event, String>>,
+    ) -> Option<RequestCancel> {
+        self.start_handwriting(
+            request_id,
+            domain,
+            PageSource::Capture(capture),
+            ctx,
+            tx,
+            WorkerLane::Speculative,
+        )
+    }
+
+    fn start_handwriting(
+        &self,
+        request_id: u64,
+        domain: &'static str,
+        source: PageSource,
+        ctx: &TurnContext,
+        tx: Sender<Result<Event, String>>,
+        lane: WorkerLane,
+    ) -> Option<RequestCancel> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let terminal = Arc::new(AtomicBool::new(false));
-        let ocr_result: Arc<Mutex<Option<OcrResult>>> = Arc::new(Mutex::new(None));
-        let Some(permit) = self.try_worker_permit() else {
+        let has_external_ocr = self.ocr.is_some();
+        let ocr_result = Arc::new(Mutex::new(None));
+        let Some(permit) = self.try_worker_permit(lane) else {
+            if lane == WorkerLane::Speculative {
+                eprintln!(
+                    "magic-paper: event=ocr-preask-skipped request={}:{} reason=speculative-worker-busy",
+                    std::process::id(),
+                    request_id
+                );
+                return None;
+            }
             send_failure(
                 &tx,
                 "llm-error",
@@ -181,103 +267,36 @@ impl HttpOracle {
                 domain,
                 &terminal,
                 "worker-busy",
-                "previous request is still shutting down; write again in a moment".into(),
+                "previous foreground request is still shutting down; retry shortly".into(),
             );
-            return RequestCancel::http(request_id, domain, cancelled, terminal, Some(ocr_result));
+            return Some(RequestCancel::http(
+                request_id,
+                domain,
+                cancelled,
+                terminal,
+                has_external_ocr.then_some(ocr_result),
+            ));
         };
-        let png = match std::fs::read(png_path) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                send_failure(
-                    &tx,
-                    "ocr-error",
-                    request_id,
-                    domain,
-                    &terminal,
-                    "read-page",
-                    format!("read image: {e}"),
-                );
-                return RequestCancel::http(request_id, domain, cancelled, terminal, None);
-            }
-        };
-        if let Some(ocr) = self.ocr.clone() {
-            let oracle = self.clone();
-            let ctx = ctx.clone();
-            let cancel = Arc::clone(&cancelled);
-            let request_terminal = Arc::clone(&terminal);
-            let shared_result = Arc::clone(&ocr_result);
-            thread::spawn(move || {
-                let permit = permit;
-                let recognized = match ocr.recognize(request_id, domain, &png, &cancel) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        if !cancel.load(Ordering::Acquire) {
-                            send_failure(
-                                &tx,
-                                "ocr-error",
-                                request_id,
-                                domain,
-                                &request_terminal,
-                                "recognize",
-                                error,
-                            );
-                        }
-                        return;
-                    }
-                };
-                if cancel.load(Ordering::Acquire) {
-                    return;
-                }
-                if let Ok(mut slot) = shared_result.lock() {
-                    *slot = Some(recognized.clone());
-                }
-                if recognized.high_confidence() {
-                    if let Some(route) = local_route(&recognized.text) {
-                        log_llm_terminal(
-                            &request_terminal,
-                            request_id,
-                            domain,
-                            "done",
-                            "local-route",
-                            None,
-                        );
-                        emit_local_route(route, &recognized.text, &tx);
-                        return;
-                    }
-                }
-                let user_text = external_ocr_turn_text(&ctx, &recognized.text);
-                let catalog_ids = ctx.catalog_ids.clone();
-                oracle.send(
-                    request_id,
-                    domain,
-                    user_text,
-                    None,
-                    &ctx,
-                    catalog_ids,
-                    tx,
-                    cancel,
-                    request_terminal,
-                    permit,
-                    true,
-                );
-            });
-            return RequestCancel::http(request_id, domain, cancelled, terminal, Some(ocr_result));
-        }
-        let img = base64(&png);
-        self.send(
+        let worker = HandwritingRequest {
             request_id,
             domain,
-            turn_text(ctx),
-            Some(img),
-            ctx,
-            ctx.catalog_ids.clone(),
+            source,
+            ctx: ctx.clone(),
             tx,
-            Arc::clone(&cancelled),
-            Arc::clone(&terminal),
-            permit,
-            false,
-        );
-        RequestCancel::http(request_id, domain, cancelled, terminal, None)
+            cancelled: Arc::clone(&cancelled),
+            terminal: Arc::clone(&terminal),
+            ocr_result: Arc::clone(&ocr_result),
+            _permit: permit,
+        };
+        let oracle = self.clone();
+        thread::spawn(move || oracle.prepare_handwriting(worker));
+        Some(RequestCancel::http(
+            request_id,
+            domain,
+            cancelled,
+            terminal,
+            has_external_ocr.then_some(ocr_result),
+        ))
     }
 
     pub fn ask_text(
@@ -290,7 +309,7 @@ impl HttpOracle {
     ) -> RequestCancel {
         let cancelled = Arc::new(AtomicBool::new(false));
         let terminal = Arc::new(AtomicBool::new(false));
-        let Some(permit) = self.try_worker_permit() else {
+        let Some(permit) = self.try_worker_permit(WorkerLane::Scheduled) else {
             send_failure(
                 &tx,
                 "llm-error",
@@ -302,630 +321,148 @@ impl HttpOracle {
             );
             return RequestCancel::http(request_id, domain, cancelled, terminal, None);
         };
-        self.send(
+        let request = SendRequest {
             request_id,
             domain,
-            prompt.to_string(),
-            None,
-            ctx,
-            Vec::new(),
+            user_text: prompt.to_owned(),
+            image: None,
+            ctx: ctx.clone(),
+            catalog_ids: Vec::new(),
             tx,
-            Arc::clone(&cancelled),
-            Arc::clone(&terminal),
-            permit,
-            false,
-        );
+            cancelled: Arc::clone(&cancelled),
+            terminal: Arc::clone(&terminal),
+            _permit: permit,
+            external_ocr: false,
+        };
+        let oracle = self.clone();
+        thread::spawn(move || oracle.send(request));
         RequestCancel::http(request_id, domain, cancelled, terminal, None)
     }
 
-    fn send(
+    fn prepare_handwriting(&self, request: HandwritingRequest) {
+        if request.cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        let png = match load_page(&request.source, &request.cancelled) {
+            Ok(bytes) => bytes,
+            Err(error) if !request.cancelled.load(Ordering::Acquire) => {
+                send_failure(
+                    &request.tx,
+                    "ocr-error",
+                    request.request_id,
+                    request.domain,
+                    &request.terminal,
+                    "prepare-page",
+                    format!("prepare image: {error}"),
+                );
+                return;
+            }
+            Err(_) => return,
+        };
+        if request.cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        let (user_text, image, external_ocr) = match self.recognize_or_encode(&request, &png) {
+            Some(prepared) => prepared,
+            None => return,
+        };
+        let catalog_ids = request.ctx.catalog_ids.clone();
+        self.send(SendRequest {
+            request_id: request.request_id,
+            domain: request.domain,
+            user_text,
+            image,
+            ctx: request.ctx,
+            catalog_ids,
+            tx: request.tx,
+            cancelled: request.cancelled,
+            terminal: request.terminal,
+            _permit: request._permit,
+            external_ocr,
+        });
+    }
+
+    fn recognize_or_encode(
         &self,
-        request_id: u64,
-        domain: &'static str,
-        user_text: String,
-        image: Option<String>,
-        ctx: &TurnContext,
-        catalog_ids: Vec<u64>,
-        tx: Sender<Result<Event, String>>,
-        cancelled: Arc<AtomicBool>,
-        terminal: Arc<AtomicBool>,
-        permit: WorkerPermit,
-        external_ocr: bool,
-    ) {
+        request: &HandwritingRequest,
+        png: &[u8],
+    ) -> Option<(String, Option<String>, bool)> {
+        let Some(ocr) = &self.ocr else {
+            return Some((turn_text(&request.ctx), Some(base64(png)), false));
+        };
+        let recognized =
+            match ocr.recognize(request.request_id, request.domain, png, &request.cancelled) {
+                Ok(result) => result,
+                Err(error) => {
+                    if !request.cancelled.load(Ordering::Acquire) {
+                        send_failure(
+                            &request.tx,
+                            "ocr-error",
+                            request.request_id,
+                            request.domain,
+                            &request.terminal,
+                            "recognize",
+                            error,
+                        );
+                    }
+                    return None;
+                }
+            };
+        if request.cancelled.load(Ordering::Acquire) {
+            return None;
+        }
+        if let Ok(mut slot) = request.ocr_result.lock() {
+            *slot = Some(recognized.clone());
+        }
+        if recognized.high_confidence() {
+            if let Some(route) = local_route(&recognized.text) {
+                log_llm_terminal(
+                    &request.terminal,
+                    request.request_id,
+                    request.domain,
+                    "done",
+                    "local-route",
+                    None,
+                );
+                emit_local_route(route, &recognized.text, &request.tx);
+                return None;
+            }
+        }
+        Some((
+            external_ocr_turn_text(&request.ctx, &recognized.text),
+            None,
+            true,
+        ))
+    }
+
+    fn send(&self, request: SendRequest) {
         eprintln!(
-            "magic-paper: event=llm-start request={}:{} domain={domain} backend=http api={:?} input={}",
+            "magic-paper: event=llm-start request={}:{} domain={} backend=http api={:?} input={}",
             std::process::id(),
-            request_id,
+            request.request_id,
+            request.domain,
             self.api,
-            if external_ocr {
+            if request.external_ocr {
                 "ocr-text"
-            } else if image.is_some() {
+            } else if request.image.is_some() {
                 "page-image"
             } else {
                 "text"
             }
         );
-        if self.api == HttpApi::Responses {
-            self.send_responses(
-                request_id,
-                domain,
-                user_text,
-                image,
-                ctx,
-                catalog_ids,
-                tx,
-                cancelled,
-                terminal,
-                permit,
-                external_ocr,
-            );
-            return;
+        match self.api {
+            HttpApi::Responses => responses::send(self, request),
+            HttpApi::ChatCompletions => chat::send(self, request),
         }
-
-        let (base, key, model) = (self.base.clone(), self.key.clone(), self.model.clone());
-        let max_tokens = self.max_tokens;
-        let reasoning_field = self
-            .reasoning
-            .as_deref()
-            .map(|r| format!("\"reasoning_effort\":{},", json_quote(r)))
-            .unwrap_or_default();
-
-        let mut system = system_prompt(self.remember);
-        if external_ocr {
-            system.push_str(EXTERNAL_OCR_PROTOCOL);
-        }
-        // MagicPaper's conversational memory: recent pages as prior turns.
-        let mut history_msgs = String::new();
-        for (t, r) in &ctx.history {
-            history_msgs.push_str(&format!(
-                "{{\"role\":\"user\",\"content\":{}}},{{\"role\":\"assistant\",\"content\":{}}},",
-                json_quote(&format!("(an earlier page) {t}")),
-                json_quote(r),
-            ));
-        }
-        let user_content = match image {
-            Some(img) => format!(
-                concat!(
-                    "[{{\"type\":\"text\",\"text\":{}}},",
-                    "{{\"type\":\"image_url\",\"image_url\":{{\"url\":\"data:image/png;base64,{}\"}}}}]"
-                ),
-                json_quote(&user_text),
-                img,
-            ),
-            None => json_quote(&user_text),
-        };
-
-        let agent = self.agent.clone();
-        thread::spawn(move || {
-            let _permit = permit;
-            // Guard rails on the socket: without them a dropped connection or
-            // a stalled SSE stream leaves the diary "thinking" forever. The
-            // read timeout is per-read, so a healthy stream can run long —
-            // only silence trips it (thinking models can lead with ~a minute).
-            // OpenAI chat-completions, optionally with a data-URI image part.
-            // The token-cap field is provider-dependent: OpenAI's newest
-            // models reject "max_tokens" and demand "max_completion_tokens",
-            // while many OpenAI-compatible servers only know "max_tokens".
-            // Send the widely-supported name first; retry once if corrected.
-            let request = |cap_field: &str| {
-                let body = format!(
-                    concat!(
-                        "{{\"model\":{},\"stream\":true,\"{}\":{},{}",
-                        "\"messages\":[",
-                        "{{\"role\":\"system\",\"content\":{}}},",
-                        "{}",
-                        "{{\"role\":\"user\",\"content\":{}}}]}}"
-                    ),
-                    json_quote(&model),
-                    cap_field,
-                    max_tokens,
-                    reasoning_field,
-                    json_quote(&system),
-                    history_msgs,
-                    user_content,
-                );
-                agent
-                    .post(&format!("{base}/chat/completions"))
-                    .set("Authorization", &format!("Bearer {key}"))
-                    .set("Content-Type", "application/json")
-                    .send_string(&body)
-            };
-
-            let asked = std::time::Instant::now();
-            let resp = match request("max_tokens") {
-                Err(ureq::Error::Status(400, r)) => {
-                    let detail = r.into_string().unwrap_or_default();
-                    if detail.contains("max_completion_tokens") {
-                        eprintln!("riddle: endpoint wants max_completion_tokens; retrying");
-                        request("max_completion_tokens")
-                    } else {
-                        send_failure(
-                            &tx,
-                            "llm-error",
-                            request_id,
-                            domain,
-                            &terminal,
-                            "request",
-                            format!("http 400: {}", detail.trim()),
-                        );
-                        return;
-                    }
-                }
-                other => other,
-            };
-
-            if cancelled.load(Ordering::Acquire) {
-                return;
-            }
-
-            let reader = match resp {
-                Ok(r) => r.into_reader(),
-                Err(ureq::Error::Status(code, r)) => {
-                    let detail = r.into_string().unwrap_or_default();
-                    send_failure(
-                        &tx,
-                        "llm-error",
-                        request_id,
-                        domain,
-                        &terminal,
-                        "request",
-                        format!("http {code}: {}", detail.trim()),
-                    );
-                    return;
-                }
-                Err(e) => {
-                    send_failure(
-                        &tx,
-                        "llm-error",
-                        request_id,
-                        domain,
-                        &terminal,
-                        "request",
-                        format!("request failed: {e}"),
-                    );
-                    return;
-                }
-            };
-            if cancelled.load(Ordering::Acquire) {
-                return;
-            }
-
-            // Parse the SSE stream: lines of `data: {json}` whose delta.content
-            // fragments accumulate; the parser turns the running text into
-            // events (route directive, sentences, transcription postscript).
-            let mut parser = StreamParser::new(catalog_ids);
-            let mut acc = String::new();
-            let mut first = true;
-            let mut emit = |events: Vec<Result<Event, String>>| {
-                for ev in events {
-                    if first {
-                        eprintln!(
-                            "riddle: oracle first chunk +{}ms",
-                            asked.elapsed().as_millis()
-                        );
-                        first = false;
-                    }
-                    if ev.is_err() {
-                        log_llm_terminal(
-                            &terminal,
-                            request_id,
-                            domain,
-                            "error",
-                            "paper-parse",
-                            None,
-                        );
-                    }
-                    let _ = tx.send(ev);
-                }
-            };
-            for line in BufReader::new(reader).lines() {
-                if cancelled.load(Ordering::Acquire) {
-                    eprintln!("riddle: speculative chat request cancelled");
-                    return;
-                }
-                let line = match line {
-                    Ok(line) => line,
-                    Err(error) => {
-                        send_failure(
-                            &tx,
-                            "llm-error",
-                            request_id,
-                            domain,
-                            &terminal,
-                            "stream-read",
-                            format!("response stream failed: {error}"),
-                        );
-                        return;
-                    }
-                };
-                let line = line.trim();
-                let Some(data) = line.strip_prefix("data:") else {
-                    continue;
-                };
-                let data = data.trim();
-                if data == "[DONE]" {
-                    break;
-                }
-                if let Some(frag) = sse_delta_content(data) {
-                    if frag.is_empty() {
-                        continue;
-                    }
-                    acc.push_str(&frag);
-                    emit(parser.advance(&acc, false));
-                }
-            }
-            if cancelled.load(Ordering::Acquire) {
-                return;
-            }
-            if acc.trim().is_empty() {
-                send_failure(
-                    &tx,
-                    "llm-error",
-                    request_id,
-                    domain,
-                    &terminal,
-                    "empty-response",
-                    "chat completions returned no paper answer".into(),
-                );
-                return;
-            }
-            emit(parser.advance(&acc, true));
-            if !cancelled.load(Ordering::Acquire) {
-                log_llm_terminal(
-                    &terminal,
-                    request_id,
-                    domain,
-                    "done",
-                    "chat-completions",
-                    Some(asked.elapsed().as_millis()),
-                );
-            }
-            // tx drops here → the diary's receiver disconnects = reply complete.
-        });
     }
+}
 
-    fn send_responses(
-        &self,
-        request_id: u64,
-        domain: &'static str,
-        user_text: String,
-        image: Option<String>,
-        ctx: &TurnContext,
-        catalog_ids: Vec<u64>,
-        tx: Sender<Result<Event, String>>,
-        cancelled: Arc<AtomicBool>,
-        terminal: Arc<AtomicBool>,
-        permit: WorkerPermit,
-        external_ocr: bool,
-    ) {
-        let (base, key, model) = (self.base.clone(), self.key.clone(), self.model.clone());
-        let max_tokens = self.max_tokens;
-        let reasoning = self.reasoning.clone();
-        let web_search = self.web_search;
-        let rewrite_model = self.rewrite_model.clone();
-        let mut system = system_prompt(self.remember);
-        if external_ocr {
-            system.push_str(EXTERNAL_OCR_PROTOCOL);
-        }
-        let agent = self.agent.clone();
-
-        // Responses accepts prior messages, but a compact labeled transcript is
-        // more widely compatible with third-party Responses gateways and keeps
-        // the current image as the only multimodal input item.
-        let mut page_text = String::new();
-        if !ctx.history.is_empty() {
-            page_text.push_str("Recent earlier pages, oldest first:\n");
-            for (transcript, reply) in &ctx.history {
-                page_text.push_str("Master wrote: ");
-                page_text.push_str(transcript);
-                page_text.push_str("\nMagicPaper replied: ");
-                page_text.push_str(reply);
-                page_text.push('\n');
-            }
-            page_text.push('\n');
-        }
-        page_text.push_str(&user_text);
-
-        let content = match image {
-            Some(img) => format!(
-                concat!(
-                    "[{{\"type\":\"input_text\",\"text\":{}}},",
-                    "{{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,{}\",\"detail\":\"high\"}}]"
-                ),
-                json_quote(&page_text),
-                img,
-            ),
-            None => format!(
-                "[{{\"type\":\"input_text\",\"text\":{}}}]",
-                json_quote(&page_text)
-            ),
-        };
-        let reasoning_field = reasoning
-            .as_deref()
-            .map(|effort| format!("\"reasoning\":{{\"effort\":{}}},", json_quote(effort)))
-            .unwrap_or_default();
-        let tools_field = if web_search {
-            "\"tools\":[{\"type\":\"web_search\",\"search_context_size\":\"low\"}],\"tool_choice\":\"auto\",".to_string()
-        } else {
-            String::new()
-        };
-        let body = format!(
-            concat!(
-                "{{\"model\":{},\"stream\":true,\"store\":false,",
-                "\"max_output_tokens\":{},{}{}\"instructions\":{},",
-                "\"input\":[{{\"role\":\"user\",\"content\":{}}}]}}"
-            ),
-            json_quote(&model),
-            max_tokens,
-            reasoning_field,
-            tools_field,
-            json_quote(&system),
-            content,
-        );
-
-        thread::spawn(move || {
-            let _permit = permit;
-            let asked = std::time::Instant::now();
-            let resp = agent
-                .post(&format!("{base}/responses"))
-                .set("Authorization", &format!("Bearer {key}"))
-                .set("Content-Type", "application/json")
-                .send_string(&body);
-            if cancelled.load(Ordering::Acquire) {
-                return;
-            }
-            let reader = match resp {
-                Ok(r) => r.into_reader(),
-                Err(ureq::Error::Status(code, r)) => {
-                    let detail = r.into_string().unwrap_or_default();
-                    send_failure(
-                        &tx,
-                        "llm-error",
-                        request_id,
-                        domain,
-                        &terminal,
-                        "request",
-                        format!("responses http {code}: {}", detail.trim()),
-                    );
-                    return;
-                }
-                Err(e) => {
-                    send_failure(
-                        &tx,
-                        "llm-error",
-                        request_id,
-                        domain,
-                        &terminal,
-                        "request",
-                        format!("responses request failed: {e}"),
-                    );
-                    return;
-                }
-            };
-            if cancelled.load(Ordering::Acquire) {
-                return;
-            }
-
-            // Feed completed sentences to the paper as the model writes them.
-            // A malformed chunk and everything after it are held back for the
-            // paper editor, so URLs/Markdown never reach physical ink.
-            let mut acc = String::new();
-            let mut parser = StreamParser::new(catalog_ids);
-            let mut first_model_text = true;
-            let mut searched = false;
-            let mut failed: Option<String> = None;
-            let mut holding_tail = false;
-            let mut held_tail = String::new();
-            let mut sent_prefix = String::new();
-            let mut held_transcript: Option<String> = None;
-            let mut first_paper_event = true;
-
-            let mut deliver = |events: Vec<Result<Event, String>>| {
-                for event in events {
-                    match event {
-                        Ok(Event::Ink(chunk)) => {
-                            if holding_tail || paper_answer_needs_rewrite(&chunk) {
-                                holding_tail = true;
-                                if !held_tail.is_empty() {
-                                    held_tail.push(' ');
-                                }
-                                held_tail.push_str(&chunk);
-                                continue;
-                            }
-                            if first_paper_event {
-                                eprintln!(
-                                    "riddle: oracle first paper text +{}ms",
-                                    asked.elapsed().as_millis()
-                                );
-                                first_paper_event = false;
-                            }
-                            if !sent_prefix.is_empty() {
-                                sent_prefix.push(' ');
-                            }
-                            sent_prefix.push_str(&chunk);
-                            let _ = tx.send(Ok(Event::Ink(chunk)));
-                        }
-                        Ok(Event::Transcript(t)) if holding_tail => {
-                            held_transcript = Some(t);
-                        }
-                        Ok(other) => {
-                            if first_paper_event && matches!(other, Event::Show(_)) {
-                                eprintln!(
-                                    "riddle: oracle first paper event +{}ms",
-                                    asked.elapsed().as_millis()
-                                );
-                                first_paper_event = false;
-                            }
-                            let _ = tx.send(Ok(other));
-                        }
-                        Err(e) => {
-                            log_llm_terminal(
-                                &terminal,
-                                request_id,
-                                domain,
-                                "error",
-                                "paper-parse",
-                                None,
-                            );
-                            let _ = tx.send(Err(e));
-                        }
-                    }
-                }
-            };
-
-            for line in BufReader::new(reader).lines() {
-                if cancelled.load(Ordering::Acquire) {
-                    eprintln!("riddle: speculative Responses request cancelled");
-                    return;
-                }
-                let line = match line {
-                    Ok(line) => line,
-                    Err(error) => {
-                        send_failure(
-                            &tx,
-                            "llm-error",
-                            request_id,
-                            domain,
-                            &terminal,
-                            "stream-read",
-                            format!("responses stream failed: {error}"),
-                        );
-                        return;
-                    }
-                };
-                let line = line.trim();
-                let Some(data) = line.strip_prefix("data:") else {
-                    continue;
-                };
-                let data = data.trim();
-                if data == "[DONE]" {
-                    break;
-                }
-                if data.contains("web_search_call") {
-                    searched = true;
-                }
-                if data.contains("\"type\":\"response.failed\"") {
-                    failed = json_str_field(data, "message").or_else(|| Some(data.to_string()));
-                }
-                if let Some(frag) = responses_delta_content(data) {
-                    if first_model_text {
-                        eprintln!(
-                            "riddle: oracle first model text +{}ms",
-                            asked.elapsed().as_millis()
-                        );
-                        first_model_text = false;
-                    }
-                    acc.push_str(&frag);
-                    deliver(parser.advance(&acc, false));
-                }
-            }
-            if cancelled.load(Ordering::Acquire) {
-                return;
-            }
-            if let Some(detail) = failed {
-                drop(deliver);
-                send_failure(
-                    &tx,
-                    "llm-error",
-                    request_id,
-                    domain,
-                    &terminal,
-                    "stream",
-                    format!("responses failed: {detail}"),
-                );
-                return;
-            }
-            if acc.trim().is_empty() {
-                drop(deliver);
-                send_failure(
-                    &tx,
-                    "llm-error",
-                    request_id,
-                    domain,
-                    &terminal,
-                    "empty-response",
-                    "responses returned no paper answer".into(),
-                );
-                return;
-            }
-            deliver(parser.advance(&acc, true));
-            drop(deliver);
-
-            if holding_tail {
-                let rewritten = match rewrite_model {
-                    Some(ref model) => {
-                        rewrite_paper_tail(&agent, &base, &key, model, &sent_prefix, &held_tail)
-                    }
-                    None => Err("no paper editor model is configured".into()),
-                };
-                if cancelled.load(Ordering::Acquire) {
-                    return;
-                }
-                match rewritten {
-                    Ok(text) if !paper_answer_needs_rewrite(&text) => {
-                        if first_paper_event {
-                            eprintln!(
-                                "riddle: oracle first paper text +{}ms",
-                                asked.elapsed().as_millis()
-                            );
-                        }
-                        eprintln!("riddle: paper editor rewrote held response tail");
-                        let _ = tx.send(Ok(Event::Ink(text)));
-                    }
-                    Ok(_) => {
-                        send_failure(
-                            &tx,
-                            "llm-error",
-                            request_id,
-                            domain,
-                            &terminal,
-                            "paper-editor",
-                            "paper editor kept non-paper formatting".into(),
-                        );
-                    }
-                    Err(e) => {
-                        send_failure(
-                            &tx,
-                            "llm-error",
-                            request_id,
-                            domain,
-                            &terminal,
-                            "paper-editor",
-                            format!("paper editor failed: {e}"),
-                        );
-                    }
-                }
-                if let Some(transcript) = held_transcript {
-                    let _ = tx.send(Ok(Event::Transcript(transcript)));
-                }
-            }
-
-            log_llm_terminal(
-                &terminal,
-                request_id,
-                domain,
-                "done",
-                if searched {
-                    "responses-search"
-                } else {
-                    "responses"
-                },
-                Some(asked.elapsed().as_millis()),
-            );
-        });
+fn load_page(source: &PageSource, cancelled: &AtomicBool) -> std::io::Result<Vec<u8>> {
+    match source {
+        PageSource::File(path) => std::fs::read(path),
+        PageSource::Capture(capture) => capture.encode_png(cancelled),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn worker_gate_never_queues_more_network_workers() {
-        let gate = Arc::new(AtomicBool::new(false));
-        let first = take_worker_permit(&gate).expect("first request owns the worker");
-        assert!(take_worker_permit(&gate).is_none());
-        drop(first);
-        assert!(take_worker_permit(&gate).is_some());
-    }
-}
+mod tests;

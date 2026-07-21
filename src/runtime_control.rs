@@ -18,6 +18,12 @@ static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Ask the Remagic runtime to foreground KOReader at `path`.
 pub fn open_reader(path: &Path) -> io::Result<()> {
+    if !external_reader_allowed(crate::runtime_env::test_mode()) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "external reader requests are disabled in RIDDLE_TEST_MODE",
+        ));
+    }
     let socket = std::env::var("REMAGIC_RUNTIME_SOCKET")
         .ok()
         .map(|value| value.trim().to_owned())
@@ -33,11 +39,15 @@ pub fn open_reader(path: &Path) -> io::Result<()> {
     request_acknowledged(&socket, request.as_bytes())
 }
 
+fn external_reader_allowed(test_mode: bool) -> bool {
+    !test_mode
+}
+
 fn open_reader_request(request_id: &str, path: &str) -> String {
     format!(
         "{{\"version\":1,\"request_id\":\"{}\",\"command\":\"open_app\",\"app\":\"koreader\",\"open_path\":\"{}\"}}\n",
-        json_escape(&request_id),
-        json_escape(&path),
+        json_escape(request_id),
+        json_escape(path),
     )
 }
 
@@ -146,7 +156,16 @@ fn json_string_field(json: &str, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{acknowledgement_ok, json_escape, json_string_field, open_reader_request};
+    use super::{
+        acknowledgement_ok, external_reader_allowed, json_escape, json_string_field,
+        open_reader_request,
+    };
+
+    #[test]
+    fn deterministic_test_mode_blocks_reader_ipc() {
+        assert!(!external_reader_allowed(true));
+        assert!(external_reader_allowed(false));
+    }
 
     #[test]
     fn request_values_are_json_escaped() {

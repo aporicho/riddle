@@ -21,6 +21,12 @@ install -m 644 external.manifest.json icon.png oracle.env.default oracle.env.exa
 # repository, so callers must provide extracted TTF paths explicitly. The app
 # remains usable with its embedded OFL ChenYuluoyan font when either is absent.
 mkdir -p dist/riddle/fonts
+MAGICPAPER_UI_FONT=${MAGICPAPER_UI_FONT:-${HOME:?}/Downloads/方正屏显雅宋.TTF}
+[ -f "$MAGICPAPER_UI_FONT" ] || { echo "missing $MAGICPAPER_UI_FONT" >&2; exit 1; }
+printf '%s  %s\n' \
+    dbbdf59d7035d980abecf4f820e615b72107865a00f6eb41a1bbb9d9d1492fd1 \
+    "$MAGICPAPER_UI_FONT" | sha256sum -c - >/dev/null
+install -m 644 "$MAGICPAPER_UI_FONT" dist/riddle/fonts/FZPingXianYaSong.ttf
 if [ -n "${MAGICPAPER_BUTTER_FONT:-}" ]; then
     [ -f "$MAGICPAPER_BUTTER_FONT" ] || { echo "missing $MAGICPAPER_BUTTER_FONT" >&2; exit 1; }
     install -m 644 "$MAGICPAPER_BUTTER_FONT" dist/riddle/fonts/ButterShiSan.ttf

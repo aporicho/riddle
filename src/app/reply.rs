@@ -3,9 +3,11 @@
 use std::time::Instant;
 
 use crate::fb::{screen_h, screen_w, BBox};
+use crate::platform::RefreshIntent;
 use crate::surface::{Surface, WHITE};
 use crate::{display, fonts, memory, script};
 
+use super::layout_controller::{LayoutJob, LayoutPoll};
 use super::state::{ConjurePlan, State, WritePlan};
 
 const REPLY_PX: f32 = 96.0;
@@ -48,7 +50,7 @@ pub(super) fn oracle_excuse(e: &str) -> String {
 
 /// Summon a remembered page: snapshot today's page, clear the paper, and plan
 /// the memory's rewriting — the date in a small hand, the writer's own strokes
-/// exactly as they were penned, Tom's old reply beneath — all in faded ink.
+/// exactly as they were penned, MP's old reply beneath — all in faded ink.
 pub(super) fn conjure(
     font: &fonts::FontBook,
     store: &Option<memory::MemoryStore>,
@@ -66,14 +68,14 @@ pub(super) fn conjure(
 
     let saved = surf.copy_rect(0, 0, screen_w(), screen_h());
     surf.fill_rect(0, 0, screen_w(), screen_h(), WHITE);
-    disp.update_all(surf.w, surf.h);
+    disp.present_all(surf.w, surf.h, RefreshIntent::Content);
 
     let mut all: Vec<Vec<(i32, i32, i32)>> = Vec::new();
     let mut region = BBox::empty();
 
     // The date, small and centered near the top, like a diary heading.
     let date = memory::spoken_date(entry.id);
-    let mut raster = script::rasterize_line(font, &date, 54.0);
+    let mut raster = script::rasterize_ui_line(font, &date, 54.0);
     script::thin(&mut raster);
     let x0 = (screen_w() as i32 - raster.width as i32) / 2;
     let mut ink_bottom = 64;
@@ -98,7 +100,7 @@ pub(super) fn conjure(
         all.push(stroke.clone());
     }
 
-    // Tom's old reply, below.
+    // MP's old reply, below.
     if !entry.reply.is_empty() {
         let y = (ink_bottom + 130).min(screen_h() as i32 - 400);
         let reply = plan_reply(font, &entry.reply, Some(y));
@@ -164,17 +166,78 @@ pub(super) fn plan_reply(font: &fonts::FontBook, text: &str, y_start: Option<i32
         point_i: 0,
         region,
         next_y: y,
+        layout: None,
+        queued_text: String::new(),
+        layout_font: None,
+    }
+}
+
+/// Start a visible reply without rasterizing fonts on the event-loop thread.
+pub(super) fn plan_reply_async(
+    font: &fonts::FontBook,
+    text: &str,
+    y_start: Option<i32>,
+) -> WritePlan {
+    WritePlan {
+        strokes: Vec::new(),
+        stroke_i: 0,
+        point_i: 0,
+        region: BBox::empty(),
+        next_y: y_start.unwrap_or(0),
+        layout: Some(LayoutJob::spawn(font.clone(), text.to_owned(), y_start)),
+        queued_text: String::new(),
+        layout_font: Some(font.clone()),
     }
 }
 
 /// Splice a streamed continuation chunk into a running write animation.
 pub(super) fn append_reply(font: &fonts::FontBook, plan: &mut WritePlan, more: &str) {
-    let cont = plan_reply(font, more, Some(plan.next_y));
-    if cont.strokes.is_empty() {
+    if more.trim().is_empty() {
         return;
     }
-    plan.region.add(cont.region.x0, cont.region.y0, 0);
-    plan.region.add(cont.region.x1, cont.region.y1, 0);
-    plan.strokes.extend(cont.strokes);
-    plan.next_y = cont.next_y;
+    if plan.layout_font.is_none() {
+        plan.layout_font = Some(font.clone());
+    }
+    if plan.layout.is_some() {
+        if !plan.queued_text.is_empty() {
+            plan.queued_text.push(' ');
+        }
+        plan.queued_text.push_str(more);
+    } else {
+        plan.layout = Some(LayoutJob::spawn(
+            font.clone(),
+            more.to_owned(),
+            Some(plan.next_y),
+        ));
+    }
+}
+
+/// Merge a completed worker result and immediately schedule the queued tail.
+pub(super) fn poll_reply_layout(plan: &mut WritePlan) {
+    let poll = match plan.layout.as_ref() {
+        Some(job) => job.poll(),
+        None => return,
+    };
+    match poll {
+        LayoutPoll::Pending => return,
+        LayoutPoll::Ready(result) => {
+            plan.layout = None;
+            if !result.region.is_empty() {
+                plan.region.add(result.region.x0, result.region.y0, 0);
+                plan.region.add(result.region.x1, result.region.y1, 0);
+            }
+            plan.strokes.extend(result.strokes);
+            plan.next_y = result.next_y;
+        }
+        LayoutPoll::Failed => {
+            eprintln!("magic-paper: reply layout worker exited without a result");
+            plan.layout = None;
+        }
+    }
+    if plan.layout.is_none() && !plan.queued_text.is_empty() {
+        let text = std::mem::take(&mut plan.queued_text);
+        if let Some(font) = plan.layout_font.clone() {
+            plan.layout = Some(LayoutJob::spawn(font, text, Some(plan.next_y)));
+        }
+    }
 }

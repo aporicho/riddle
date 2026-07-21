@@ -59,7 +59,8 @@ pub struct Catalog {
 
 impl Catalog {
     pub fn open() -> io::Result<Self> {
-        Self::scan(REMARKABLE_LIBRARY, KOREADER_LIBRARY)
+        let (remarkable, koreader) = library_roots();
+        Self::scan(remarkable, koreader)
     }
 
     pub fn scan(
@@ -86,10 +87,6 @@ impl Catalog {
             remarkable_root,
             koreader_root,
         })
-    }
-
-    pub fn len(&self) -> usize {
-        self.books.len()
     }
 
     /// A bare `read` always opens the actual directory, not KOReader's last
@@ -328,7 +325,8 @@ pub fn validated_target(path: &Path) -> io::Result<PathBuf> {
             "KOReader path contains a line break",
         ));
     }
-    let allowed = [REMARKABLE_LIBRARY, KOREADER_LIBRARY]
+    let (remarkable, koreader) = library_roots();
+    let allowed = [remarkable, koreader]
         .into_iter()
         .filter_map(|root| fs::canonicalize(root).ok())
         .any(|root| canonical.starts_with(root));
@@ -346,6 +344,31 @@ pub fn validated_target(path: &Path) -> io::Result<PathBuf> {
             "KOReader target is not a supported book or directory",
         ))
     }
+}
+
+fn library_roots() -> (PathBuf, PathBuf) {
+    (
+        library_root(
+            "RIDDLE_REMARKABLE_LIBRARY",
+            "reader/remarkable",
+            REMARKABLE_LIBRARY,
+        ),
+        library_root(
+            "RIDDLE_KOREADER_LIBRARY",
+            "reader/koreader",
+            KOREADER_LIBRARY,
+        ),
+    )
+}
+
+fn library_root(variable: &str, test_child: &str, production: &str) -> PathBuf {
+    if let Some(path) = std::env::var_os(variable).filter(|path| !path.is_empty()) {
+        return PathBuf::from(path);
+    }
+    if crate::runtime_env::test_mode() {
+        return crate::runtime_env::persistent_path(variable, test_child, production);
+    }
+    PathBuf::from(production)
 }
 
 #[cfg(test)]
@@ -380,7 +403,7 @@ mod tests {
         let ko = temp("ko");
         add_remarkable(&rm, "one", "道德经", &["pdf", "epub"]);
         let catalog = Catalog::scan(&rm, &ko).unwrap();
-        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog.books.len(), 1);
         assert_eq!(
             catalog.lookup(Some("道德经")),
             Lookup::Open(rm.join("one.epub"))
@@ -396,7 +419,7 @@ mod tests {
         add_remarkable(&rm, "gone", "旧书", &["epub"]);
         fs::write(rm.join("gone.tombstone"), "").unwrap();
         let catalog = Catalog::scan(&rm, &ko).unwrap();
-        assert_eq!(catalog.len(), 0);
+        assert_eq!(catalog.books.len(), 0);
         assert_eq!(catalog.lookup(None), Lookup::Open(rm.clone()));
         fs::remove_dir_all(rm).unwrap();
         fs::remove_dir_all(ko).unwrap();
@@ -444,7 +467,7 @@ mod tests {
         fs::write(ko.join("小说/蛊真人.epub"), "book").unwrap();
         fs::write(ko.join("小说/ignore.txt"), "text").unwrap();
         let catalog = Catalog::scan(&rm, &ko).unwrap();
-        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog.books.len(), 1);
         assert_eq!(
             catalog.lookup(Some("蛊真人")),
             Lookup::Open(ko.join("小说/蛊真人.epub"))

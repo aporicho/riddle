@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use crate::oracle::Event;
-use crate::{memory, oracle, power, tasks, todos};
+use crate::{memory, oracle, power, runtime_env::LaunchMode, tasks, todos};
 
 use super::context::build_ctx;
 use super::runtime::{run, RunOutcome, PNG_PATH};
@@ -13,8 +13,8 @@ const USAGE: &str = "\
 MagicPaper (MP) — your living magical paper
 
 usage:
-  riddle                      open the diary (windowed when AppLoad sets
-                              QTFB_KEY, otherwise takeover via libquill)
+  riddle                      open the hosted qtfb diary (requires QTFB_KEY)
+  riddle --legacy-takeover    explicitly own display and raw input via libquill
   riddle --oracle-test [PNG]  run one oracle turn against PNG (default
                               /tmp/riddle-page.png) and print the streamed
                               reply; verifies key + endpoint + model
@@ -66,6 +66,17 @@ pub(crate) fn entry() {
             }
             return;
         }
+        Some("--legacy-takeover") => {
+            match run(LaunchMode::LegacyTakeover) {
+                Ok(RunOutcome::Closed) => {}
+                Ok(RunOutcome::Failed) => std::process::exit(1),
+                Err(error) => {
+                    eprintln!("riddle: fatal: {error}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         Some("--version" | "-V") => {
             println!("MagicPaper (MP) {}", env!("CARGO_PKG_VERSION"));
             return;
@@ -81,8 +92,9 @@ pub(crate) fn entry() {
         }
         _ => {}
     }
-    match run() {
+    match run(LaunchMode::Hosted) {
         Ok(RunOutcome::Closed) => {}
+        Ok(RunOutcome::Failed) => std::process::exit(1),
         Err(e) => {
             eprintln!("riddle: fatal: {e}");
             std::process::exit(1);

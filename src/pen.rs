@@ -9,6 +9,7 @@ use std::io;
 use std::os::fd::RawFd;
 
 use crate::fb::{screen_h, screen_w};
+use crate::platform::{PenFrame, PenPhase, PenTool};
 
 const FALLBACK_DIGI_MAX_X: i32 = 11180;
 const FALLBACK_DIGI_MAX_Y: i32 = 15340;
@@ -26,6 +27,7 @@ const BTN_TOOL_RUBBER: u16 = 321;
 const BTN_TOUCH: u16 = 330;
 
 const EVIOCGRAB: libc::c_ulong = 0x40044590;
+const EVIOCSCLOCKID: libc::c_ulong = 0x400445a0;
 const EVIOCGABS_X: libc::c_ulong = 0x80184540;
 const EVIOCGABS_Y: libc::c_ulong = 0x80184541;
 
@@ -70,8 +72,26 @@ pub struct PenSample {
     pub pressure: i32,
     pub tool: Tool,
     pub touching: bool,
-    /// True from tool-in-range until the pen leaves the digitizer.
-    pub proximity: bool,
+    /// Kernel input_event timestamp on CLOCK_MONOTONIC, or monotonic receive
+    /// time when the driver rejects EVIOCSCLOCKID.
+    pub kernel_time_ns: u64,
+}
+
+impl PenSample {
+    pub fn to_frame(self, sequence: u64, phase: PenPhase) -> PenFrame {
+        PenFrame {
+            sequence,
+            kernel_time_ns: self.kernel_time_ns,
+            phase,
+            tool: match self.tool {
+                Tool::Pen => PenTool::Pen,
+                Tool::Eraser => PenTool::Eraser,
+            },
+            x: self.x,
+            y: self.y,
+            pressure: self.pressure.clamp(0, MAX_PRESSURE) as u16,
+        }
+    }
 }
 
 pub struct PenDevice {
@@ -84,10 +104,8 @@ pub struct PenDevice {
     pressure: i32,
     tool: Tool,
     touching: bool,
-    pen_in_range: bool,
-    rubber_in_range: bool,
-    proximity: bool,
     dirty: bool,
+    timestamp_is_monotonic: bool,
 }
 
 impl PenDevice {
@@ -98,6 +116,14 @@ impl PenDevice {
         let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
+        }
+        let clock_id = libc::CLOCK_MONOTONIC;
+        let clock_result = unsafe { libc::ioctl(fd, EVIOCSCLOCKID, &clock_id) };
+        if clock_result != 0 {
+            eprintln!(
+                "riddle: warning: marker does not support monotonic event timestamps ({})",
+                io::Error::last_os_error()
+            );
         }
         let grab = unsafe { libc::ioctl(fd, EVIOCGRAB, 1i32) };
         if grab != 0 {
@@ -119,15 +145,9 @@ impl PenDevice {
             pressure: 0,
             tool: Tool::Pen,
             touching: false,
-            pen_in_range: false,
-            rubber_in_range: false,
-            proximity: false,
             dirty: false,
+            timestamp_is_monotonic: clock_result == 0,
         })
-    }
-
-    pub fn raw_fd(&self) -> RawFd {
-        self.fd
     }
 
     /// Drain all pending events; returns one sample per SYN_REPORT frame
@@ -160,37 +180,41 @@ impl PenDevice {
                         self.dirty = true;
                     }
                     (EV_KEY, BTN_TOOL_PEN) => {
-                        self.pen_in_range = value == 1;
-                        if self.pen_in_range {
+                        if value == 1 {
                             self.tool = Tool::Pen;
                         }
-                        self.proximity = self.pen_in_range || self.rubber_in_range;
                         self.dirty = true;
                     }
                     (EV_KEY, BTN_TOOL_RUBBER) => {
-                        self.rubber_in_range = value == 1;
-                        if self.rubber_in_range {
+                        if value == 1 {
                             self.tool = Tool::Eraser;
                         }
-                        self.proximity = self.pen_in_range || self.rubber_in_range;
                         self.dirty = true;
                     }
                     (EV_KEY, BTN_TOUCH) => {
                         self.touching = value == 1;
                         self.dirty = true;
                     }
-                    (EV_SYN, SYN_REPORT) => {
-                        if self.dirty {
-                            self.dirty = false;
-                            out.push(PenSample {
-                                x: self.raw_x * (screen_w() as i32 - 1) / self.digi_max_x,
-                                y: self.raw_y * (screen_h() as i32 - 1) / self.digi_max_y,
-                                pressure: self.pressure,
-                                tool: self.tool,
-                                touching: self.touching,
-                                proximity: self.proximity,
-                            });
-                        }
+                    (EV_SYN, SYN_REPORT) if self.dirty => {
+                        self.dirty = false;
+                        let seconds = i64::from_ne_bytes(chunk[0..8].try_into().unwrap());
+                        let micros = i64::from_ne_bytes(chunk[8..16].try_into().unwrap());
+                        let kernel_time_ns = if self.timestamp_is_monotonic {
+                            seconds
+                                .saturating_mul(1_000_000_000)
+                                .saturating_add(micros.saturating_mul(1_000))
+                                .max(0) as u64
+                        } else {
+                            crate::platform::monotonic_now_ns()
+                        };
+                        out.push(PenSample {
+                            x: self.raw_x * (screen_w() as i32 - 1) / self.digi_max_x,
+                            y: self.raw_y * (screen_h() as i32 - 1) / self.digi_max_y,
+                            pressure: self.pressure,
+                            tool: self.tool,
+                            touching: self.touching,
+                            kernel_time_ns,
+                        });
                     }
                     _ => {}
                 }

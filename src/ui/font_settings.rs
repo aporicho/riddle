@@ -52,11 +52,10 @@ impl FontPanel {
         self.rows.clear();
         self.stroke.clear();
 
-        blit_centered(surf, fonts, fonts.selected(), "字体与大小", 82.0, 82);
-        blit_centered(
+        blit_ui_centered(surf, fonts, "字体与大小", 82.0, 82);
+        blit_ui_centered(
             surf,
             fonts,
-            fonts.selected(),
             "点击字体切换 · 拖动横线校准大小 · 点击空白退出",
             40.0,
             screen_h().saturating_sub(105),
@@ -72,8 +71,8 @@ impl FontPanel {
             };
             let percent = fonts.scale_percent(id);
             let title = format!("{marker}{}  {percent}%", id.display_name());
-            blit_left(surf, fonts, id, &title, 58.0, SIDE + 20, y0 + 24);
-            blit_left(
+            blit_ui_left(surf, fonts, &title, 58.0, SIDE + 20, y0 + 24);
+            blit_handwriting_left(
                 surf,
                 fonts,
                 id,
@@ -203,7 +202,7 @@ fn draw_slider(surf: &mut Surface, x0: i32, x1: i32, y: i32, percent: u16) {
     surf.stamp(thumb, y, 16, BLACK);
 }
 
-fn blit_left(
+fn blit_handwriting_left(
     surf: &mut Surface,
     fonts: &FontBook,
     primary: FontId,
@@ -222,15 +221,19 @@ fn blit_left(
     }
 }
 
-fn blit_centered(
-    surf: &mut Surface,
-    fonts: &FontBook,
-    primary: FontId,
-    text: &str,
-    size: f32,
-    y: usize,
-) {
-    let line = script::rasterize_line_with(fonts, primary, text, size);
+fn blit_ui_left(surf: &mut Surface, fonts: &FontBook, text: &str, size: f32, x: usize, y: usize) {
+    let line = script::rasterize_ui_line(fonts, text, size);
+    for row in 0..line.height {
+        for col in 0..line.width {
+            if line.mask[row * line.width + col] {
+                surf.put_px((x + col) as i32, (y + row) as i32, BLACK);
+            }
+        }
+    }
+}
+
+fn blit_ui_centered(surf: &mut Surface, fonts: &FontBook, text: &str, size: f32, y: usize) {
+    let line = script::rasterize_ui_line(fonts, text, size);
     let x = screen_w().saturating_sub(line.width) / 2;
     for row in 0..line.height {
         for col in 0..line.width {
