@@ -6,21 +6,20 @@
 use crate::{
     display, fb, fonts, ink, memory, pen, power, runtime_control, runtime_env, tasks, todos, touch,
 };
-
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::fb::{screen_h, screen_w, BBox};
-use crate::platform::{InputMode, RefreshIntent};
-use crate::surface::WHITE;
-
 use super::input::{InputPriority, ModalContact, PenSequence, PenTrace, QtfbPenState};
 use super::lifecycle::{LifecycleClient, LifecycleStage};
 use super::oracle_controller::{OracleController, SpeculativeRequest};
+use super::refresh_controller::RefreshController;
 use super::state::{State, TurnKind};
 use super::timing::heartbeat_deadline;
+use crate::fb::{screen_h, screen_w, BBox};
+use crate::platform::{InputMode, RefreshIntent};
+use crate::surface::WHITE;
 
 mod input_loop;
 mod lifecycle_loop;
@@ -83,6 +82,7 @@ pub(super) struct Engine<'a> {
     task_store: Option<tasks::TaskStore>,
     todo_store: Option<todos::TodoStore>,
     oracle: OracleController,
+    refresh: RefreshController,
     user_ink: ink::Ink,
     state: State,
     pen_down: bool,
@@ -208,6 +208,7 @@ impl<'a> Engine<'a> {
         let stores = open_stores();
         let remember = stores.memory.is_some() || stores.tasks.is_some() || stores.todos.is_some();
         let oracle = OracleController::spawn(remember);
+        let refresh = RefreshController::open();
         let agent_queue_mode = hosted || tasks::external_scheduler_active();
         let next_heartbeat = (!agent_queue_mode)
             .then(|| heartbeat_deadline(&stores.tasks))
@@ -235,6 +236,7 @@ impl<'a> Engine<'a> {
             task_store: stores.tasks,
             todo_store: stores.todos,
             oracle,
+            refresh,
             user_ink: ink::Ink::new(),
             state: State::Listening { last_pen: None },
             pen_down: false,
@@ -356,6 +358,7 @@ pub(super) fn input_mode_for_state(state: &State) -> InputMode {
         | State::TaskList { .. }
         | State::TodoList { .. }
         | State::FontList { .. }
+        | State::Settings { .. }
         | State::HistoryList { .. }
         | State::ReaderList { .. } => InputMode::Modal,
         State::Drinking { .. }
@@ -485,6 +488,7 @@ pub(super) fn suspend_visible_state(
         | State::TaskList { .. }
         | State::TodoList { .. }
         | State::FontList { .. }
+        | State::Settings { .. }
         | State::HistoryList { .. }
         | State::ReaderList { .. }) => stable,
     };

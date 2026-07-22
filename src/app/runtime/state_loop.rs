@@ -6,11 +6,12 @@ use super::super::reply::{oracle_excuse, plan_reply_async, region_all_white};
 use super::super::state::{State, TurnKind};
 use super::super::timing::{heartbeat_deadline, heartbeat_retry_interval, unix_now};
 use super::super::turn_controller::{consume_first_event, FirstEventContext};
-use super::{input_mode_for_state, Engine, DRINK_STAGES, DRINK_STAGE_DELAY, IDLE_PREASK};
+use super::{input_mode_for_state, Engine, IDLE_PREASK};
 use crate::fb::screen_h;
 use crate::platform::RefreshIntent;
-use crate::{agent, ink, tasks, ui};
+use crate::{agent, tasks, ui};
 
+mod cleanup;
 mod memory;
 mod reply;
 
@@ -59,6 +60,7 @@ impl Engine<'_> {
             stable @ (State::TaskList { .. }
             | State::TodoList { .. }
             | State::FontList { .. }
+            | State::Settings { .. }
             | State::HistoryList { .. }
             | State::ReaderList { .. }) => stable,
         };
@@ -337,40 +339,6 @@ impl Engine<'_> {
         }
     }
 
-    fn tick_drinking(
-        &mut self,
-        stage: u32,
-        next: Instant,
-        region: crate::fb::BBox,
-        rx: super::super::oracle_controller::OracleTurn,
-    ) -> State {
-        if Instant::now() < next {
-            return State::Drinking {
-                stage,
-                next,
-                region,
-                rx,
-            };
-        }
-        let intent = ink::dissolve_frame(&mut self.surf, region, stage, DRINK_STAGES);
-        let (x, y, width, height) = region.rect();
-        self.disp.present_region(x, y, width, height, intent);
-        if stage + 1 >= DRINK_STAGES {
-            self.user_ink.clear();
-            State::Thinking {
-                rx,
-                since: Instant::now(),
-            }
-        } else {
-            State::Drinking {
-                stage: stage + 1,
-                next: Instant::now() + DRINK_STAGE_DELAY,
-                region,
-                rx,
-            }
-        }
-    }
-
     fn tick_thinking(
         &mut self,
         rx: super::super::oracle_controller::OracleTurn,
@@ -389,6 +357,7 @@ impl Engine<'_> {
                     next_heartbeat: &mut self.next_heartbeat,
                     surface: &mut self.surf,
                     display: self.disp,
+                    refresh: &mut self.refresh,
                     takeover: self.takeover,
                     turn_transcript: &mut self.turn_transcript,
                     turn_reply: &mut self.turn_reply,
@@ -447,39 +416,13 @@ impl Engine<'_> {
         }
     }
 
-    fn tick_fading(&mut self, stage: u32, next: Instant, region: crate::fb::BBox) -> State {
-        const STAGES: u32 = 10;
-        if Instant::now() < next {
-            return State::FadingReply {
-                stage,
-                next,
-                region,
-            };
-        }
-        let intent = ink::dissolve_frame(&mut self.surf, region, stage, STAGES);
-        let (x, y, width, height) = region.rect();
-        self.disp.present_region(x, y, width, height, intent);
-        if stage + 1 >= STAGES {
-            if self.pen_down {
-                State::AwaitingPenUp
-            } else {
-                State::Listening { last_pen: None }
-            }
-        } else {
-            State::FadingReply {
-                stage: stage + 1,
-                next: Instant::now() + Duration::from_millis(80),
-                region,
-            }
-        }
-    }
-
     pub(super) fn wait_for_next_tick(&self) {
         let wait = match &self.state {
             State::Listening { last_pen: None }
             | State::TaskList { .. }
             | State::TodoList { .. }
             | State::FontList { .. }
+            | State::Settings { .. }
             | State::HistoryList { .. }
             | State::ReaderList { .. } => Duration::from_millis(25),
             State::Thinking { .. } => Duration::from_millis(4),

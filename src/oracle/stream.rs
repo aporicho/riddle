@@ -120,6 +120,7 @@ fn route_directive(inner: &str, catalog_ids: &[u64]) -> Result<Event, String> {
         "tasks" | "task" => Ok(Event::TaskList),
         "todos" | "todo" => Ok(Event::TodoList),
         "fonts" | "font" => Ok(Event::FontList),
+        "settings" | "setting" => Ok(Event::Settings),
         "history" | "histories" => Ok(Event::HistoryList),
         "help" | "manual" => Ok(Event::Help),
         "read" | "reader" => Ok(Event::Reader(None)),

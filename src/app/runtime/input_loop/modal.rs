@@ -20,6 +20,7 @@ impl Engine<'_> {
                 surf: &mut self.surf,
                 font: &mut self.font,
                 disp: self.disp,
+                refresh: &mut self.refresh,
             },
             gesture,
         );
@@ -56,7 +57,12 @@ impl Engine<'_> {
             State::ReaderList { panel, .. } => {
                 panel.begin_preview(tool, point).map(ModalPreview::Paper)
             }
-            State::FontList { panel } => panel.begin_preview(tool, point).map(ModalPreview::Font),
+            State::FontList { panel, .. } => {
+                panel.begin_preview(tool, point).map(ModalPreview::Font)
+            }
+            State::Settings { panel } => {
+                panel.begin_preview(tool, point).map(ModalPreview::Settings)
+            }
             State::Help {
                 panel: Some(panel), ..
             } => panel.begin_preview(tool, point).map(ModalPreview::Help),

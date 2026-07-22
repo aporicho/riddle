@@ -15,7 +15,8 @@ impl Engine<'_> {
     ) -> State {
         if self.stylus_tapped {
             self.surf.paste_rect(0, 0, screen_w(), screen_h(), &saved);
-            self.disp.request_refresh(self.surf.w, self.surf.h);
+            self.refresh
+                .request_full(self.disp, self.surf.w, self.surf.h);
             return State::MemoryShown {
                 saved: None,
                 until: Instant::now(),
@@ -55,7 +56,8 @@ impl Engine<'_> {
         match saved {
             Some(saved) if self.stylus_tapped || Instant::now() >= until => {
                 self.surf.paste_rect(0, 0, screen_w(), screen_h(), &saved);
-                self.disp.request_refresh(self.surf.w, self.surf.h);
+                self.refresh
+                    .request_full(self.disp, self.surf.w, self.surf.h);
                 eprintln!("riddle: memory dismissed");
                 State::MemoryShown {
                     saved: None,

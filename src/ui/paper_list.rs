@@ -12,7 +12,9 @@ use super::pointer::{
     draw_clipped_line, invert_mono, Gesture, GesturePolicy, HitRect, Point, PointerTool,
 };
 
-mod render;
+mod geometry;
+pub(in crate::ui) mod render;
+use geometry::segment_intersects_rect;
 use render::{blit_centered, blit_left, draw_frame, draw_status_box, fit_line};
 
 const SIDE: usize = 80;
@@ -50,6 +52,7 @@ pub enum Preview {
     },
     Strike {
         row: usize,
+        card: HitRect,
         text: HitRect,
         start: Point,
         line_to: Option<Point>,
@@ -85,12 +88,19 @@ impl Preview {
                 *pressed = next;
                 changed
             }
-            Self::Strike { start, line_to, .. } => {
+            Self::Strike {
+                text,
+                start,
+                line_to,
+                ..
+            } => {
                 let dx = (point.x - start.x).abs();
                 let dy = (point.y - start.y).abs();
-                let profile = GesturePolicy::default().pen;
-                let next = (dx >= profile.strike_min_distance_px
-                    && dx >= dy.saturating_mul(profile.axis_dominance))
+                const PREVIEW_DISTANCE_PX: i32 = 32;
+                let dominance = GesturePolicy::default().pen.axis_dominance;
+                let next = (dx >= PREVIEW_DISTANCE_PX
+                    && dx >= dy.saturating_mul(dominance)
+                    && segment_intersects_rect(*start, point, *text))
                 .then_some(point);
                 let changed = *line_to != next;
                 *line_to = next;
@@ -129,6 +139,7 @@ impl Preview {
             } => Gesture::Tap { tool, at: end },
             Self::Strike {
                 row: _,
+                card,
                 text,
                 start,
                 ..
@@ -137,9 +148,17 @@ impl Preview {
                     gesture @ Gesture::Strike {
                         tool: PointerTool::Pen,
                         from,
+                        to,
                         ..
                     },
-                ) if from == start && text.contains(from) => gesture,
+                ) if from == start
+                    && card.contains(from)
+                    && segment_intersects_rect(from, to, text) =>
+                {
+                    gesture
+                }
+                Some(Gesture::Tap { tool, .. }) => Gesture::Tap { tool, at: end },
+                Some(gesture @ Gesture::Swipe { .. }) => gesture,
                 _ => no_op_gesture(PointerTool::Pen, start),
             },
             Self::Press { tool, start, .. } => no_op_gesture(tool, start),
@@ -369,12 +388,13 @@ impl PaperList {
                         pressed: true,
                     })
             }
-            Hit::Text(number) if tool == PointerTool::Pen && !self.selectable => self
+            _ if tool == PointerTool::Pen && !self.selectable => self
                 .rows
                 .iter()
-                .find(|row| row.number == number)
+                .find(|row| row.card.contains(point))
                 .map(|row| Preview::Strike {
-                    row: number,
+                    row: row.number,
+                    card: row.card,
                     text: row.text,
                     start: point,
                     line_to: None,
@@ -396,12 +416,17 @@ impl PaperList {
             Gesture::Strike {
                 tool: PointerTool::Pen,
                 from,
+                to,
                 bounds,
                 ..
             } if !self.selectable => Some(
                 self.rows
                     .iter()
-                    .find(|row| row.text.contains(from) && row.text.intersects(bounds))
+                    .find(|row| {
+                        row.card.contains(from)
+                            && row.text.intersects(bounds)
+                            && segment_intersects_rect(from, to, row.text)
+                    })
                     .map_or(Action::Redraw, |row| Action::Delete(row.number)),
             ),
             Gesture::Swipe { from, to, .. } if (to.y - from.y).abs() > (to.x - from.x).abs() => {
@@ -419,6 +444,15 @@ impl PaperList {
 
     pub fn dismiss(self, surf: &mut Surface) {
         surf.paste_rect(0, 0, screen_w(), screen_h(), &self.saved);
+    }
+
+    pub fn refresh_region(&self) -> crate::fb::BBox {
+        crate::fb::BBox {
+            x0: SIDE as i32,
+            y0: LIST_TOP as i32,
+            x1: screen_w().saturating_sub(SIDE + 1) as i32,
+            y1: screen_h().saturating_sub(48) as i32,
+        }
     }
 }
 

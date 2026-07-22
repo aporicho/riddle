@@ -158,12 +158,15 @@ impl ReplyController {
     }
 }
 
-pub(super) fn answer_visible_duration(visible_graphemes: usize) -> Duration {
-    Duration::from_secs(4)
+pub(super) fn answer_visible_duration(visible_graphemes: usize, dwell_percent: u16) -> Duration {
+    let base = Duration::from_secs(4)
         .saturating_add(Duration::from_millis(
             (visible_graphemes as u64).saturating_mul(100),
         ))
-        .min(Duration::from_secs(15))
+        .min(Duration::from_secs(15));
+    let percent = dwell_percent.clamp(50, 200) as u128;
+    let millis = base.as_millis().saturating_mul(percent) / 100;
+    Duration::from_millis(millis.clamp(2_000, 30_000) as u64)
 }
 
 #[cfg(test)]
@@ -286,10 +289,15 @@ mod tests {
 
     #[test]
     fn answer_dwell_uses_visible_graphemes_and_caps_at_fifteen_seconds() {
-        assert_eq!(answer_visible_duration(0), Duration::from_secs(4));
-        assert_eq!(answer_visible_duration(10), Duration::from_secs(5));
-        assert_eq!(answer_visible_duration(110), Duration::from_secs(15));
-        assert_eq!(answer_visible_duration(usize::MAX), Duration::from_secs(15));
+        assert_eq!(answer_visible_duration(0, 100), Duration::from_secs(4));
+        assert_eq!(answer_visible_duration(10, 100), Duration::from_secs(5));
+        assert_eq!(answer_visible_duration(110, 100), Duration::from_secs(15));
+        assert_eq!(
+            answer_visible_duration(usize::MAX, 100),
+            Duration::from_secs(15)
+        );
+        assert_eq!(answer_visible_duration(0, 50), Duration::from_secs(2));
+        assert_eq!(answer_visible_duration(110, 200), Duration::from_secs(30));
     }
 
     fn plan_with_points(points: usize) -> WritePlan {

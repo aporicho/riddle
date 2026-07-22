@@ -64,11 +64,24 @@ impl BBox {
             self.y1 - self.y0 + 1,
         )
     }
+
+    pub fn expanded(self, margin: i32) -> Self {
+        if self.is_empty() {
+            return self;
+        }
+        let margin = margin.max(0);
+        Self {
+            x0: self.x0.saturating_sub(margin).max(0),
+            y0: self.y0.saturating_sub(margin).max(0),
+            x1: self.x1.saturating_add(margin).min(screen_w() as i32 - 1),
+            y1: self.y1.saturating_add(margin).min(screen_h() as i32 - 1),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::BBox;
+    use super::{test_init_screen, BBox};
 
     #[test]
     fn either_invalid_axis_makes_a_box_empty() {
@@ -86,5 +99,22 @@ mod tests {
             y1: 20,
         }
         .is_empty());
+    }
+
+    #[test]
+    fn expansion_is_clipped_to_the_real_move_canvas() {
+        test_init_screen();
+        assert_eq!(
+            BBox {
+                x0: 2,
+                y0: 3,
+                x1: 950,
+                y1: 1690,
+            }
+            .expanded(16)
+            .rect(),
+            (0, 0, 954, 1696)
+        );
+        assert!(BBox::empty().expanded(16).is_empty());
     }
 }

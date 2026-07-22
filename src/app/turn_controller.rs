@@ -13,8 +13,9 @@ use crate::{display, fonts, memory, oracle::Event, reader, runtime_control, task
 
 use super::lists::{accept_transcript, apply_local_command, HISTORY_VISIBLE};
 use super::oracle_controller::OracleTurn;
+use super::refresh_controller::RefreshController;
 use super::reply::{conjure, oracle_excuse, plan_reply_async, plan_streaming_reply_async};
-use super::state::{State, TurnKind};
+use super::state::{FontOrigin, State, TurnKind};
 use super::timing::heartbeat_deadline;
 
 pub(super) struct FirstEventContext<'a> {
@@ -25,6 +26,7 @@ pub(super) struct FirstEventContext<'a> {
     pub(super) next_heartbeat: &'a mut Option<Instant>,
     pub(super) surface: &'a mut Surface,
     pub(super) display: &'a display::Display,
+    pub(super) refresh: &'a mut RefreshController,
     pub(super) takeover: bool,
     pub(super) turn_transcript: &'a mut Option<String>,
     pub(super) turn_reply: &'a mut String,
@@ -47,11 +49,13 @@ pub(super) fn consume_first_event(
         Event::TaskList => open_task_list(&mut ctx),
         Event::TodoList => open_todo_list(&mut ctx),
         Event::FontList => open_font_list(&mut ctx),
+        Event::Settings => open_settings(&mut ctx),
         Event::HistoryList => open_history_list(&mut ctx),
         Event::Help => open_help(&mut ctx),
         Event::Reader(query) => open_reader(query, &mut ctx),
         Event::FullRefresh => {
-            ctx.display.request_refresh(ctx.surface.w, ctx.surface.h);
+            ctx.refresh
+                .request_full(ctx.display, ctx.surface.w, ctx.surface.h);
             State::Listening { last_pen: None }
         }
         Event::LocalCommand(command) => apply_command(command, &mut ctx),
@@ -142,7 +146,16 @@ fn open_todo_list(ctx: &mut FirstEventContext<'_>) -> State {
 fn open_font_list(ctx: &mut FirstEventContext<'_>) -> State {
     let panel = ui::font_settings::FontPanel::show(ctx.surface, ctx.font);
     present_panel(ctx, "font");
-    State::FontList { panel }
+    State::FontList {
+        panel,
+        origin: FontOrigin::Paper,
+    }
+}
+
+fn open_settings(ctx: &mut FirstEventContext<'_>) -> State {
+    let panel = ui::settings::SettingsPanel::show(ctx.surface, ctx.font, ctx.refresh.values());
+    present_panel(ctx, "settings");
+    State::Settings { panel }
 }
 
 fn open_history_list(ctx: &mut FirstEventContext<'_>) -> State {

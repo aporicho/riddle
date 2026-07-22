@@ -172,7 +172,9 @@ impl Engine<'_> {
                 }
             }
             Event::Reader(query) => self.open_delayed_reader(query.as_deref()),
-            Event::FullRefresh => self.disp.request_refresh(self.surf.w, self.surf.h),
+            Event::FullRefresh => self
+                .refresh
+                .request_full(self.disp, self.surf.w, self.surf.h),
             Event::Transcript(transcript) => {
                 if accept_transcript(
                     &mut self.turn_transcript,
@@ -188,6 +190,7 @@ impl Engine<'_> {
             | Event::TaskList
             | Event::TodoList
             | Event::FontList
+            | Event::Settings
             | Event::HistoryList
             | Event::Help => {
                 eprintln!("riddle: modal directive arrived after visible prose");
@@ -232,7 +235,11 @@ impl Engine<'_> {
         self.turn_strokes.clear();
         self.turn_tasks.clear();
         State::AnswerVisible {
-            until: Instant::now() + answer_visible_duration(completion.visible_graphemes),
+            until: Instant::now()
+                + answer_visible_duration(
+                    completion.visible_graphemes,
+                    self.refresh.values().answer_dwell_percent,
+                ),
             region: completion.region,
         }
     }

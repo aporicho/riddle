@@ -10,6 +10,7 @@ use crate::{display, fonts, memory, reader, tasks, todos, ui};
 
 use super::state::{State, TurnKind};
 use super::timing::{heartbeat_deadline, unix_now};
+use super::{refresh_controller::RefreshController, settings_controller};
 
 pub(super) const HISTORY_VISIBLE: usize = 9;
 
@@ -21,6 +22,7 @@ pub(super) struct PaperListContext<'a> {
     pub surf: &'a mut Surface,
     pub font: &'a mut fonts::FontBook,
     pub disp: &'a display::Display,
+    pub refresh: &'a mut RefreshController,
 }
 
 pub(super) fn finish_paper_list_stroke(
@@ -36,9 +38,14 @@ pub(super) fn finish_paper_list_stroke(
         surf,
         font,
         disp,
+        refresh,
     } = context;
+    if matches!(state, State::Settings { .. }) {
+        settings_controller::finish_settings_stroke(state, surf, font, disp, refresh, gesture);
+        return None;
+    }
     if matches!(state, State::FontList { .. }) {
-        finish_font_stroke(state, surf, font, disp, gesture);
+        finish_font_stroke(state, surf, font, disp, refresh, gesture);
         return None;
     }
     if matches!(state, State::ReaderList { .. }) {
@@ -50,7 +57,7 @@ pub(super) fn finish_paper_list_stroke(
         todos: todo_store,
         next_heartbeat,
     };
-    finish_stored_list_stroke(state, &mut stores, surf, font, disp, gesture);
+    finish_stored_list_stroke(state, &mut stores, surf, font, disp, refresh, gesture);
     None
 }
 
@@ -66,10 +73,11 @@ fn finish_font_stroke(
     surf: &mut Surface,
     font: &mut fonts::FontBook,
     disp: &display::Display,
+    refresh: &RefreshController,
     gesture: Gesture,
 ) {
     let action = match state {
-        State::FontList { panel } => panel.interact(gesture),
+        State::FontList { panel, .. } => panel.interact(gesture),
         _ => return,
     };
     match action {
@@ -93,8 +101,15 @@ fn finish_font_stroke(
         }
         Some(ui::font_settings::Action::Dismiss) => {
             let old = std::mem::replace(state, State::Listening { last_pen: None });
-            if let State::FontList { panel } = old {
+            if let State::FontList { panel, origin } = old {
                 panel.dismiss(surf);
+                *state = match origin {
+                    super::state::FontOrigin::Paper => State::Listening { last_pen: None },
+                    super::state::FontOrigin::Settings(mut panel) => {
+                        panel.redraw(surf, font, refresh.values());
+                        State::Settings { panel }
+                    }
+                };
             }
             disp.present_all(surf.w, surf.h, RefreshIntent::Content);
             eprintln!("magic-paper: font list dismissed");
@@ -110,7 +125,7 @@ fn redraw_font_list(
     font: &fonts::FontBook,
     disp: &display::Display,
 ) {
-    if let State::FontList { panel } = state {
+    if let State::FontList { panel, .. } = state {
         panel.redraw(surf, font);
     }
     disp.present_all(surf.w, surf.h, RefreshIntent::Content);
@@ -168,6 +183,7 @@ fn finish_stored_list_stroke(
     surf: &mut Surface,
     font: &fonts::FontBook,
     disp: &display::Display,
+    refresh: &RefreshController,
     gesture: Gesture,
 ) {
     let action = match state {
@@ -180,11 +196,11 @@ fn finish_stored_list_stroke(
     match action {
         ui::paper_list::Action::Delete(number) => {
             delete_stored_row(state, stores, number);
-            redraw_stored_list(state, stores, surf, font, disp);
+            redraw_stored_list(state, stores, surf, font, disp, refresh, true);
         }
         ui::paper_list::Action::Toggle(number) => {
             toggle_task(stores, number);
-            redraw_stored_list(state, stores, surf, font, disp);
+            redraw_stored_list(state, stores, surf, font, disp, refresh, false);
         }
         ui::paper_list::Action::Dismiss => {
             let old = std::mem::replace(state, State::Listening { last_pen: None });
@@ -197,7 +213,9 @@ fn finish_stored_list_stroke(
             disp.present_all(surf.w, surf.h, RefreshIntent::Content);
             eprintln!("magic-paper: paper list dismissed");
         }
-        ui::paper_list::Action::Redraw => redraw_stored_list(state, stores, surf, font, disp),
+        ui::paper_list::Action::Redraw => {
+            redraw_stored_list(state, stores, surf, font, disp, refresh, false)
+        }
         ui::paper_list::Action::Select(_) => {}
     }
 }
@@ -263,9 +281,21 @@ fn redraw_stored_list(
     surf: &mut Surface,
     font: &fonts::FontBook,
     disp: &display::Display,
+    refresh: &RefreshController,
+    cleanup: bool,
 ) {
     redraw_paper_list(state, stores.memory, stores.tasks, stores.todos, surf, font);
-    disp.present_all(surf.w, surf.h, RefreshIntent::Content);
+    if cleanup {
+        let region = match state {
+            State::TaskList { panel }
+            | State::TodoList { panel }
+            | State::HistoryList { panel } => panel.refresh_region(),
+            _ => return,
+        };
+        refresh.present_cleanup(disp, region);
+    } else {
+        disp.present_all(surf.w, surf.h, RefreshIntent::Content);
+    }
 }
 
 fn redraw_reader_list(state: &mut State, surf: &mut Surface, font: &fonts::FontBook) {

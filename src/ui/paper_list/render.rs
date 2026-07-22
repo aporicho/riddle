@@ -48,7 +48,7 @@ pub(super) fn draw_status_box(surf: &mut Surface, x: usize, y: usize, size: usiz
     }
 }
 
-pub(super) fn fit_line(font: &FontBook, text: &str, size: f32, max_width: usize) -> String {
+pub(in crate::ui) fn fit_line(font: &FontBook, text: &str, size: f32, max_width: usize) -> String {
     if script::measure_ui(font, text, size) as usize <= max_width {
         return text.to_string();
     }
@@ -63,7 +63,7 @@ pub(super) fn fit_line(font: &FontBook, text: &str, size: f32, max_width: usize)
     "…".into()
 }
 
-pub(super) fn blit_left(
+pub(in crate::ui) fn blit_left(
     surf: &mut Surface,
     font: &FontBook,
     text: &str,
@@ -82,7 +82,7 @@ pub(super) fn blit_left(
     HitRect::from_xywh(x as i32, y as i32, line.width as i32, line.height as i32)
 }
 
-pub(super) fn draw_frame(surf: &mut Surface, rect: HitRect, thickness: usize, color: u16) {
+pub(in crate::ui) fn draw_frame(surf: &mut Surface, rect: HitRect, thickness: usize, color: u16) {
     let x = rect.x0.max(0) as usize;
     let y = rect.y0.max(0) as usize;
     let width = rect.width().max(0) as usize;
@@ -96,7 +96,13 @@ pub(super) fn draw_frame(surf: &mut Surface, rect: HitRect, thickness: usize, co
     surf.fill_rect(x + width - thickness, y, thickness, height, color);
 }
 
-pub(super) fn blit_centered(surf: &mut Surface, font: &FontBook, text: &str, size: f32, y: usize) {
+pub(in crate::ui) fn blit_centered(
+    surf: &mut Surface,
+    font: &FontBook,
+    text: &str,
+    size: f32,
+    y: usize,
+) {
     let line = script::rasterize_ui_line(font, text, size);
     let x = screen_w().saturating_sub(line.width) / 2;
     for row in 0..line.height {

@@ -37,14 +37,16 @@ impl Engine<'_> {
     fn sleep_and_wake(&mut self) {
         eprintln!("riddle: sleeping (power button)");
         let saved = ui::help::show_sleep(&mut self.surf, &self.font);
-        self.disp.request_refresh(self.surf.w, self.surf.h);
+        self.refresh
+            .request_full(self.disp, self.surf.w, self.surf.h);
         std::thread::sleep(Duration::from_millis(800));
         if let Some(button) = self.power_dev.as_mut() {
             suspend_until_success(button);
         }
         eprintln!("riddle: waking");
         ui::help::restore_sleep(&mut self.surf, &saved);
-        self.disp.request_refresh(self.surf.w, self.surf.h);
+        self.refresh
+            .request_full(self.disp, self.surf.w, self.surf.h);
         power::wifi_heal();
         self.discard_sleep_input();
         self.power_clicks.clear();

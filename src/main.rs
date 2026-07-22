@@ -11,6 +11,7 @@ mod oracle;
 mod pen;
 mod platform;
 mod power;
+mod preferences;
 mod qtfb;
 mod reader;
 mod runtime_control;

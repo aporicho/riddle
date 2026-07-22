@@ -85,7 +85,7 @@ fn status_box_uses_its_exact_visible_rectangle() {
 }
 
 #[test]
-fn finger_strike_and_pen_strike_outside_text_never_delete() {
+fn finger_and_blank_margin_strikes_never_delete() {
     let mut panel = panel_with_rows();
     assert_eq!(
         panel.interact(Gesture::Strike {
@@ -108,12 +108,34 @@ fn finger_strike_and_pen_strike_outside_text_never_delete() {
     assert_eq!(
         panel.interact(Gesture::Strike {
             tool: PointerTool::Pen,
-            from: Point::new(1000, 550),
-            to: Point::new(400, 550),
-            bounds: HitRect::from_xywh(400, 548, 601, 5),
+            from: Point::new(950, 610),
+            to: Point::new(1200, 610),
+            bounds: HitRect::from_xywh(950, 608, 251, 5),
         }),
-        Some(Action::Redraw),
-        "crossing text is not destructive unless the pen began in it"
+        Some(Action::Redraw)
+    );
+}
+
+#[test]
+fn pen_may_start_in_either_row_margin_when_it_crosses_text() {
+    let mut panel = panel_with_rows();
+    assert_eq!(
+        panel.interact(Gesture::Strike {
+            tool: PointerTool::Pen,
+            from: Point::new(120, 550),
+            to: Point::new(700, 550),
+            bounds: HitRect::from_xywh(120, 548, 581, 5),
+        }),
+        Some(Action::Delete(2))
+    );
+    assert_eq!(
+        panel.interact(Gesture::Strike {
+            tool: PointerTool::Pen,
+            from: Point::new(1200, 550),
+            to: Point::new(400, 550),
+            bounds: HitRect::from_xywh(400, 548, 801, 5),
+        }),
+        Some(Action::Delete(2))
     );
 }
 
@@ -133,10 +155,17 @@ fn preview_inverts_controls_but_only_pen_text_can_preview_a_strike() {
         .begin_preview(PointerTool::Pen, Point::new(300, 550))
         .unwrap();
     assert!(!strike.is_visible(), "down must not paint a dot");
-    assert!(!strike.update(Point::new(390, 552)));
+    assert!(!strike.update(Point::new(320, 552)));
     assert!(!strike.is_visible());
-    assert!(strike.update(Point::new(500, 552)));
+    assert!(strike.update(Point::new(390, 552)));
     assert!(strike.is_visible());
+
+    let mut from_margin = panel
+        .begin_preview(PointerTool::Pen, Point::new(120, 550))
+        .unwrap();
+    assert!(!from_margin.is_visible());
+    assert!(from_margin.update(Point::new(400, 550)));
+    assert!(from_margin.is_visible());
 }
 
 #[test]
@@ -186,6 +215,27 @@ fn vertical_strokes_page_without_deleting_rows() {
         Some(Action::Redraw)
     );
     assert_eq!(panel.page, 0);
+}
+
+#[test]
+fn row_preview_forwards_a_vertical_pen_swipe_to_pagination() {
+    let mut panel = panel_with_rows();
+    panel.total_rows = 20;
+    panel.page_size = 12;
+    let start = Point::new(500, 550);
+    let end = Point::new(502, 300);
+    let preview = panel.begin_preview(PointerTool::Pen, start).unwrap();
+    let gesture = preview.release_gesture(
+        end,
+        Some(Gesture::Swipe {
+            tool: PointerTool::Pen,
+            from: start,
+            to: end,
+            bounds: HitRect::from_xywh(500, 300, 3, 251),
+        }),
+    );
+    assert_eq!(panel.interact(gesture), Some(Action::Redraw));
+    assert_eq!(panel.page, 1);
 }
 
 #[test]

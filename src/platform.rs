@@ -85,6 +85,10 @@ pub(crate) enum RefreshIntent {
     /// High-quality monochrome partial update for settling erased ink without
     /// invoking a color or full-panel waveform.
     MonoQuality,
+    /// Strong partial cleanup for stubborn Gallery-panel residue. Backends
+    /// map this to their color/content waveform without requesting a full
+    /// panel flash.
+    CleanPartial,
     Ui,
     Content,
     Full,

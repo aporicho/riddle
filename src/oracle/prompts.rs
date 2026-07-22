@@ -10,6 +10,8 @@ pub(super) const TODO_PROTOCOL: &str = "\n\nMagicPaper also maintains a separate
 
 pub(super) const FONT_PROTOCOL: &str = "\n\nMagicPaper has a device-local font picker. If Master's entire writing, after trimming whitespace and punctuation, is only 字体 or 字體, the ENTIRE visible body of your reply must be exactly ⟦fonts⟧ and nothing else; still append the hidden faithful transcription when memory is enabled. This opens the local font list. Do not describe font installation or selection unless Master wrote more than that entry word.";
 
+pub(super) const SETTINGS_PROTOCOL: &str = "\n\nMagicPaper has device-local experience settings. If Master's entire writing, after trimming whitespace and punctuation, is only 设置, 設定, settings, or SETTINGS, the ENTIRE visible body of your reply must be exactly ⟦settings⟧ and nothing else; still append the hidden faithful transcription when memory is enabled. This opens local refresh, answer timing, and font controls. Do not describe configuration unless Master wrote more than that entry word.";
+
 pub(super) const HISTORY_PROTOCOL: &str = "\n\nMagicPaper has a device-local conversation history. If Master's entire writing, after trimming whitespace and punctuation, is only 历史 or 歷史, the ENTIRE visible body of your reply must be exactly ⟦history⟧ and nothing else; still append the hidden faithful transcription when memory is enabled. This opens recent local dialogue, where a row can be struck out to forget it. Do not summarize history for this exact entry command.";
 
 pub(super) const HELP_PROTOCOL: &str = "\n\nMagicPaper has a device-local instruction manual. If Master's entire writing, after trimming whitespace and punctuation, is only 帮助, 幫助, help, or HELP, the ENTIRE visible body of your reply must be exactly ⟦help⟧ and nothing else; still append the hidden faithful transcription when memory is enabled. This opens the manual locally without an explanatory reply.";
@@ -45,9 +47,9 @@ pub(super) fn turn_text(ctx: &TurnContext) -> String {
 
 pub(super) fn system_prompt(remember: bool) -> String {
     if remember {
-        format!("{PERSONA}{RESEARCH_PROTOCOL}{TASK_PROTOCOL}{TODO_PROTOCOL}{FONT_PROTOCOL}{HISTORY_PROTOCOL}{HELP_PROTOCOL}{READER_PROTOCOL}{MEMORY_PROTOCOL}")
+        format!("{PERSONA}{RESEARCH_PROTOCOL}{TASK_PROTOCOL}{TODO_PROTOCOL}{FONT_PROTOCOL}{SETTINGS_PROTOCOL}{HISTORY_PROTOCOL}{HELP_PROTOCOL}{READER_PROTOCOL}{MEMORY_PROTOCOL}")
     } else {
-        format!("{PERSONA}{RESEARCH_PROTOCOL}{TASK_PROTOCOL}{TODO_PROTOCOL}{FONT_PROTOCOL}{HISTORY_PROTOCOL}{HELP_PROTOCOL}{READER_PROTOCOL}")
+        format!("{PERSONA}{RESEARCH_PROTOCOL}{TASK_PROTOCOL}{TODO_PROTOCOL}{FONT_PROTOCOL}{SETTINGS_PROTOCOL}{HISTORY_PROTOCOL}{HELP_PROTOCOL}{READER_PROTOCOL}")
     }
 }
 

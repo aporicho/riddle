@@ -77,6 +77,11 @@ fn parser_routes_local_task_and_todo_lists() {
         drain(history.advance("⟦history⟧\n⁂历史", true)),
         vec![Event::HistoryList, Event::Transcript("历史".into())]
     );
+    let mut settings = StreamParser::new(vec![]);
+    assert_eq!(
+        drain(settings.advance("⟦settings⟧\n⁂设置", true)),
+        vec![Event::Settings, Event::Transcript("设置".into())]
+    );
     let mut help = StreamParser::new(vec![]);
     assert_eq!(
         drain(help.advance("⟦help⟧\n⁂帮助", true)),
@@ -170,6 +175,10 @@ fn high_confidence_local_routes_choose_fast_commit() {
     assert_eq!(
         local_route("历史"),
         Some(LocalRoute::Event(Event::HistoryList))
+    );
+    assert_eq!(
+        local_route("設定"),
+        Some(LocalRoute::Event(Event::Settings))
     );
     assert_eq!(local_route("help"), Some(LocalRoute::Event(Event::Help)));
     assert_eq!(

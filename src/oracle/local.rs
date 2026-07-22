@@ -25,6 +25,9 @@ pub(super) fn local_route(text: &str) -> Option<LocalRoute> {
         .to_ascii_lowercase();
     match bare.as_str() {
         "字体" | "字體" => return Some(LocalRoute::Event(Event::FontList)),
+        "设置" | "設定" | "settings" => {
+            return Some(LocalRoute::Event(Event::Settings));
+        }
         "历史" | "歷史" => return Some(LocalRoute::Event(Event::HistoryList)),
         "帮助" | "幫助" | "help" => return Some(LocalRoute::Event(Event::Help)),
         "任务" | "任務" | "task" | "tasks" => return Some(LocalRoute::Event(Event::TaskList)),

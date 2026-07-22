@@ -147,6 +147,10 @@ fn oracle_test(png: &str) -> i32 {
                 println!("[would open font list]");
                 got.push_str("(fonts)");
             }
+            Ok(Ok(Event::Settings)) => {
+                println!("[would open settings]");
+                got.push_str("(settings)");
+            }
             Ok(Ok(Event::HistoryList)) => {
                 println!("[would open history list]");
                 got.push_str("(history)");

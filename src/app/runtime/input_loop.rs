@@ -398,6 +398,7 @@ fn is_list(state: &State) -> bool {
             | State::TodoList { .. }
             | State::HistoryList { .. }
             | State::FontList { .. }
+            | State::Settings { .. }
             | State::ReaderList { .. }
     )
 }

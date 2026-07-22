@@ -79,6 +79,12 @@ pub(super) enum State {
     /// preview; a tap on blank paper restores the page underneath.
     FontList {
         panel: ui::font_settings::FontPanel,
+        origin: FontOrigin,
+    },
+    /// Device-local experience settings. Font calibration opens as a nested
+    /// modal and returns here without losing this panel's saved page.
+    Settings {
+        panel: ui::settings::SettingsPanel,
     },
     /// The newest local dialogue pages; striking a row forgets both its text
     /// and replay strokes.
@@ -97,6 +103,11 @@ pub(super) enum State {
 pub(super) enum TurnKind {
     User,
     Heartbeat,
+}
+
+pub(super) enum FontOrigin {
+    Paper,
+    Settings(ui::settings::SettingsPanel),
 }
 
 /// A memory being rewritten onto the page: pre-positioned strokes with their

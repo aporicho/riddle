@@ -85,6 +85,8 @@ pub enum Event {
     TodoList,
     /// Open the device-local handwriting-font picker.
     FontList,
+    /// Open device-local experience settings.
+    Settings,
     /// Open the newest device-local dialogue memories.
     HistoryList,
     /// Open MagicPaper's device-local instruction manual.
