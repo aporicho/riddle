@@ -1,8 +1,9 @@
-//! MagicPaper (MP) — living paper for the reMarkable Paper Pro Move.
+//! MagicPaper (MP) — living paper for reMarkable Paper Pro and Paper Pro Move.
 
 mod agent;
 mod app;
 mod appearance;
+mod device_profile;
 mod display;
 mod domain;
 mod fb;

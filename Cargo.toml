@@ -3,7 +3,7 @@ name = "magicpaper"
 version = "0.7.0"
 edition = "2021"
 license = "MIT"
-description = "MagicPaper (MP), living magical paper for the reMarkable Paper Pro"
+description = "MagicPaper (MP), living magical paper for reMarkable Paper Pro and Paper Pro Move"
 repository = "https://github.com/aporicho/magicpaper"
 
 [dependencies]

@@ -119,14 +119,10 @@ impl FontBook {
             FontId::Farstar851,
             &font_dir.join("851LakeusNightWriting.ttf"),
         );
-        load_optional_candidates(
+        load_optional(
             &mut entries,
             FontId::CoverageFallback,
-            &[
-                font_dir.join("CoverageFallback.ttf"),
-                PathBuf::from("/home/root/apps/remagic/fonts/UIFont.ttf"),
-                PathBuf::from("/home/root/apps/koreader/fonts/noto/NotoSansCJKsc-Regular.otf"),
-            ],
+            &font_dir.join("CoverageFallback.ttf"),
         );
 
         let preference_dir = crate::runtime_env::persistent_path(
@@ -390,21 +386,6 @@ fn load_required(path: &Path) -> std::io::Result<FontRef<'static>> {
             format!("required font is invalid at {}: {error}", path.display()),
         )
     })
-}
-
-fn load_optional_candidates(entries: &mut Vec<FontEntry>, id: FontId, paths: &[PathBuf]) {
-    if let Some(path) = paths.iter().find(|path| path.is_file()) {
-        load_optional(entries, id, path);
-    } else {
-        eprintln!(
-            "magic-paper: optional coverage font unavailable (tried {})",
-            paths
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
 }
 
 #[cfg(test)]

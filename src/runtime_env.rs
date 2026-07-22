@@ -132,7 +132,25 @@ pub(crate) fn validate_launch(mode: LaunchMode) -> io::Result<bool> {
         qtfb_key.as_deref(),
         lifecycle.as_deref(),
     )?;
+    let device_profile = std::env::var(crate::device_profile::DEVICE_PROFILE_ENV).ok();
+    validate_device_profile(mode, device_profile.as_deref())?;
     Ok(managed)
+}
+
+fn validate_device_profile(mode: LaunchMode, value: Option<&str>) -> io::Result<()> {
+    if mode == LaunchMode::LegacyTakeover {
+        return Ok(());
+    }
+    let value = value.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "hosted MagicPaper requires {}",
+                crate::device_profile::DEVICE_PROFILE_ENV
+            ),
+        )
+    })?;
+    crate::device_profile::DeviceProfileV1::parse(value).map(|_| ())
 }
 
 fn validate_values(
@@ -190,8 +208,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        choose_persistent_path, env_flag_enabled, parse_launch_token, validate_values, LaunchMode,
-        MANAGED_VARS,
+        choose_persistent_path, env_flag_enabled, parse_launch_token, validate_device_profile,
+        validate_values, LaunchMode, MANAGED_VARS,
     };
 
     #[test]
@@ -230,6 +248,28 @@ mod tests {
         assert!(validate_values(false, LaunchMode::LegacyTakeover, None, None, None).is_ok());
         assert!(validate_values(true, LaunchMode::LegacyTakeover, None, None, None).is_err());
         assert!(!MANAGED_VARS.contains(&"MAGICPAPER_SYSTEMD_MANAGED"));
+    }
+
+    #[test]
+    fn hosted_launch_requires_a_valid_device_profile_before_display_open() {
+        const PROFILE: &str = r#"{
+            "schema_version":1,
+            "product":"paper_pro",
+            "codename":"ferrari",
+            "os_version":"3.27.0",
+            "display":{
+                "logical_width":1620,
+                "logical_height":2160,
+                "qtfb_format":3,
+                "pixel_format":"rgb565",
+                "stride":3240
+            },
+            "capabilities":["display:qtfb-v1","input:pen-v1","ink:direct-v1"]
+        }"#;
+        assert!(validate_device_profile(LaunchMode::Hosted, Some(PROFILE)).is_ok());
+        assert!(validate_device_profile(LaunchMode::Hosted, None).is_err());
+        assert!(validate_device_profile(LaunchMode::Hosted, Some("{}")).is_err());
+        assert!(validate_device_profile(LaunchMode::LegacyTakeover, None).is_ok());
     }
 
     #[test]

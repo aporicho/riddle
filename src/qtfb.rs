@@ -9,6 +9,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::time::Duration;
 
+use crate::device_profile::HostedSurfaceSpec;
 use crate::platform::{self, DamageRect, PenFrame, PenPhase, PenTool};
 
 pub const MESSAGE_INITIALIZE: u8 = 0;
@@ -22,9 +23,6 @@ pub const MESSAGE_REQUEST_FULL_REFRESH: u8 = 6;
 
 pub const UPDATE_ALL: i32 = 0;
 pub const UPDATE_PARTIAL: i32 = 1;
-
-/// FBFMT_RMPPM_RGB565: Paper Pro Move native 954x1696 RGB565.
-pub const FBFMT_RMPPM_RGB565: u8 = 6;
 
 #[allow(dead_code)]
 pub const REFRESH_MODE_UFAST: i32 = 0;
@@ -151,25 +149,20 @@ impl PendingUpdate {
 unsafe impl Send for QtfbClient {}
 
 impl QtfbClient {
-    /// Connect and initialize with the default resolution of `format`.
-    pub fn connect(
-        key: i32,
-        format: u8,
-        width: usize,
-        height: usize,
-        bpp: usize,
-    ) -> io::Result<Self> {
+    /// Connect using the display contract validated before any shared memory
+    /// is mapped. QTFB v1 does not return geometry in its init reply.
+    pub fn connect(key: i32, spec: HostedSurfaceSpec) -> io::Result<Self> {
         let socket = connect_socket()?;
-        let (shm_key, shm_size) = initialize(socket.as_raw_fd(), key, format)?;
-        let ptr = map_framebuffer(shm_key, shm_size, width * height * bpp)?;
+        let (shm_key, shm_size) = initialize(socket.as_raw_fd(), key, spec.qtfb_format)?;
+        let ptr = map_framebuffer(shm_key, shm_size, spec.required_bytes()?)?;
         set_nonblocking(socket.as_raw_fd())?;
 
         Ok(Self {
             fd: socket.into_raw_fd(),
             shm: ptr,
             shm_len: shm_size,
-            width,
-            height,
+            width: spec.width,
+            height: spec.height,
             applied_refresh_mode: Cell::new(REFRESH_MODE_UI),
             pending_commit: RefCell::new(None),
         })

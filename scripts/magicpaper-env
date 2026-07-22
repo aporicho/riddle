@@ -1,0 +1,67 @@
+#!/bin/sh
+
+# Read MagicPaper's dotenv-style configuration without executing it as shell
+# code. Credentials are limited to the application settings below; platform
+# ownership variables always come from ReMagic and cannot be overridden here.
+load_magicpaper_env() {
+    env_file=$1
+    [ -r "$env_file" ] || return 0
+
+    while IFS= read -r raw || [ -n "$raw" ]; do
+        line=$(printf '%s' "$raw" | sed 's/\r$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+        case "$line" in
+            ''|'#'*) continue ;;
+            export[[:space:]]*)
+                line=${line#export}
+                line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//')
+                ;;
+        esac
+        case "$line" in *=*) ;; *) continue ;; esac
+
+        key=$(printf '%s' "${line%%=*}" | sed 's/[[:space:]]*$//')
+        value=${line#*=}
+        value=$(printf '%s' "$value" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+        case "$key" in ''|*[!A-Z0-9_]*) continue ;; esac
+        target=$key
+        case "$key" in
+            MAGICPAPER_OPENAI_*|MAGICPAPER_OCR_*|MAGICPAPER_PI_*|\
+            MAGICPAPER_PAPER_REWRITE_MODEL|MAGICPAPER_WEB_SEARCH|\
+            MAGICPAPER_IMAGE_MAX_EDGE|MAGICPAPER_KEEP_PAGE|MAGICPAPER_MEMORY|\
+            MAGICPAPER_MEMORY_TURNS|MAGICPAPER_HEARTBEAT_RETRY_SECONDS|\
+            MAGICPAPER_TZ_OFFSET) ;;
+            RIDDLE_OPENAI_*|RIDDLE_OCR_*|RIDDLE_PI_*|\
+            RIDDLE_PAPER_REWRITE_MODEL|RIDDLE_WEB_SEARCH|RIDDLE_IMAGE_MAX_EDGE|\
+            RIDDLE_KEEP_PAGE|RIDDLE_MEMORY|RIDDLE_MEMORY_TURNS|\
+            RIDDLE_HEARTBEAT_RETRY_SECONDS|RIDDLE_TZ_OFFSET)
+                target=MAGICPAPER_${key#RIDDLE_}
+                env | grep -q "^${target}=" && continue
+                ;;
+            *) continue ;;
+        esac
+
+        case "$value" in
+            \"*\") value=${value#\"}; value=${value%\"} ;;
+            \'*\') value=${value#\'}; value=${value%\'} ;;
+        esac
+        export "$target=$value"
+    done < "$env_file"
+}
+
+load_magicpaper_config() {
+    config_file=$1
+    legacy_config_file=$2
+    legacy_app_file=$3
+    test_mode=${4:-0}
+    if [ "$test_mode" = 1 ]; then
+        unset MAGICPAPER_OPENAI_KEY MAGICPAPER_OCR_TOKEN \
+            RIDDLE_OPENAI_KEY RIDDLE_OCR_TOKEN
+        return 0
+    fi
+    if [ -r "$config_file" ]; then
+        load_magicpaper_env "$config_file"
+    elif [ -r "$legacy_config_file" ]; then
+        load_magicpaper_env "$legacy_config_file"
+    elif [ -r "$legacy_app_file" ]; then
+        load_magicpaper_env "$legacy_app_file"
+    fi
+}

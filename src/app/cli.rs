@@ -13,7 +13,8 @@ const USAGE: &str = "\
 MagicPaper (MP) — your living magical paper
 
 usage:
-  magicpaper                      open the hosted qtfb diary (requires QTFB_KEY)
+  magicpaper                      open the ReMagic-hosted diary (requires the
+                              QTFB and DeviceProfileV1 runtime contract)
   magicpaper --legacy-takeover    explicitly own display and raw input via libquill
   magicpaper --oracle-test [PNG]  run one oracle turn against PNG (default
                               /tmp/magicpaper-page.png) and print the streamed

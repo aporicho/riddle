@@ -5,7 +5,7 @@
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PixFmt {
-    /// 2 bytes/px, little-endian RGB565 (Move qtfb FBFMT_RMPPM_RGB565).
+    /// 2 bytes/px, little-endian RGB565 (device-specific QTFB format).
     Rgb565,
     /// 4 bytes/px, QImage Format_RGB32: bytes B,G,R,0xFF.
     #[cfg_attr(

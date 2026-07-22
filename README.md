@@ -1,6 +1,6 @@
 # MagicPaper
 
-MagicPaper（简称 MP）是正式产品名，仓库与发布标识为 `magicpaper`。它是为 reMarkable Paper Pro Move 设计的纸面 AI 应用：用户直接用笔书写，墨迹在停笔后淡出，回答再以手写动画写回纸面。它没有键盘、聊天气泡或网页界面。
+MagicPaper（简称 MP）是正式产品名，仓库与发布标识为 `magicpaper`。它是为 reMarkable Paper Pro 与 Paper Pro Move 设计的纸面 AI 应用：用户直接用笔书写，墨迹在停笔后淡出，回答再以手写动画写回纸面。它没有键盘、聊天气泡或网页界面。
 
 本项目由 Maxime Rivest 的 [`riddle`](https://github.com/MaximeRivest/riddle) 演进而来，并保留原项目历史和 MIT 署名。0.7.0 的正式运行方式是作为 ReMagic 托管的驻留应用；AppLoad、镇纸和旧独占脚本都不是其运行依赖。
 
@@ -8,7 +8,7 @@ MagicPaper（简称 MP）是正式产品名，仓库与发布标识为 `magicpap
 
 | 方面 | 上游 | MagicPaper 0.7.0 |
 |---|---|---|
-| 设备与运行方式 | Paper Pro、AppLoad/独占模式 | Paper Pro Move，由 ReMagic 提供 QTFB、笔/触摸与生命周期 |
+| 设备与运行方式 | Paper Pro、AppLoad/独占模式 | Paper Pro 与 Paper Pro Move，由 ReMagic 自动适配 QTFB、笔/触摸与生命周期 |
 | 定位 | Tom Riddle 日记 | 中文优先的纸面助手，简称 MP |
 | OCR | 回答模型直接看整页 | 可提前 1 秒提交 PP-OCRv6，再由回答模型结合上下文纠错 |
 | 回答 | 基础对话 | 计算直答、问答、长期对话、按需后台检索、纸面化整理，中文默认繁体 |
@@ -26,10 +26,32 @@ MagicPaper 只负责页面状态、笔迹解释、AI 请求、回答渲染和自
 
 - `REMAGIC_RUNTIME_PROFILE=qtfb_compat`；
 - 稳定且唯一的 `QTFB_KEY` surface；
+- 版本化的 `REMAGIC_DEVICE_PROFILE`；
 - v2 双向 lifecycle 通道；
 - 经过 manifest 限定的 HOME/XDG、字体、证书和网络环境。
 
 缺少任一托管契约时应用会在打开显示或输入前失败，不会退回到偷偷抢占设备的模式。`--legacy-takeover` 仍保留给明确的兼容实验，但不能在 ReMagic 托管进程中启用。
+
+QTFB v1 的初始化回包只包含共享内存 key 与字节数，不包含逻辑尺寸或像素格式。因此 MagicPaper 不从内存大小、主机名或屏幕比例猜设备，而是严格验证 ReMagic 注入的 profile。当前契约如下；用户不需要也不能手工选择设备：
+
+```json
+{
+  "schema_version": 1,
+  "product": "paper_pro_move",
+  "codename": "chiappa",
+  "os_version": "3.27.0",
+  "display": {
+    "logical_width": 954,
+    "logical_height": 1696,
+    "qtfb_format": 6,
+    "pixel_format": "rgb565",
+    "stride": 1908
+  },
+  "capabilities": ["display:qtfb-v1", "input:pen-v1", "ink:direct-v1", "lifecycle:v2"]
+}
+```
+
+Paper Pro 使用 `ferrari`、`1620×2160`、QTFB format 3、stride 3240；Paper Pro Move 使用 `chiappa`、`954×1696`、QTFB format 6、stride 1908。产品、代号、几何、格式或能力互相矛盾时启动会 fail closed。两款设备随后进入完全相同的共享 RGB565 surface 和低延迟笔迹提交路径；页面布局只读取实际 surface 尺寸。
 
 ```text
 笔事件 ──► ReMagic display host ──► QTFB surface ──► MagicPaper 输入状态机
@@ -148,9 +170,11 @@ magicpaper --oracle-test handwriting.png
 - `MAGICPAPER_PREFERENCES_DIR`
 - `MAGICPAPER_REMARKABLE_LIBRARY`、`MAGICPAPER_KOREADER_LIBRARY`
 
-测试模式在没有显式路径时也不会回退到 `/home/root`。ReMagic 的设备验收通过临时 manifest 和 systemd runtime drop-in 使用生产二进制、生产显示栈和隔离数据，测试结束后比较真实数据指纹并恢复原会话。
+测试模式在没有显式路径时也不会回退到 `/home/root`。ReMagic 的设备验收通过临时 manifest 和托管 runtime override 使用生产二进制、生产显示栈和隔离数据，测试结束后比较真实数据指纹并恢复原会话。
 
-## 构建与交付
+## 安装、构建与交付
+
+正式用户只通过 **ReMagic Store** 安装、更新、回滚或卸载 MagicPaper。MagicPaper 是独立应用包，不随 ReMagic 系统核心捆绑，也不要求用户安装 Rust、reMarkable SDK、AppLoad、镇纸或 Quill。Store 在安装前自动检查设备 profile、系统版本、ReMagic API 与所需能力。
 
 提交前运行完整本地门禁：
 
@@ -160,20 +184,19 @@ magicpaper --oracle-test handwriting.png
 
 它会执行架构检查、格式检查、全部 target 测试、Clippy `-D warnings` 和 release/all-features 编译检查。
 
-正式设备包由同级 `remagic` 统一构建和部署，它负责交叉编译、字体资源、QTFB shim、manifest、systemd 服务、校验和与事务安装：
+仓库发布流程生成一个通用 aarch64 应用包；Ferrari 与 Chiappa 的设备差异由 ReMagic 的运行时 profile 和显示 host 解决，而不是发布两个由用户选择的 MagicPaper 安装包。应用包包含 MagicPaper 二进制、字体、manifest、配置模板、迁移器和托管后台 agent 声明，但不包含 ReMagic、设备显示库或用户 API 密钥。
 
-```sh
-cd ../remagic
-./scripts/build-bundle.sh
-./scripts/deploy-usb.sh
-```
+发布维护者先设置 `RM_SDK` 并运行 `scripts/build-remagic.sh`。该脚本会覆盖设备 SDK 自带的 `-mcpu`，以通用 ARMv8-A 指令集编译，并拒绝 libc/libgcc 之外的设备专属动态库；因此同一应用二进制可由 Ferrari 与 Chiappa 的 ReMagic 运行环境承载。随后通过 `scripts/make-remagic-package.sh` 生成 Store bundle（构建机需要 Python 3、GNU tar、gzip 与 sha256sum）。四个字体路径必须显式传入 `MAGICPAPER_UI_FONT`、`MAGICPAPER_851_FONT`、`MAGICPAPER_BUTTER_FONT` 和 `MAGICPAPER_COVERAGE_FONT`；打包脚本不会从用户目录猜测资源，也不会读取 `oracle.env`。bundle 顶层包含 `bundle.json`、`manifest.toml` 和 `payload/`，版本化 payload 安装到 `/home/root/apps/magicpaper/releases/<content-id>`，Store 原子维护 `current` 链接。
 
-旧独占构建仍可通过 `build-takeover.sh` 和 `scripts/make-bundle.sh` 生成；兼容包会校验并打包 `${MAGICPAPER_UI_FONT:-$HOME/Downloads/方正屏显雅宋.TTF}`，但它只作为显式兼容路径，不参与 ReMagic 的应用切换、驻留、故障恢复和自动化验收。
+`bundle.json` 为每个普通文件记录路径、四位八进制权限、大小和 SHA-256，并拒绝链接或特殊文件。`payload_sha256` 对按 UTF-8 路径排序的 payload 文件连续计算 `path\0mode\0size\0sha256\n`；`content_id` 在域分隔符 `remagic-bundle-content-v1\0`、应用标识/包名/版本之后，对同样格式的全部文件记录计算 SHA-256。`scripts/remagic-bundle.py verify` 在安装事务前复算整个清单。
+
+旧独占构建仍可通过 `build-takeover.sh` 和 `scripts/make-bundle.sh` 生成。该目录包含显式的设备/Quill 假设，只作为实验兼容路径；它不属于 Store 包，不参与 ReMagic 的应用切换、驻留、故障恢复、双设备承诺或正式验收。
 
 ## 模块划分
 
 ```text
 src/app/          回合编排、生命周期、输入优先级、列表与回答控制
+src/device_profile.rs  ReMagic 注入的双设备显示契约与 fail-closed 校验
 src/oracle/       HTTP/pi/Paddle、流解析、本地路由、提示词和确定性后端
 src/storage/      记忆、任务与 TODO 领域模型
 src/appearance/   字体、标定与手写描边

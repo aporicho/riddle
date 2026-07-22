@@ -24,9 +24,12 @@ pub fn screen_h() -> usize {
 
 #[cfg(test)]
 pub fn test_init_screen() {
-    // Paper Pro Move's real logical qtfb canvas.  Layout tests must exercise
-    // the narrow device rather than silently passing on a much larger page.
-    init_screen(954, 1696);
+    // Use the narrower supported canvas as the conservative default for
+    // layout tests; runtime dimensions always come from DeviceProfileV1.
+    init_screen(
+        crate::device_profile::PAPER_PRO_MOVE_WIDTH,
+        crate::device_profile::PAPER_PRO_MOVE_HEIGHT,
+    );
 }
 
 /// Grow-only pixel bounding box, used to build update/dissolve regions.
@@ -102,7 +105,7 @@ mod tests {
     }
 
     #[test]
-    fn expansion_is_clipped_to_the_real_move_canvas() {
+    fn expansion_is_clipped_to_the_initialized_canvas() {
         test_init_screen();
         assert_eq!(
             BBox {
@@ -113,7 +116,12 @@ mod tests {
             }
             .expanded(16)
             .rect(),
-            (0, 0, 954, 1696)
+            (
+                0,
+                0,
+                crate::device_profile::PAPER_PRO_MOVE_WIDTH as i32,
+                crate::device_profile::PAPER_PRO_MOVE_HEIGHT as i32,
+            )
         );
         assert!(BBox::empty().expanded(16).is_empty());
     }

@@ -341,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn calibrated_long_reply_stays_inside_the_move_content_rect() {
+    fn calibrated_long_reply_stays_inside_the_supported_content_rect() {
         crate::fb::test_init_screen();
         let mut font = font();
         font.set_scale_for_test(FontId::ChenYuluoyan, 180);

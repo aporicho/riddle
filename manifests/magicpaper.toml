@@ -1,0 +1,96 @@
+schema = 2
+id = "magicpaper"
+name = "MagicPaper"
+kind = "user"
+description = "手写 AI 魔法纸"
+version = "0.7.0"
+package = "magicpaper"
+supported_devices = ["paper_pro", "paper_pro_move"]
+supported_os = []
+required_remagic_api = 2
+uninstall_policy = "keep_data"
+icon = "/home/root/apps/magicpaper/current/payload/share/icon.png"
+exec = "/home/root/apps/magicpaper/current/payload/bin/magicpaper-launch"
+working_dir = "/home/root/apps/magicpaper/current/payload"
+display = "qtfb"
+resident = true
+capabilities = [
+  "display:qtfb-v1",
+  "input:touch-v1",
+  "input:pen-v1",
+  "input:mode-v2",
+  "ink:direct-v1",
+  "lifecycle:v2",
+  "network:outbound-v1",
+]
+supports_open_path = false
+
+[readiness]
+mode = "first_frame"
+timeout_ms = 15000
+
+[shutdown]
+graceful_timeout_ms = 3500
+term_timeout_ms = 4500
+kill_timeout_ms = 5500
+
+[background_service]
+kind = "managed"
+exec = "/home/root/apps/magicpaper/current/payload/bin/magicpaper-launch"
+args = ["--agent"]
+working_dir = "/home/root/apps/magicpaper/current/payload"
+restart = "on_failure"
+
+[data_schema]
+version = 2
+migrator = "/home/root/apps/magicpaper/current/payload/libexec/magicpaper-data-migrate"
+backup_paths = [
+  "/home/root/riddle-data",
+  "/home/root/.config/riddle",
+  "/home/root/.local/share/remagic-magicpaper",
+  "/home/root/.config/remagic-magicpaper",
+  "/home/root/.local/share/magicpaper",
+  "/home/root/.config/magicpaper",
+]
+backup_timeout_ms = 120000
+migration_timeout_ms = 120000
+
+[runtime]
+profile = "qtfb_compat"
+required_libraries = []
+
+[runtime.directories]
+home = "/home/root"
+config_home = "/home/root/.config/magicpaper"
+data_home = "/home/root/.local/share/magicpaper"
+state_home = "/home/root/.local/state/magicpaper"
+cache_home = "/home/root/.cache/magicpaper"
+runtime_dir = "/run/remagic/apps/magicpaper"
+
+[runtime.locale]
+lang = "C.UTF-8"
+
+[runtime.timezone]
+name = "Asia/Shanghai"
+
+[runtime.fonts]
+directories = [
+  "/home/root/apps/magicpaper/current/payload/share/fonts",
+  "/home/root/.local/share/fonts",
+]
+
+[runtime.certificates]
+required = true
+ca_bundle = "/etc/ssl/certs/ca-certificates.crt"
+
+[runtime.network]
+mode = "outbound"
+
+[environment]
+MAGICPAPER_CONFIG = "/home/root/.config/magicpaper/oracle.env"
+MAGICPAPER_FONT_DIR = "/home/root/apps/magicpaper/current/payload/share/fonts"
+MAGICPAPER_DATA_ROOT = "/home/root/.local/share/magicpaper"
+MAGICPAPER_CONFIG_ROOT = "/home/root/.config/magicpaper"
+MAGICPAPER_LEGACY_DATA_ROOTS = "/home/root/.local/share/remagic-magicpaper:/home/root/riddle-data"
+MAGICPAPER_LEGACY_CONFIG_ROOTS = "/home/root/.config/remagic-magicpaper:/home/root/.config/riddle"
+MAGICPAPER_LEGACY_CONFIG_FILE = "/home/root/apps/riddle/oracle.env"

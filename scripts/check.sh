@@ -40,5 +40,10 @@ fi
 for script in scripts/*.sh; do
     bash -n "$script"
 done
+for script in scripts/magicpaper-env scripts/magicpaper-data-migrate tests/*.sh; do
+    sh -n "$script"
+done
+sh tests/test-remagic-package.sh
+sh tests/test-remagic-bundle.sh
 
 echo "MagicPaper checks passed"

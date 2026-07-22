@@ -39,16 +39,26 @@ impl Display {
                 )
             })?;
             let key: i32 = key.parse().map_err(io::Error::other)?;
-            let mut client = crate::qtfb::QtfbClient::connect(
-                key,
-                crate::qtfb::FBFMT_RMPPM_RGB565,
-                954,
-                1696,
-                2,
-            )?;
+            let profile = crate::device_profile::DeviceProfileV1::from_environment()?;
+            let spec = profile.display;
+            let mut client = crate::qtfb::QtfbClient::connect(key, spec)?;
             let buf = client.framebuffer();
             let (ptr, len) = (buf.as_mut_ptr(), buf.len());
-            let surface = Surface::new(ptr, len, 954, 1696, 954 * 2, PixFmt::Rgb565);
+            let surface = Surface::new(
+                ptr,
+                len,
+                spec.width,
+                spec.height,
+                spec.stride,
+                PixFmt::Rgb565,
+            );
+            eprintln!(
+                "magicpaper: ReMagic device profile {:?}/{:?} OS {} (capabilities {})",
+                profile.product,
+                profile.codename,
+                profile.os_version,
+                profile.capabilities.len()
+            );
             return Ok((Display::Qtfb(client), surface));
         }
 
