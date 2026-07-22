@@ -4,10 +4,16 @@
 //! `任务` / `task` entry word, while rendering and strike-to-delete happen on
 //! the device without another network request.
 
-use crate::fb::{screen_h, screen_w, BBox};
+use crate::fb::{screen_h, screen_w};
 use crate::fonts::FontBook;
-use crate::script;
-use crate::surface::{Surface, BLACK, FADED, WHITE};
+use crate::surface::{Surface, FADED, WHITE};
+
+use super::pointer::{
+    draw_clipped_line, invert_mono, Gesture, GesturePolicy, HitRect, Point, PointerTool,
+};
+
+mod render;
+use render::{blit_centered, blit_left, draw_frame, draw_status_box, fit_line};
 
 const SIDE: usize = 80;
 const LIST_TOP: usize = 270;
@@ -22,6 +28,134 @@ pub enum Action {
     Redraw,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hit {
+    Text(usize),
+    Toggle(usize),
+    SelectCard(usize),
+    Blank,
+}
+
+/// Component-owned transient feedback. Runtime only snapshots [`Self::rect`]
+/// and delegates drawing/release semantics back to this component, so hit
+/// geometry never has to be duplicated outside the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preview {
+    Press {
+        tool: PointerTool,
+        target: Hit,
+        rect: HitRect,
+        start: Point,
+        pressed: bool,
+    },
+    Strike {
+        row: usize,
+        text: HitRect,
+        start: Point,
+        line_to: Option<Point>,
+    },
+}
+
+impl Preview {
+    pub const fn rect(self) -> HitRect {
+        match self {
+            Self::Press { rect, .. } => rect,
+            Self::Strike { text, .. } => text,
+        }
+    }
+
+    pub const fn is_visible(self) -> bool {
+        matches!(
+            self,
+            Self::Press { pressed: true, .. }
+                | Self::Strike {
+                    line_to: Some(_),
+                    ..
+                }
+        )
+    }
+
+    /// Update only the visual state. Returns true when the save-under must be
+    /// restored and this preview rendered again.
+    pub fn update(&mut self, point: Point) -> bool {
+        match self {
+            Self::Press { rect, pressed, .. } => {
+                let next = rect.contains(point);
+                let changed = *pressed != next;
+                *pressed = next;
+                changed
+            }
+            Self::Strike { start, line_to, .. } => {
+                let dx = (point.x - start.x).abs();
+                let dy = (point.y - start.y).abs();
+                let profile = GesturePolicy::default().pen;
+                let next = (dx >= profile.strike_min_distance_px
+                    && dx >= dy.saturating_mul(profile.axis_dominance))
+                .then_some(point);
+                let changed = *line_to != next;
+                *line_to = next;
+                changed
+            }
+        }
+    }
+
+    pub fn render(self, surface: &mut Surface) {
+        match self {
+            Self::Press {
+                rect,
+                pressed: true,
+                ..
+            } => invert_mono(surface, rect),
+            Self::Strike {
+                text,
+                start,
+                line_to: Some(to),
+                ..
+            } => draw_clipped_line(surface, start, to, text, 3),
+            _ => {}
+        }
+    }
+
+    /// Convert a completed preview back into the component's existing
+    /// gesture/action path. A released-outside press becomes a zero-distance
+    /// no-op swipe, while a slider-like accidental drag can never dismiss the
+    /// page underneath.
+    pub fn release_gesture(self, end: Point, classified: Option<Gesture>) -> Gesture {
+        match self {
+            Self::Press {
+                tool,
+                pressed: true,
+                ..
+            } => Gesture::Tap { tool, at: end },
+            Self::Strike {
+                row: _,
+                text,
+                start,
+                ..
+            } => match classified {
+                Some(
+                    gesture @ Gesture::Strike {
+                        tool: PointerTool::Pen,
+                        from,
+                        ..
+                    },
+                ) if from == start && text.contains(from) => gesture,
+                _ => no_op_gesture(PointerTool::Pen, start),
+            },
+            Self::Press { tool, start, .. } => no_op_gesture(tool, start),
+        }
+    }
+}
+
+fn no_op_gesture(tool: PointerTool, at: Point) -> Gesture {
+    Gesture::Swipe {
+        tool,
+        from: at,
+        to: at,
+        bounds: HitRect::from_xywh(at.x, at.y, 1, 1),
+    }
+}
+
 pub struct Content<'a> {
     pub title: &'a str,
     pub empty_text: &'a str,
@@ -33,15 +167,14 @@ pub struct Content<'a> {
 #[derive(Clone, Copy, Debug)]
 struct Row {
     number: usize,
-    y0: i32,
-    y1: i32,
-    toggle_box: Option<(i32, i32, i32, i32)>,
+    card: HitRect,
+    text: HitRect,
+    toggle_box: Option<HitRect>,
 }
 
 pub struct PaperList {
     saved: Vec<u8>,
     rows: Vec<Row>,
-    stroke: Vec<(i32, i32)>,
     selectable: bool,
     page: usize,
     page_size: usize,
@@ -105,7 +238,6 @@ impl PaperList {
         let mut panel = Self {
             saved,
             rows: Vec::new(),
-            stroke: Vec::new(),
             selectable,
             page: 0,
             page_size: 1,
@@ -125,7 +257,6 @@ impl PaperList {
         } = content;
         surf.fill_rect(0, 0, screen_w(), screen_h(), WHITE);
         self.rows.clear();
-        self.stroke.clear();
 
         blit_centered(surf, font, title, 88.0, 90);
         if entries.is_empty() {
@@ -160,111 +291,130 @@ impl PaperList {
             let y0 = LIST_TOP + visible_index * row_h;
             let y1 = y0 + row_h - 1;
             let text = fit_line(font, entry, text_px, max_width);
+            let card = HitRect::from_xywh(
+                SIDE as i32,
+                (y0 + 5) as i32,
+                screen_w().saturating_sub(SIDE * 2) as i32,
+                row_h.saturating_sub(10) as i32,
+            );
+            if self.selectable {
+                draw_frame(surf, card, 2, FADED);
+            }
             let text_y = y0 + (row_h.saturating_sub(text_px as usize)) / 2;
-            blit_left(surf, font, &text, text_px, SIDE + 12, text_y);
+            let text_x = SIDE + if self.selectable { 28 } else { 12 };
+            let text_rect = blit_left(surf, font, &text, text_px, text_x, text_y);
             let toggle_box = enabled.and_then(|states| states.get(index)).map(|active| {
                 let size = 54usize.min(row_h.saturating_sub(20));
                 let x = screen_w().saturating_sub(SIDE + size + 16);
                 let y = y0 + row_h.saturating_sub(size) / 2;
                 draw_status_box(surf, x, y, size, *active);
-                (x as i32, y as i32, (x + size) as i32, (y + size) as i32)
+                HitRect::from_xywh(x as i32, y as i32, size as i32, size as i32)
             });
-            surf.fill_rect(SIDE, y1, screen_w() - SIDE * 2, 2, FADED);
+            if !self.selectable {
+                surf.fill_rect(SIDE, y1, screen_w() - SIDE * 2, 2, FADED);
+            }
             self.rows.push(Row {
                 number: index + 1,
-                y0: y0 as i32,
-                y1: y1 as i32,
+                card,
+                text: text_rect,
                 toggle_box,
             });
         }
     }
 
-    /// Draw a live strike and retain its geometry for classification on lift.
-    pub fn pen_point(&mut self, surf: &mut Surface, x: i32, y: i32) -> BBox {
-        let mut dirty = BBox::empty();
-        if let Some(&(px, py)) = self.stroke.last() {
-            surf.brush_line(px, py, x, y, 3, BLACK);
-            dirty.add(px, py, 6);
-        } else {
-            surf.stamp(x, y, 3, BLACK);
+    pub fn hit_test(&self, point: Point) -> Hit {
+        if let Some(row) = self.rows.iter().find(|row| {
+            row.toggle_box
+                .is_some_and(|toggle_box| toggle_box.contains(point))
+        }) {
+            return Hit::Toggle(row.number);
         }
-        dirty.add(x, y, 6);
-        self.stroke.push((x, y));
-        dirty
+        if self.selectable {
+            return self
+                .rows
+                .iter()
+                .find(|row| row.card.contains(point))
+                .map_or(Hit::Blank, |row| Hit::SelectCard(row.number));
+        }
+        self.rows
+            .iter()
+            .find(|row| row.text.contains(point))
+            .map_or(Hit::Blank, |row| Hit::Text(row.number))
     }
 
-    pub fn pen_up(&mut self) -> Option<Action> {
-        if self.stroke.is_empty() {
-            return None;
-        }
-        let mut x0 = i32::MAX;
-        let mut x1 = i32::MIN;
-        let mut y0 = i32::MAX;
-        let mut y1 = i32::MIN;
-        for &(x, y) in &self.stroke {
-            x0 = x0.min(x);
-            x1 = x1.max(x);
-            y0 = y0.min(y);
-            y1 = y1.max(y);
-        }
-        let first = self.stroke[0];
-        let last = *self.stroke.last().unwrap();
-        self.stroke.clear();
-
-        let x_span = x1 - x0;
-        let y_span = y1 - y0;
-        let horizontal = x_span >= 140
-            && x_span >= y_span.saturating_mul(2)
-            && (last.0 - first.0).abs() >= (last.1 - first.1).abs().saturating_mul(2);
-        if horizontal && !self.selectable {
-            let center_y = (y0 + y1) / 2;
-            if let Some(row) = self
+    pub fn begin_preview(&self, tool: PointerTool, point: Point) -> Option<Preview> {
+        let target = self.hit_test(point);
+        match target {
+            Hit::Toggle(number) => self
                 .rows
                 .iter()
-                .find(|row| center_y >= row.y0 && center_y <= row.y1)
-            {
-                return Some(Action::Delete(row.number));
+                .find(|row| row.number == number)
+                .and_then(|row| row.toggle_box)
+                .map(|rect| Preview::Press {
+                    tool,
+                    target,
+                    rect,
+                    start: point,
+                    pressed: true,
+                }),
+            Hit::SelectCard(number) => {
+                self.rows
+                    .iter()
+                    .find(|row| row.number == number)
+                    .map(|row| Preview::Press {
+                        tool,
+                        target,
+                        rect: row.card,
+                        start: point,
+                        pressed: true,
+                    })
             }
-        }
-
-        let vertical = y_span >= 140
-            && y_span >= x_span.saturating_mul(2)
-            && (last.1 - first.1).abs() >= (last.0 - first.0).abs().saturating_mul(2);
-        if vertical {
-            let page_count = self.total_rows.div_ceil(self.page_size.max(1));
-            if last.1 < first.1 {
-                self.page = (self.page + 1).min(page_count.saturating_sub(1));
-            } else {
-                self.page = self.page.saturating_sub(1);
-            }
-            return Some(Action::Redraw);
-        }
-
-        // A small contact outside every task row is the blank-space exit.
-        if x_span <= 45 && y_span <= 45 {
-            if let Some(row) = self.rows.iter().find(|row| {
-                row.toggle_box.is_some_and(|(left, top, right, bottom)| {
-                    first.0 >= left && first.0 <= right && first.1 >= top && first.1 <= bottom
-                })
-            }) {
-                return Some(Action::Toggle(row.number));
-            }
-            let row = self
+            Hit::Text(number) if tool == PointerTool::Pen && !self.selectable => self
                 .rows
                 .iter()
-                .find(|row| first.1 >= row.y0 && first.1 <= row.y1);
-            if self.selectable {
-                if let Some(row) = row {
-                    return Some(Action::Select(row.number));
+                .find(|row| row.number == number)
+                .map(|row| Preview::Strike {
+                    row: number,
+                    text: row.text,
+                    start: point,
+                    line_to: None,
+                }),
+            _ => None,
+        }
+    }
+
+    /// Resolve a tool-aware gesture without drawing it. Destructive strikes
+    /// are accepted only when the caller classified the contact as pen input.
+    pub fn interact(&mut self, gesture: Gesture) -> Option<Action> {
+        match gesture {
+            Gesture::Tap { at, .. } => Some(match self.hit_test(at) {
+                Hit::Toggle(number) => Action::Toggle(number),
+                Hit::SelectCard(number) => Action::Select(number),
+                Hit::Text(_) => Action::Redraw,
+                Hit::Blank => Action::Dismiss,
+            }),
+            Gesture::Strike {
+                tool: PointerTool::Pen,
+                from,
+                bounds,
+                ..
+            } if !self.selectable => Some(
+                self.rows
+                    .iter()
+                    .find(|row| row.text.contains(from) && row.text.intersects(bounds))
+                    .map_or(Action::Redraw, |row| Action::Delete(row.number)),
+            ),
+            Gesture::Swipe { from, to, .. } if (to.y - from.y).abs() > (to.x - from.x).abs() => {
+                let page_count = self.total_rows.div_ceil(self.page_size.max(1));
+                if to.y < from.y {
+                    self.page = (self.page + 1).min(page_count.saturating_sub(1));
+                } else {
+                    self.page = self.page.saturating_sub(1);
                 }
-            } else if row.is_some() {
-                return Some(Action::Redraw);
+                Some(Action::Redraw)
             }
-            if row.is_none() {
-                return Some(Action::Dismiss);
-            }
+            _ => Some(Action::Redraw),
         }
-        Some(Action::Redraw)
     }
 
     pub fn dismiss(self, surf: &mut Surface) {
@@ -272,168 +422,6 @@ impl PaperList {
     }
 }
 
-fn draw_status_box(surf: &mut Surface, x: usize, y: usize, size: usize, active: bool) {
-    let thickness = 3;
-    surf.fill_rect(x, y, size, thickness, BLACK);
-    surf.fill_rect(x, y + size - thickness, size, thickness, BLACK);
-    surf.fill_rect(x, y, thickness, size, BLACK);
-    surf.fill_rect(x + size - thickness, y, thickness, size, BLACK);
-    if active {
-        surf.brush_line(
-            (x + size / 5) as i32,
-            (y + size / 2) as i32,
-            (x + size * 2 / 5) as i32,
-            (y + size * 4 / 5) as i32,
-            3,
-            BLACK,
-        );
-        surf.brush_line(
-            (x + size * 2 / 5) as i32,
-            (y + size * 4 / 5) as i32,
-            (x + size * 4 / 5) as i32,
-            (y + size / 5) as i32,
-            3,
-            BLACK,
-        );
-    } else {
-        surf.brush_line(
-            (x + size / 4) as i32,
-            (y + size / 4) as i32,
-            (x + size * 3 / 4) as i32,
-            (y + size * 3 / 4) as i32,
-            3,
-            BLACK,
-        );
-        surf.brush_line(
-            (x + size * 3 / 4) as i32,
-            (y + size / 4) as i32,
-            (x + size / 4) as i32,
-            (y + size * 3 / 4) as i32,
-            3,
-            BLACK,
-        );
-    }
-}
-
-fn fit_line(font: &FontBook, text: &str, size: f32, max_width: usize) -> String {
-    if script::measure_ui(font, text, size) as usize <= max_width {
-        return text.to_string();
-    }
-    let mut chars: Vec<char> = text.chars().collect();
-    while !chars.is_empty() {
-        chars.pop();
-        let candidate = format!("{}…", chars.iter().collect::<String>());
-        if script::measure_ui(font, &candidate, size) as usize <= max_width {
-            return candidate;
-        }
-    }
-    "…".into()
-}
-
-fn blit_left(surf: &mut Surface, font: &FontBook, text: &str, size: f32, x: usize, y: usize) {
-    let line = script::rasterize_ui_line(font, text, size);
-    for row in 0..line.height {
-        for col in 0..line.width {
-            if line.mask[row * line.width + col] {
-                surf.put_px((x + col) as i32, (y + row) as i32, BLACK);
-            }
-        }
-    }
-}
-
-fn blit_centered(surf: &mut Surface, font: &FontBook, text: &str, size: f32, y: usize) {
-    let line = script::rasterize_ui_line(font, text, size);
-    let x = screen_w().saturating_sub(line.width) / 2;
-    for row in 0..line.height {
-        for col in 0..line.width {
-            if line.mask[row * line.width + col] {
-                surf.put_px((x + col) as i32, (y + row) as i32, BLACK);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn panel_with_rows() -> PaperList {
-        PaperList {
-            saved: Vec::new(),
-            rows: vec![
-                Row {
-                    number: 1,
-                    y0: 300,
-                    y1: 469,
-                    toggle_box: Some((1300, 330, 1360, 390)),
-                },
-                Row {
-                    number: 2,
-                    y0: 470,
-                    y1: 639,
-                    toggle_box: Some((1300, 520, 1360, 580)),
-                },
-            ],
-            stroke: Vec::new(),
-            selectable: false,
-            page: 0,
-            page_size: 12,
-            total_rows: 2,
-        }
-    }
-
-    #[test]
-    fn horizontal_strike_selects_its_row() {
-        let mut panel = panel_with_rows();
-        panel.stroke = vec![(200, 550), (500, 548), (900, 553)];
-        assert_eq!(panel.pen_up(), Some(Action::Delete(2)));
-    }
-
-    #[test]
-    fn blank_tap_dismisses_but_row_tap_does_not() {
-        let mut panel = panel_with_rows();
-        panel.stroke = vec![(800, 900), (802, 901)];
-        assert_eq!(panel.pen_up(), Some(Action::Dismiss));
-        panel.stroke = vec![(800, 350), (802, 351)];
-        assert_eq!(panel.pen_up(), Some(Action::Redraw));
-    }
-
-    #[test]
-    fn status_box_tap_toggles_its_row() {
-        let mut panel = panel_with_rows();
-        panel.stroke = vec![(1330, 550), (1332, 551)];
-        assert_eq!(panel.pen_up(), Some(Action::Toggle(2)));
-    }
-
-    #[test]
-    fn vertical_or_short_strokes_do_not_delete() {
-        let mut panel = panel_with_rows();
-        panel.stroke = vec![(500, 490), (505, 620)];
-        assert_eq!(panel.pen_up(), Some(Action::Redraw));
-        panel.stroke = vec![(500, 550), (590, 550)];
-        assert_eq!(panel.pen_up(), Some(Action::Redraw));
-    }
-
-    #[test]
-    fn selectable_rows_open_on_tap_and_never_delete_on_strike() {
-        let mut panel = panel_with_rows();
-        panel.selectable = true;
-        panel.stroke = vec![(800, 550), (802, 551)];
-        assert_eq!(panel.pen_up(), Some(Action::Select(2)));
-        panel.stroke = vec![(200, 550), (500, 548), (900, 553)];
-        assert_eq!(panel.pen_up(), Some(Action::Redraw));
-    }
-
-    #[test]
-    fn vertical_strokes_page_without_deleting_rows() {
-        let mut panel = panel_with_rows();
-        panel.total_rows = 20;
-        panel.page_size = 12;
-        panel.stroke = vec![(500, 1200), (502, 700), (498, 300)];
-        assert_eq!(panel.pen_up(), Some(Action::Redraw));
-        assert_eq!(panel.page, 1);
-        panel.stroke = vec![(500, 300), (502, 700), (498, 1200)];
-        assert_eq!(panel.pen_up(), Some(Action::Redraw));
-        assert_eq!(panel.page, 0);
-    }
-}
+#[path = "paper_list/tests.rs"]
+mod tests;

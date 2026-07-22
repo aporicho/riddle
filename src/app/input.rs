@@ -4,11 +4,13 @@
 
 use std::time::{Duration, Instant};
 
-use crate::domain::{self, AppEvent, Effect, Priority};
-use crate::platform::RefreshIntent;
-use crate::{display, ink, qtfb};
-
-use super::state::{State, TurnKind};
+use crate::domain::{self, AppEvent};
+use crate::fonts::FontBook;
+use crate::platform::{InputMode, PenFrame, PenPhase, PenTool};
+use crate::qtfb;
+use crate::surface::Surface;
+use crate::ui::pointer::{Gesture, GesturePolicy, HitRect, Point, PointerTool, PreviewBacking};
+use crate::ui::{font_settings, help, paper_list};
 
 /// A new pressure-bearing event after this silence closes an orphaned qtfb
 /// stroke before opening the next one. Elapsed time alone never releases a
@@ -26,6 +28,192 @@ pub(super) enum QtfbPenTransition {
         close_orphan: bool,
         recovered_press: bool,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PenGate {
+    Apply,
+    Ignore,
+    FadeAnswer,
+    CancelHeartbeat,
+}
+
+pub(super) enum ModalPreview {
+    Paper(paper_list::Preview),
+    Font(font_settings::Preview),
+    Help(help::HelpPreview),
+}
+
+impl ModalPreview {
+    fn rect(&self) -> HitRect {
+        match self {
+            Self::Paper(preview) => preview.rect(),
+            Self::Font(preview) => preview.rect(),
+            Self::Help(preview) => preview.rect(),
+        }
+    }
+
+    fn is_visible(&self) -> bool {
+        match self {
+            Self::Paper(preview) => preview.is_visible(),
+            Self::Font(preview) => preview.is_visible(),
+            Self::Help(preview) => preview.is_visible(),
+        }
+    }
+
+    fn update(&mut self, point: Point) -> bool {
+        match self {
+            Self::Paper(preview) => preview.update(point),
+            Self::Font(preview) => preview.update(point),
+            Self::Help(preview) => preview.update(point),
+        }
+    }
+
+    fn render(&self, surface: &mut Surface, fonts: &FontBook) {
+        match self {
+            Self::Paper(preview) => preview.render(surface),
+            Self::Font(preview) => preview.render(surface, fonts),
+            Self::Help(preview) => preview.render(surface),
+        }
+    }
+
+    fn release_gesture(self, end: Point, classified: Option<Gesture>) -> Gesture {
+        match self {
+            Self::Paper(preview) => preview.release_gesture(end, classified),
+            Self::Font(preview) => preview.release_gesture(end),
+            Self::Help(preview) => preview.release_gesture(end),
+        }
+    }
+}
+
+pub(super) struct ActiveModalPreview {
+    target: ModalPreview,
+    backing: PreviewBacking,
+}
+
+impl ActiveModalPreview {
+    fn new(target: ModalPreview, surface: &mut Surface, fonts: &FontBook) -> Option<Self> {
+        let backing = PreviewBacking::capture(surface, target.rect())?;
+        target.render(surface, fonts);
+        Some(Self { target, backing })
+    }
+
+    fn initial_damage(&self) -> Option<HitRect> {
+        self.target.is_visible().then(|| self.backing.rect())
+    }
+
+    fn update(&mut self, point: Point, surface: &mut Surface, fonts: &FontBook) -> Option<HitRect> {
+        if !self.target.update(point) {
+            return None;
+        }
+        self.backing.restore(surface);
+        self.target.render(surface, fonts);
+        Some(self.backing.rect())
+    }
+
+    fn finish(
+        self,
+        end: Point,
+        classified: Option<Gesture>,
+        surface: &mut Surface,
+    ) -> (Gesture, HitRect) {
+        self.backing.restore(surface);
+        (
+            self.target.release_gesture(end, classified),
+            self.backing.rect(),
+        )
+    }
+}
+
+pub(super) struct ModalContact {
+    pub(super) tool: PointerTool,
+    pub(super) points: Vec<Point>,
+    pub(super) started_at: Instant,
+    preview: Option<ActiveModalPreview>,
+}
+
+impl ModalContact {
+    pub(super) fn begin(tool: PointerTool, x: i32, y: i32) -> Self {
+        Self {
+            tool,
+            points: vec![Point::new(x, y)],
+            started_at: Instant::now(),
+            preview: None,
+        }
+    }
+
+    pub(super) fn push(&mut self, tool: PointerTool, x: i32, y: i32) -> bool {
+        if self.tool != tool {
+            return false;
+        }
+        self.points.push(Point::new(x, y));
+        true
+    }
+
+    pub(super) fn classify(self) -> Option<Gesture> {
+        GesturePolicy::default().classify(self.tool, &self.points, self.started_at.elapsed())
+    }
+
+    pub(super) fn last_point(&self) -> Point {
+        self.points
+            .last()
+            .copied()
+            .unwrap_or_else(|| Point::new(0, 0))
+    }
+
+    pub(super) fn classified(&self) -> Option<Gesture> {
+        GesturePolicy::default().classify(self.tool, &self.points, self.started_at.elapsed())
+    }
+
+    pub(super) fn attach_preview(
+        &mut self,
+        target: ModalPreview,
+        surface: &mut Surface,
+        fonts: &FontBook,
+    ) -> Option<HitRect> {
+        let preview = ActiveModalPreview::new(target, surface, fonts)?;
+        let damage = preview.initial_damage();
+        self.preview = Some(preview);
+        damage
+    }
+
+    pub(super) fn update_preview(
+        &mut self,
+        point: Point,
+        surface: &mut Surface,
+        fonts: &FontBook,
+    ) -> Option<HitRect> {
+        self.preview.as_mut()?.update(point, surface, fonts)
+    }
+
+    pub(super) fn finish_preview(&mut self, surface: &mut Surface) -> Option<(Gesture, HitRect)> {
+        let classified = self.classified();
+        let end = self.last_point();
+        self.preview
+            .take()
+            .map(|preview| preview.finish(end, classified, surface))
+    }
+}
+
+/// Decide a contact before it can mutate the page. Locked modes continue to
+/// receive events, but only a fresh marker-tip Down has semantic meaning.
+pub(super) fn gate_pen_frame(
+    mode: InputMode,
+    frame: PenFrame,
+    answer_visible: bool,
+    heartbeat_in_flight: bool,
+) -> PenGate {
+    if mode != InputMode::AnimationLocked {
+        return PenGate::Apply;
+    }
+    let fresh_pen_down = frame.tool == PenTool::Pen && frame.phase == PenPhase::Down;
+    if heartbeat_in_flight && fresh_pen_down {
+        PenGate::CancelHeartbeat
+    } else if answer_visible && fresh_pen_down {
+        PenGate::FadeAnswer
+    } else {
+        PenGate::Ignore
+    }
 }
 
 /// Stateful repair for the qtfb v1 stream. It turns pressure-zero updates into
@@ -108,7 +296,7 @@ struct ActivePenTrace {
 }
 
 impl PenTrace {
-    pub(super) fn begin(&mut self, source: &'static str, x: i32, y: i32) {
+    pub(super) fn begin(&mut self, source: &'static str, _x: i32, _y: i32) {
         if self.active.is_some() {
             return;
         }
@@ -126,7 +314,6 @@ impl PenTrace {
             recovered_press: 0,
             recovered_release: 0,
         });
-        eprintln!("magic-paper: event=pen-session-start session={id} source={source} x={x} y={y}");
     }
 
     pub(super) fn qtfb_edge(&mut self, input_type: i32, recovered: bool) {
@@ -195,9 +382,9 @@ impl PenTrace {
     }
 }
 
-/// Owns the pure priority model and translates its cancellation effects into
-/// today's concrete runtime state. This adapter disappears once the rest of
-/// the loop consumes `Effect` directly.
+/// Keeps the domain model informed about accepted physical input. Output
+/// cancellation is deliberately handled by the input gate: requested answers
+/// ignore contacts, while only unfinished automatic heartbeats are preempted.
 pub(super) struct InputPriority {
     model: domain::Model,
 }
@@ -209,67 +396,8 @@ impl InputPriority {
         }
     }
 
-    pub(super) fn begin_pen(
-        &mut self,
-        state: &mut State,
-        turn_kind: TurnKind,
-        surf: &mut crate::surface::Surface,
-        disp: &display::Display,
-        user_ink: &mut ink::Ink,
-    ) -> bool {
-        let output_priority = match turn_kind {
-            TurnKind::Heartbeat => Priority::AutomaticOutput,
-            TurnKind::User => Priority::RequestedOutput,
-        };
-        let has_output = matches!(
-            state,
-            State::Drinking { .. } | State::Thinking { .. } | State::Replying { .. }
-        );
-        if has_output {
-            domain::reduce(
-                &mut self.model,
-                AppEvent::OutputStarted {
-                    priority: output_priority,
-                },
-            );
-        }
-        let effects = domain::reduce(&mut self.model, AppEvent::UserInputStarted);
-        if !effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::CancelOutput { .. }))
-        {
-            return false;
-        }
-
-        let old = std::mem::replace(state, State::Listening { last_pen: None });
-        let (region, request) = match old {
-            State::Drinking { region, rx, .. } => (Some(region), Some(rx)),
-            State::Thinking { rx, .. } => (None, Some(rx)),
-            State::Replying { plan, rx, .. } => (Some(plan.region), rx),
-            other => {
-                *state = other;
-                return false;
-            }
-        };
-        if let Some(request) = request {
-            request.cancel("user-input-priority");
-        }
-        if effects.contains(&Effect::ClearTransientOutput) {
-            if let Some(region) = region.filter(|region| !region.is_empty()) {
-                let (x, y, w, h) = region.rect();
-                surf.fill_rect(
-                    x as usize,
-                    y as usize,
-                    w as usize,
-                    h as usize,
-                    crate::surface::WHITE,
-                );
-                disp.present_region(x, y, w, h, RefreshIntent::Ink);
-            }
-            user_ink.clear();
-        }
-        eprintln!("magic-paper: event=output-interrupted reason=user-input");
-        true
+    pub(super) fn begin_pen(&mut self) {
+        let _ = domain::reduce(&mut self.model, AppEvent::UserInputStarted);
     }
 
     pub(super) fn end_pen(&mut self) {
@@ -286,102 +414,5 @@ impl InputPriority {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stationary_contact_has_no_time_driven_release() {
-        let started = Instant::now();
-        let mut state = QtfbPenState::default();
-        assert_eq!(
-            state.transition(qtfb::INPUT_PEN_UPDATE, 40, started),
-            QtfbPenTransition::Draw {
-                close_orphan: false,
-                recovered_press: true,
-            }
-        );
-        assert_eq!(
-            state.transition(
-                qtfb::INPUT_PEN_UPDATE,
-                40,
-                started + Duration::from_millis(500),
-            ),
-            QtfbPenTransition::Draw {
-                close_orphan: false,
-                recovered_press: false,
-            }
-        );
-    }
-
-    #[test]
-    fn pressure_zero_update_is_release_only_while_down() {
-        let now = Instant::now();
-        let mut state = QtfbPenState::default();
-        assert_eq!(
-            state.transition(qtfb::INPUT_PEN_UPDATE, 0, now),
-            QtfbPenTransition::Hover
-        );
-        assert!(matches!(
-            state.transition(qtfb::INPUT_PEN_UPDATE, 40, now),
-            QtfbPenTransition::Draw { .. }
-        ));
-        assert_eq!(
-            state.transition(qtfb::INPUT_PEN_UPDATE, 0, now),
-            QtfbPenTransition::Release {
-                was_down: true,
-                recovered: true,
-            }
-        );
-    }
-
-    #[test]
-    fn pressure_event_after_long_gap_closes_lost_release_first() {
-        let started = Instant::now();
-        let mut state = QtfbPenState::default();
-        assert!(matches!(
-            state.transition(qtfb::INPUT_PEN_UPDATE, 40, started),
-            QtfbPenTransition::Draw {
-                recovered_press: true,
-                ..
-            }
-        ));
-        assert_eq!(
-            state.transition(qtfb::INPUT_PEN_UPDATE, 40, started + QTFB_ORPHAN_GAP,),
-            QtfbPenTransition::Draw {
-                close_orphan: true,
-                recovered_press: true,
-            }
-        );
-    }
-
-    #[test]
-    fn only_first_visible_point_requests_urgent_flush() {
-        let mut trace = PenTrace::default();
-        trace.begin("test", 10, 20);
-        assert!(trace.ink_changed());
-        assert!(!trace.ink_changed());
-        trace.finish("test");
-    }
-
-    #[test]
-    fn background_epoch_reset_forgets_old_contact() {
-        let now = Instant::now();
-        let mut state = QtfbPenState::default();
-        assert!(matches!(
-            state.transition(qtfb::INPUT_PEN_UPDATE, 40, now),
-            QtfbPenTransition::Draw { .. }
-        ));
-        state.reset();
-        assert_eq!(
-            state.transition(qtfb::INPUT_PEN_UPDATE, 0, now),
-            QtfbPenTransition::Hover
-        );
-    }
-
-    #[test]
-    fn pen_sequences_never_emit_zero_even_after_wrap() {
-        let mut sequence = PenSequence(u64::MAX);
-        assert_eq!(sequence.next(), 1);
-        assert_eq!(sequence.next(), 2);
-    }
-}
+#[path = "input/tests.rs"]
+mod tests;

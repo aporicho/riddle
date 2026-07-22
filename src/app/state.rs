@@ -33,7 +33,7 @@ pub(super) enum State {
         /// directives at the stream tail are still applied and remembered.
         page_full: bool,
     },
-    Lingering {
+    AnswerVisible {
         until: Instant,
         region: BBox,
     },
@@ -42,6 +42,10 @@ pub(super) enum State {
         next: Instant,
         region: BBox,
     },
+    /// The reply is fully erased, but a contact that began while input was
+    /// locked is still physically down. Keep swallowing it until its Up, then
+    /// re-enable writing so only a later, fresh Down can make page ink.
+    AwaitingPenUp,
     /// The guide panel. `panel: None` = dismissed, waiting for pen-up so the
     /// dismissing touch doesn't leave a mark on the page.
     Help {
@@ -105,6 +109,10 @@ pub(super) struct ConjurePlan {
 }
 
 pub(super) struct WritePlan {
+    /// Monotonic origin for layout/animation telemetry. It starts when the
+    /// first paper-safe text event reaches the UI, before background layout.
+    pub(super) created_at: Instant,
+    pub(super) first_damage_logged: bool,
     pub(super) strokes: Vec<Vec<(i32, i32)>>,
     pub(super) stroke_i: usize,
     pub(super) point_i: usize,
@@ -116,4 +124,13 @@ pub(super) struct WritePlan {
     pub(super) layout: Option<LayoutJob>,
     pub(super) queued_text: String,
     pub(super) layout_font: Option<fonts::FontBook>,
+    /// Before any pixel is drawn, sentence-sized stream events are briefly
+    /// coalesced. A fast, short answer is then centered as one measured block;
+    /// a still-open answer falls back to top-safe streaming on the next UI tick.
+    pub(super) initial_buffering: bool,
+    /// Unicode grapheme clusters that survived fitting and will leave visible
+    /// ink. Hidden overflow must not extend the answer dwell time.
+    pub(super) visible_graphemes: usize,
+    /// A layout worker had to omit overflow at the minimum configured size.
+    pub(super) truncated: bool,
 }

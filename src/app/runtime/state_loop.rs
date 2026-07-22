@@ -6,7 +6,7 @@ use super::super::reply::{oracle_excuse, plan_reply_async, region_all_white};
 use super::super::state::{State, TurnKind};
 use super::super::timing::{heartbeat_deadline, heartbeat_retry_interval, unix_now};
 use super::super::turn_controller::{consume_first_event, FirstEventContext};
-use super::{Engine, DRINK_STAGES, DRINK_STAGE_DELAY, IDLE_PREASK};
+use super::{input_mode_for_state, Engine, DRINK_STAGES, DRINK_STAGE_DELAY, IDLE_PREASK};
 use crate::fb::screen_h;
 use crate::platform::RefreshIntent;
 use crate::{agent, ink, tasks, ui};
@@ -17,7 +17,7 @@ mod reply;
 impl Engine<'_> {
     pub(super) fn tick_state(&mut self) {
         let state = std::mem::replace(&mut self.state, State::Listening { last_pen: None });
-        self.state = match state {
+        let next_state = match state {
             State::Listening { last_pen } => self.tick_listening(last_pen),
             State::Drinking {
                 stage,
@@ -32,7 +32,7 @@ impl Engine<'_> {
                 rx,
                 page_full,
             } => self.tick_replying(plan, next, rx, page_full),
-            State::Lingering { until, region } => {
+            State::AnswerVisible { until, region } => {
                 if Instant::now() >= until {
                     State::FadingReply {
                         stage: 0,
@@ -40,7 +40,7 @@ impl Engine<'_> {
                         region,
                     }
                 } else {
-                    State::Lingering { until, region }
+                    State::AnswerVisible { until, region }
                 }
             }
             State::Help { panel, until } => self.tick_help(panel, until),
@@ -55,11 +55,19 @@ impl Engine<'_> {
                 next,
                 region,
             } => self.tick_fading(stage, next, region),
+            State::AwaitingPenUp => State::AwaitingPenUp,
             stable @ (State::TaskList { .. }
             | State::TodoList { .. }
             | State::FontList { .. }
             | State::HistoryList { .. }
             | State::ReaderList { .. }) => stable,
+        };
+        let mode = input_mode_for_state(&next_state);
+        let mode_ready = !self.input_mode_failed() && self.set_input_mode(mode);
+        self.state = if mode == crate::platform::InputMode::Writing && !mode_ready {
+            State::AwaitingPenUp
+        } else {
+            next_state
         };
     }
 
@@ -102,6 +110,11 @@ impl Engine<'_> {
         }
         if ui::help::looks_like_question_mark(self.user_ink.stroke_list()) {
             return self.open_gesture_help();
+        }
+        if !self.set_input_mode(crate::platform::InputMode::AnimationLocked) {
+            cancel_speculative(&mut self.speculative, "input mode lock failed");
+            self.pen_trace.finish("input-mode-lock-failed");
+            return State::Listening { last_pen: None };
         }
         if !self.oracle.is_available() {
             cancel_speculative(&mut self.speculative, "oracle unavailable");
@@ -237,6 +250,9 @@ impl Engine<'_> {
         match agent::take_pending() {
             Ok(Some(reply)) => {
                 eprintln!("magic-paper: showing queued scheduled result");
+                if !self.set_input_mode(crate::platform::InputMode::AnimationLocked) {
+                    return State::Listening { last_pen: None };
+                }
                 self.turn_kind = TurnKind::User;
                 self.turn_reply.clear();
                 State::Replying {
@@ -291,6 +307,9 @@ impl Engine<'_> {
     }
 
     fn begin_heartbeat(&mut self, due: Vec<tasks::Task>, lease: tasks::SchedulerLease) -> State {
+        if !self.set_input_mode(crate::platform::InputMode::AnimationLocked) {
+            return State::Listening { last_pen: None };
+        }
         self.ui_scheduler_lease = Some(lease);
         self.next_heartbeat = Some(Instant::now() + heartbeat_retry_interval());
         self.turn_id = 0;
@@ -409,7 +428,9 @@ impl Engine<'_> {
 
     fn tick_help(&mut self, panel: Option<ui::help::Help>, until: Instant) -> State {
         match panel {
-            Some(panel) if self.stylus_tapped || Instant::now() >= until => {
+            Some(panel)
+                if Instant::now() >= until && !self.stylus_on && self.modal_contact.is_none() =>
+            {
                 let region = panel.dismiss(&mut self.surf);
                 let (x, y, width, height) = region.rect();
                 self.disp
@@ -439,7 +460,11 @@ impl Engine<'_> {
         let (x, y, width, height) = region.rect();
         self.disp.present_region(x, y, width, height, intent);
         if stage + 1 >= STAGES {
-            State::Listening { last_pen: None }
+            if self.pen_down {
+                State::AwaitingPenUp
+            } else {
+                State::Listening { last_pen: None }
+            }
         } else {
             State::FadingReply {
                 stage: stage + 1,

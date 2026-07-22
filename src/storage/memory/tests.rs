@@ -24,7 +24,7 @@ fn round_trip_and_reload() {
         dir: store.dir.clone(),
         entries: Vec::new(),
     };
-    reopened.load();
+    reopened.load().unwrap();
     assert_eq!(reopened.entries.len(), 1);
     assert_eq!(reopened.entries[0].transcript, "hello\ttom\nnewline");
     assert_eq!(reopened.entries[0].reply, "Hello. Who writes?");
@@ -84,7 +84,7 @@ fn history_panel_deletes_newest_visible_entry_and_strokes() {
         dir: store.dir.clone(),
         entries: Vec::new(),
     };
-    reopened.load();
+    reopened.load().unwrap();
     assert_eq!(reopened.entries[0].id, 101);
     let _ = std::fs::remove_dir_all(&store.dir);
 }
@@ -104,4 +104,105 @@ fn spoken_dates_read_like_a_diary() {
     let date = spoken_date(1783467000);
     assert!(date.contains("of July"), "{date}");
     assert!(date.contains("6th") || date.contains("7th"), "{date}");
+}
+
+#[test]
+fn corrupt_memory_index_is_reported_and_never_overwritten() {
+    let mut store = tmp_store("corrupt-index");
+    store.append(100, "第一问", "第一答", &Vec::new());
+    let cached_id = store.entries[0].id;
+    let corrupt = b"broken memory record\n";
+    std::fs::write(store.index_path(), corrupt).unwrap();
+
+    let error = store.load().unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(store.entries.len(), 1);
+    assert_eq!(store.entries[0].id, cached_id);
+    assert!(store
+        .try_append(101, "第二问", "第二答", &Vec::new())
+        .is_err());
+    assert_eq!(std::fs::read(store.index_path()).unwrap(), corrupt);
+    assert!(!store.strokes_path(101).exists());
+    let _ = std::fs::remove_dir_all(store.dir);
+}
+
+#[test]
+fn non_not_found_memory_read_error_is_not_an_empty_store() {
+    let mut store = tmp_store("read-error");
+    std::fs::create_dir(store.index_path()).unwrap();
+    let error = store.load().unwrap_err();
+    assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(store.try_append(100, "问题", "回答", &Vec::new()).is_err());
+    assert!(store.index_path().is_dir());
+    let _ = std::fs::remove_dir_all(store.dir);
+}
+
+#[test]
+fn failed_atomic_memory_index_replacement_keeps_old_index_and_strokes() {
+    let mut store = tmp_store("atomic-failure");
+    store
+        .try_append(100, "第一问", "第一答", &vec![vec![(1, 1, 1)]])
+        .unwrap();
+    let before = std::fs::read(store.index_path()).unwrap();
+    std::fs::create_dir(store.dir.join("index.tsv.new")).unwrap();
+
+    assert!(store
+        .try_append(101, "第二问", "第二答", &vec![vec![(2, 2, 2)]])
+        .is_err());
+    assert_eq!(std::fs::read(store.index_path()).unwrap(), before);
+    assert!(store.strokes_path(100).exists());
+    assert!(!store.strokes_path(101).exists());
+    assert_eq!(store.entries.len(), 1);
+    let _ = std::fs::remove_dir_all(store.dir);
+}
+
+#[test]
+fn stroke_write_failure_cannot_publish_a_memory_index_entry() {
+    let mut store = tmp_store("stroke-failure");
+    std::fs::create_dir(store.dir.join("100.strokes.new")).unwrap();
+    assert!(store
+        .try_append(100, "问题", "回答", &vec![vec![(1, 1, 1)]])
+        .is_err());
+    assert!(!store.index_path().exists());
+    assert!(store.entries.is_empty());
+    let _ = std::fs::remove_dir_all(store.dir);
+}
+
+#[test]
+fn concurrent_memory_appends_preserve_both_turns_and_allocate_unique_ids() {
+    let original = tmp_store("concurrent-add");
+    let dir = original.dir.clone();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let mut handles = Vec::new();
+    for transcript in ["第一问", "第二问"] {
+        let dir = dir.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            let mut store = MemoryStore {
+                dir,
+                entries: Vec::new(),
+            };
+            barrier.wait();
+            store
+                .try_append(100, transcript, "回答", &Vec::new())
+                .unwrap()
+        }));
+    }
+    barrier.wait();
+    let ids = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_ne!(ids[0], ids[1]);
+    let mut reopened = MemoryStore {
+        dir: dir.clone(),
+        entries: Vec::new(),
+    };
+    reopened.load().unwrap();
+    assert_eq!(reopened.entries.len(), 2);
+    assert!(reopened
+        .entries
+        .iter()
+        .all(|entry| reopened.strokes_path(entry.id).exists()));
+    let _ = std::fs::remove_dir_all(dir);
 }

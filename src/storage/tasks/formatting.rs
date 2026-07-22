@@ -39,22 +39,3 @@ pub(super) fn escape(s: &str) -> String {
         .replace('\t', "\\t")
         .replace('\n', "\\n")
 }
-
-pub(super) fn unescape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('t') => out.push('\t'),
-            Some('n') => out.push('\n'),
-            Some('\\') => out.push('\\'),
-            Some(other) => out.push(other),
-            None => {}
-        }
-    }
-    out
-}

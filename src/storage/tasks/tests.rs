@@ -25,7 +25,7 @@ fn reopen(dir: &std::path::Path) -> TaskStore {
         dir: dir.to_path_buf(),
         entries: Vec::new(),
     };
-    store.load();
+    store.load().unwrap();
     store
 }
 
@@ -115,7 +115,7 @@ fn persists_due_and_successful_run_state() {
         dir: dir.clone(),
         entries: Vec::new(),
     };
-    reopened.load();
+    reopened.load().unwrap();
     assert_eq!(reopened.entries.len(), 1);
     assert_eq!(reopened.entries[0].instruction, "讲一个黑暗冷笑话");
     assert_eq!(reopened.entries[0].next_due, 1601);
@@ -166,7 +166,7 @@ fn pauses_resumes_modifies_and_deletes_persistently() {
         dir: dir.clone(),
         entries: Vec::new(),
     };
-    reopened.load();
+    reopened.load().unwrap();
     assert_eq!(reopened.entries, s.entries);
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -189,7 +189,7 @@ fn paper_checkbox_toggles_and_restarts_the_interval() {
 fn migrates_old_active_tasks_and_limits_the_list_to_nine() {
     let mut s = tmp_store("migration-and-limit");
     std::fs::write(s.index_path(), "7\t300\t900\t旧任务\\n一行\n").unwrap();
-    s.load();
+    s.load().unwrap();
     assert_eq!(s.entries.len(), 1);
     assert!(!s.entries[0].paused);
     assert_eq!(s.entries[0].instruction, "旧任务\n一行");
@@ -317,4 +317,69 @@ fn scheduler_lease_excludes_every_other_ui_or_agent_owner() {
     assert!(!external_scheduler_active_in(&dir));
     assert!(acquire_scheduler_lease_in(&dir).is_ok());
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn corrupt_task_index_is_reported_and_never_rewritten_as_an_empty_store() {
+    let mut store = tmp_store("corrupt-index");
+    add(&mut store, "任务 每五分钟提醒喝水", 1000);
+    let cached = store.entries.clone();
+    let corrupt = b"not-a-valid-task-record\n";
+    std::fs::write(store.index_path(), corrupt).unwrap();
+
+    let error = store.load().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(store.entries, cached, "failed load replaced the cache");
+    assert!(store
+        .apply_from_transcript("任务 每十分钟提醒休息", 1001)
+        .unwrap_err()
+        .contains("load task store"));
+    assert_eq!(std::fs::read(store.index_path()).unwrap(), corrupt);
+    let _ = std::fs::remove_dir_all(store.dir);
+}
+
+#[test]
+fn non_not_found_task_read_error_is_not_treated_as_an_empty_store() {
+    let mut store = tmp_store("read-error");
+    std::fs::create_dir(store.index_path()).unwrap();
+    let error = store.load().unwrap_err();
+    assert_ne!(error.kind(), io::ErrorKind::NotFound);
+    assert!(store
+        .apply_from_transcript("任务 每五分钟提醒喝水", 1000)
+        .is_err());
+    assert!(store.index_path().is_dir());
+    let _ = std::fs::remove_dir_all(store.dir);
+}
+
+#[test]
+fn failed_atomic_task_replacement_preserves_the_previous_index() {
+    let mut store = tmp_store("atomic-failure");
+    add(&mut store, "任务 每五分钟提醒喝水", 1000);
+    let before = std::fs::read(store.index_path()).unwrap();
+    std::fs::create_dir(store.dir.join("index.tsv.new")).unwrap();
+
+    assert!(store
+        .apply_from_transcript("任务 每十分钟提醒休息", 1001)
+        .unwrap_err()
+        .contains("save task change"));
+    assert_eq!(std::fs::read(store.index_path()).unwrap(), before);
+    assert_eq!(store.entries.len(), 1);
+    assert_eq!(store.entries[0].instruction, "提醒喝水");
+    let _ = std::fs::remove_dir_all(store.dir);
+}
+
+#[test]
+fn task_lock_failure_is_propagated_without_touching_the_index() {
+    let mut store = tmp_store("lock-failure");
+    add(&mut store, "任务 每五分钟提醒喝水", 1000);
+    let before = std::fs::read(store.index_path()).unwrap();
+    std::fs::remove_file(store.dir.join("index.lock")).unwrap();
+    std::fs::create_dir(store.dir.join("index.lock")).unwrap();
+
+    assert!(store
+        .apply_from_transcript("任务 每十分钟提醒休息", 1001)
+        .unwrap_err()
+        .contains("lock task store"));
+    assert_eq!(std::fs::read(store.index_path()).unwrap(), before);
+    let _ = std::fs::remove_dir_all(store.dir);
 }

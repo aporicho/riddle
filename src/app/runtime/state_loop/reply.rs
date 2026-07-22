@@ -2,13 +2,45 @@ use std::time::Instant;
 
 use super::super::super::lists::{accept_transcript, apply_local_command};
 use super::super::super::oracle_controller::{OracleTurn, StreamPoll};
-use super::super::super::reply_controller::{ReplyCompletion, ReplyController};
+use super::super::super::reply::{append_overflow_marker, recenter_undrawn_reply};
+use super::super::super::reply_controller::{
+    answer_visible_duration, ReplyCompletion, ReplyController,
+};
 use super::super::super::state::{State, TurnKind, WritePlan};
 use super::super::super::timing::{heartbeat_deadline, unix_now};
 use super::super::Engine;
 use crate::oracle::Event;
 use crate::platform::RefreshIntent;
 use crate::{reader, runtime_control};
+
+const MAX_READY_STREAM_EVENTS_PER_TICK: usize = 32;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DrainOutcome {
+    Pending,
+    Boundary,
+    Saturated,
+}
+
+/// Consume a bounded batch without confusing "exactly hit the event budget"
+/// with "the producer is still open". A saturated initial batch gets one more
+/// UI tick to observe Pending/Closed before committing its vertical anchor.
+fn drain_ready_stream(
+    mut poll: impl FnMut() -> StreamPoll,
+    mut consume: impl FnMut(StreamPoll) -> bool,
+) -> DrainOutcome {
+    for _ in 0..MAX_READY_STREAM_EVENTS_PER_TICK {
+        let item = poll();
+        let pending = matches!(&item, StreamPoll::Pending);
+        if consume(item) {
+            return DrainOutcome::Boundary;
+        }
+        if pending {
+            return DrainOutcome::Pending;
+        }
+    }
+    DrainOutcome::Saturated
+}
 
 impl Engine<'_> {
     pub(super) fn tick_replying(
@@ -18,17 +50,39 @@ impl Engine<'_> {
         mut rx: Option<OracleTurn>,
         mut page_full: bool,
     ) -> State {
-        if let Some(turn) = rx.as_ref() {
-            let close = self.consume_stream_poll(turn.poll_stream(), &mut plan, &mut page_full);
-            if close {
-                rx = None;
+        // Drain the small semantic-event queue before deciding initial layout.
+        // A stream that completed just after its first sentence can therefore
+        // be centered as one block without paying one UI tick per chunk.
+        let drain = match rx.as_ref() {
+            Some(turn) => drain_ready_stream(
+                || turn.poll_stream(),
+                |poll| self.consume_stream_poll(poll, &mut plan, &mut page_full),
+            ),
+            None => DrainOutcome::Pending,
+        };
+        if drain == DrainOutcome::Boundary {
+            rx = None;
+            if recenter_undrawn_reply(&self.font, &mut plan, &self.turn_reply) {
+                // A provisional top-safe fit may have rejected a tail that the
+                // complete centered fit can retain at one uniform smaller size.
+                page_full = false;
             }
+        } else if drain == DrainOutcome::Saturated && plan.initial_buffering {
+            // The 32nd item may have been the final queued Event; defer layout
+            // for one reactor tick so the following Closed can be observed.
+            return State::Replying {
+                plan,
+                next,
+                rx,
+                page_full,
+            };
         }
         let mut next = next;
         let effects = ReplyController::tick(
             &mut plan,
             &mut next,
             rx.is_some(),
+            &mut page_full,
             &mut self.surf,
             Instant::now(),
         );
@@ -40,6 +94,9 @@ impl Engine<'_> {
                 damage.height,
                 RefreshIntent::Ink,
             );
+            if let Some(latency_ms) = effects.first_damage_latency_ms {
+                eprintln!("magic-paper: event=reply-first-display-submit latency_ms={latency_ms}");
+            }
         }
         if let Some(completion) = effects.completion {
             self.complete_reply(completion, page_full)
@@ -94,7 +151,11 @@ impl Engine<'_> {
         match event {
             Event::Ink(more) => {
                 push_reply(&mut self.turn_reply, &more);
+                let was_page_full = *page_full;
                 ReplyController::append_text(&self.font, plan, page_full, &more);
+                if !was_page_full && *page_full {
+                    append_overflow_marker(&self.font, plan);
+                }
             }
             Event::LocalCommand(command) => {
                 self.turn_transcript = Some(command.clone());
@@ -104,7 +165,11 @@ impl Engine<'_> {
                     self.next_heartbeat = heartbeat_deadline(&self.task_store);
                 }
                 push_reply(&mut self.turn_reply, &reply);
+                let was_page_full = *page_full;
                 ReplyController::append_text(&self.font, plan, page_full, &reply);
+                if !was_page_full && *page_full {
+                    append_overflow_marker(&self.font, plan);
+                }
             }
             Event::Reader(query) => self.open_delayed_reader(query.as_deref()),
             Event::FullRefresh => self.disp.request_refresh(self.surf.w, self.surf.h),
@@ -156,17 +221,18 @@ impl Engine<'_> {
             self.ui_scheduler_lease = None;
         }
         eprintln!(
-            "magic-paper: event=turn-render-complete kind={} reply_chars={} transcript_chars={} page_full={} memory_enabled={}",
+            "magic-paper: event=turn-render-complete kind={} reply_chars={} transcript_chars={} page_full={} memory_enabled={} reply_elapsed_ms={}",
             if self.turn_kind == TurnKind::User { "user" } else { "heartbeat" },
             self.turn_reply.chars().count(),
             self.turn_transcript.as_deref().map(str::chars).map(Iterator::count).unwrap_or(0),
             page_full,
             self.store.is_some(),
+            completion.reply_elapsed_ms,
         );
         self.turn_strokes.clear();
         self.turn_tasks.clear();
-        State::Lingering {
-            until: Instant::now() + completion.linger,
+        State::AnswerVisible {
+            until: Instant::now() + answer_visible_duration(completion.visible_graphemes),
             region: completion.region,
         }
     }
@@ -207,4 +273,58 @@ fn push_reply(target: &mut String, text: &str) {
         target.push(' ');
     }
     target.push_str(text);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use super::{drain_ready_stream, DrainOutcome, MAX_READY_STREAM_EVENTS_PER_TICK};
+    use crate::app::oracle_controller::StreamPoll;
+    use crate::oracle::Event;
+
+    #[test]
+    fn saturated_batch_defers_layout_until_closed_can_be_observed() {
+        let mut polls = (0..MAX_READY_STREAM_EVENTS_PER_TICK)
+            .map(|index| StreamPoll::Event(Event::Ink(format!("chunk-{index}"))))
+            .chain(std::iter::once(StreamPoll::Closed { request_id: 7 }))
+            .collect::<VecDeque<_>>();
+        let mut consumed = 0;
+        let first = drain_ready_stream(
+            || polls.pop_front().expect("poll fixture exhausted"),
+            |poll| {
+                consumed += 1;
+                matches!(poll, StreamPoll::Closed { .. })
+            },
+        );
+        assert_eq!(first, DrainOutcome::Saturated);
+        assert_eq!(consumed, MAX_READY_STREAM_EVENTS_PER_TICK);
+        assert_eq!(polls.len(), 1);
+
+        let second = drain_ready_stream(
+            || polls.pop_front().expect("closed fixture missing"),
+            |poll| {
+                consumed += 1;
+                matches!(poll, StreamPoll::Closed { .. })
+            },
+        );
+        assert_eq!(second, DrainOutcome::Boundary);
+        assert_eq!(consumed, MAX_READY_STREAM_EVENTS_PER_TICK + 1);
+        assert!(polls.is_empty());
+    }
+
+    #[test]
+    fn ready_batch_stops_immediately_at_pending() {
+        let mut polls = VecDeque::from([
+            StreamPoll::Event(Event::Ink("ready".into())),
+            StreamPoll::Pending,
+            StreamPoll::Event(Event::Ink("later".into())),
+        ]);
+        let outcome = drain_ready_stream(
+            || polls.pop_front().expect("poll fixture exhausted"),
+            |_| false,
+        );
+        assert_eq!(outcome, DrainOutcome::Pending);
+        assert_eq!(polls.len(), 1);
+    }
 }

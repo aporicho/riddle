@@ -13,7 +13,11 @@
 //! Delete the directory and the diary forgets. `RIDDLE_MEMORY=off` disables
 //! remembering entirely (no storage, no context sent with requests).
 
-use std::io::Write as _;
+use crate::storage::persistence::{
+    atomic_write, invalid_line, lock_exclusive, read_optional_utf8, unescape_field, StoreLock,
+};
+use std::collections::HashSet;
+use std::io;
 use std::path::PathBuf;
 
 /// Newest memories the diary keeps. Older pages are forgotten (pruned).
@@ -68,8 +72,16 @@ impl MemoryStore {
             dir,
             entries: Vec::new(),
         };
-        store.load();
-        Some(store)
+        match store.load() {
+            Ok(()) => Some(store),
+            Err(error) => {
+                eprintln!(
+                    "riddle: memory disabled because {} could not be loaded: {error}",
+                    store.index_path().display()
+                );
+                None
+            }
+        }
     }
 
     fn index_path(&self) -> PathBuf {
@@ -80,9 +92,13 @@ impl MemoryStore {
         self.dir.join(format!("{id}.strokes"))
     }
 
-    fn persist_index(&self) -> std::io::Result<()> {
+    fn lock_exclusive(&self) -> io::Result<StoreLock> {
+        lock_exclusive(&self.dir)
+    }
+
+    fn persist_index(&self, entries: &[Entry]) -> io::Result<()> {
         let mut out = String::new();
-        for entry in &self.entries {
+        for entry in entries {
             out.push_str(&format!(
                 "{}\t{}\t{}\n",
                 entry.id,
@@ -90,31 +106,86 @@ impl MemoryStore {
                 escape(&entry.reply)
             ));
         }
-        let temporary = self.dir.join("index.tsv.new");
-        std::fs::write(&temporary, out)?;
-        std::fs::rename(temporary, self.index_path())
+        atomic_write(&self.index_path(), out.as_bytes())
     }
 
-    fn load(&mut self) {
-        let Ok(text) = std::fs::read_to_string(self.index_path()) else {
-            return;
+    fn load(&mut self) -> io::Result<()> {
+        let _lock = self.lock_exclusive()?;
+        self.load_unlocked()
+    }
+
+    fn load_unlocked(&mut self) -> io::Result<()> {
+        let path = self.index_path();
+        let Some(contents) = read_optional_utf8(&path)? else {
+            self.entries.clear();
+            return Ok(());
         };
-        for line in text.lines() {
-            let mut cols = line.splitn(3, '\t');
-            let (Some(id), Some(t), Some(r)) = (cols.next(), cols.next(), cols.next()) else {
-                continue;
-            };
-            let Ok(id) = id.parse() else { continue };
-            self.entries.push(Entry {
+        let mut entries = Vec::new();
+        let mut ids = HashSet::new();
+        for (line_index, line) in contents.lines().enumerate() {
+            let line_number = line_index + 1;
+            if line.is_empty() {
+                return Err(invalid_line(&path, line_number, "empty memory record"));
+            }
+            let columns = line.split('\t').collect::<Vec<_>>();
+            if columns.len() != 3 {
+                return Err(invalid_line(
+                    &path,
+                    line_number,
+                    "memory record must contain exactly three columns",
+                ));
+            }
+            let id = columns[0]
+                .parse::<u64>()
+                .map_err(|_| invalid_line(&path, line_number, "invalid memory id"))?;
+            if !ids.insert(id) {
+                return Err(invalid_line(&path, line_number, "duplicate memory id"));
+            }
+            let transcript = unescape_field(columns[1])
+                .map_err(|error| invalid_line(&path, line_number, &error.to_string()))?;
+            let reply = unescape_field(columns[2])
+                .map_err(|error| invalid_line(&path, line_number, &error.to_string()))?;
+            entries.push(Entry {
                 id,
-                transcript: unescape(t),
-                reply: unescape(r),
+                transcript,
+                reply,
             });
+            if entries.len() > MAX_MEMORIES {
+                return Err(invalid_line(
+                    &path,
+                    line_number,
+                    "memory store exceeds its maximum size",
+                ));
+            }
         }
+        self.entries = entries;
+        Ok(())
     }
 
     /// Remember a finished turn. Strokes are decimated before writing.
     pub fn append(&mut self, id: u64, transcript: &str, reply: &str, strokes: &Strokes) {
+        if let Err(error) = self.try_append(id, transcript, reply, strokes) {
+            eprintln!("riddle: memory not kept: {error}");
+        }
+    }
+
+    fn try_append(
+        &mut self,
+        requested_id: u64,
+        transcript: &str,
+        reply: &str,
+        strokes: &Strokes,
+    ) -> io::Result<u64> {
+        let _lock = self.lock_exclusive()?;
+        self.load_unlocked()?;
+        let id = match self.entries.iter().map(|entry| entry.id).max() {
+            Some(previous) if requested_id <= previous => {
+                previous.checked_add(1).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "memory id space is exhausted")
+                })?
+            }
+            _ => requested_id,
+        };
         let thin = decimate(strokes);
         let mut lines = String::new();
         for s in &thin {
@@ -128,54 +199,44 @@ impl MemoryStore {
             }
             lines.push('\n');
         }
-        if let Err(e) = std::fs::write(self.strokes_path(id), lines) {
-            eprintln!("riddle: memory strokes not kept: {e}");
+        let strokes_path = self.strokes_path(id);
+        if let Err(error) = atomic_write(&strokes_path, lines.as_bytes()) {
+            // No index entry can refer to this id yet. If the replacement was
+            // published but its final directory sync failed, remove that
+            // otherwise-orphaned stroke file before reporting failure.
+            let _ = std::fs::remove_file(&strokes_path);
+            return Err(error);
         }
         let entry = Entry {
             id,
             transcript: transcript.to_string(),
             reply: reply.to_string(),
         };
-        let line = format!(
-            "{id}\t{}\t{}\n",
-            escape(&entry.transcript),
-            escape(&entry.reply)
-        );
-        let appended = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.index_path())
-            .and_then(|mut f| f.write_all(line.as_bytes()));
-        if let Err(e) = appended {
-            eprintln!("riddle: memory not kept: {e}");
-            return;
+        let mut updated = self.entries.clone();
+        updated.push(entry);
+        let drop_count = updated.len().saturating_sub(MAX_MEMORIES);
+        let dropped = updated[..drop_count]
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        let retained = updated.split_off(drop_count);
+        if let Err(error) = self.persist_index(&retained) {
+            let committed =
+                self.load_unlocked().is_ok() && self.entries.iter().any(|entry| entry.id == id);
+            if !committed {
+                let _ = std::fs::remove_file(&strokes_path);
+            }
+            return Err(error);
         }
-        self.entries.push(entry);
-        self.prune();
-    }
-
-    /// Forget the oldest pages beyond MAX_MEMORIES.
-    fn prune(&mut self) {
-        if self.entries.len() <= MAX_MEMORIES {
-            return;
+        self.entries = retained;
+        for dropped_id in dropped {
+            if let Err(error) = std::fs::remove_file(self.strokes_path(dropped_id)) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    eprintln!("riddle: pruned memory index but not strokes: {error}");
+                }
+            }
         }
-        let drop_n = self.entries.len() - MAX_MEMORIES;
-        for e in &self.entries[..drop_n] {
-            let _ = std::fs::remove_file(self.strokes_path(e.id));
-        }
-        self.entries.drain(..drop_n);
-        let mut out = String::new();
-        for e in &self.entries {
-            out.push_str(&format!(
-                "{}\t{}\t{}\n",
-                e.id,
-                escape(&e.transcript),
-                escape(&e.reply)
-            ));
-        }
-        if let Err(e) = std::fs::write(self.index_path(), out) {
-            eprintln!("riddle: memory prune failed: {e}");
-        }
+        Ok(id)
     }
 
     /// Load the pen strokes of one remembered page.
@@ -260,6 +321,11 @@ impl MemoryStore {
 
     /// Delete one of the newest `max` visible history rows and its strokes.
     pub fn delete_number(&mut self, number: usize, max: usize) -> Result<Entry, String> {
+        let _lock = self
+            .lock_exclusive()
+            .map_err(|error| format!("lock memory store: {error}"))?;
+        self.load_unlocked()
+            .map_err(|error| format!("load memory store: {error}"))?;
         let visible = self.entries.len().min(max);
         if number == 0 || number > visible {
             return Err(format!(
@@ -267,11 +333,17 @@ impl MemoryStore {
             ));
         }
         let index = self.entries.len() - number;
-        let entry = self.entries.remove(index);
-        if let Err(error) = self.persist_index() {
-            self.entries.insert(index, entry.clone());
+        let entry = self.entries[index].clone();
+        let mut updated = self.entries.clone();
+        updated.remove(index);
+        if let Err(error) = self.persist_index(&updated) {
+            let fallback = self.entries.clone();
+            if self.load_unlocked().is_err() {
+                self.entries = fallback;
+            }
             return Err(format!("save history deletion: {error}"));
         }
+        self.entries = updated;
         if let Err(error) = std::fs::remove_file(self.strokes_path(entry.id)) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 eprintln!("riddle: deleted history index but not strokes: {error}");
@@ -319,25 +391,6 @@ fn escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('\t', "\\t")
         .replace('\n', "\\n")
-}
-
-fn unescape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('t') => out.push('\t'),
-            Some('n') => out.push('\n'),
-            Some('\\') => out.push('\\'),
-            Some(other) => out.push(other),
-            None => {}
-        }
-    }
-    out
 }
 
 /// "the 6th of July, in the evening" — how the diary speaks of a moment.

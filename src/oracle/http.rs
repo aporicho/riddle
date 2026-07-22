@@ -343,6 +343,11 @@ impl HttpOracle {
         if request.cancelled.load(Ordering::Acquire) {
             return;
         }
+        let page_started = std::time::Instant::now();
+        let page_source = match &request.source {
+            PageSource::File(_) => "file",
+            PageSource::Capture(_) => "capture-png",
+        };
         let png = match load_page(&request.source, &request.cancelled) {
             Ok(bytes) => bytes,
             Err(error) if !request.cancelled.load(Ordering::Acquire) => {
@@ -359,6 +364,15 @@ impl HttpOracle {
             }
             Err(_) => return,
         };
+        eprintln!(
+            "magic-paper: event=page-prepared request={}:{} domain={} source={} latency_ms={} bytes={}",
+            std::process::id(),
+            request.request_id,
+            request.domain,
+            page_source,
+            page_started.elapsed().as_millis(),
+            png.len(),
+        );
         if request.cancelled.load(Ordering::Acquire) {
             return;
         }

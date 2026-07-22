@@ -11,8 +11,9 @@ pub(crate) enum Priority {
     #[allow(dead_code)] // Reserved for storage/cleanup effects in the next slice.
     Maintenance,
     AutomaticOutput,
-    RequestedOutput,
     UserInput,
+    #[allow(dead_code)] // Exercised by the pure policy contract and state gate tests.
+    RequestedOutput,
     #[allow(dead_code)] // Reserved for manager-forced lifecycle transitions.
     Lifecycle,
 }
@@ -46,6 +47,7 @@ pub(crate) enum AppEvent {
     #[allow(dead_code)] // Runtime currently starts already foregrounded.
     EnterForeground,
     EnterBackground,
+    #[allow(dead_code)] // Runtime transitions currently enforce this at the input gate.
     OutputStarted {
         priority: Priority,
     },
@@ -104,9 +106,16 @@ pub(crate) fn reduce(model: &mut Model, event: AppEvent) -> Vec<Effect> {
         }
         AppEvent::UserInputStarted => {
             model.user_input_active = true;
-            let Some(priority) = model.active_output.take() else {
+            let Some(priority) = model.active_output else {
                 return Vec::new();
             };
+            // A requested answer owns the paper until its animation reaches
+            // AnswerVisible; a contact then starts the explicit fade state.
+            // Only automatic heartbeat output is preempted immediately.
+            if priority != Priority::AutomaticOutput {
+                return Vec::new();
+            }
+            model.active_output = None;
             debug_assert!(Priority::UserInput > priority);
             vec![
                 Effect::CancelOutput { priority },
@@ -133,7 +142,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn user_input_has_priority_and_cancels_visible_output() {
+    fn requested_output_keeps_the_page_until_its_explicit_fade_state() {
         let mut model = Model::foreground();
         reduce(
             &mut model,
@@ -142,18 +151,10 @@ mod tests {
             },
         );
 
-        assert_eq!(
-            reduce(&mut model, AppEvent::UserInputStarted),
-            vec![
-                Effect::CancelOutput {
-                    priority: Priority::RequestedOutput,
-                },
-                Effect::ClearTransientOutput,
-            ]
-        );
+        assert!(reduce(&mut model, AppEvent::UserInputStarted).is_empty());
         assert!(model.user_input_active);
-        assert_eq!(model.active_output, None);
-        assert!(Priority::UserInput > Priority::RequestedOutput);
+        assert_eq!(model.active_output, Some(Priority::RequestedOutput));
+        assert!(Priority::RequestedOutput > Priority::UserInput);
     }
 
     #[test]
@@ -173,6 +174,27 @@ mod tests {
             vec![Effect::StartAutomaticOutput]
         );
         assert_eq!(model.active_output, Some(Priority::AutomaticOutput));
+    }
+
+    #[test]
+    fn user_input_preempts_only_automatic_output() {
+        let mut model = Model::foreground();
+        reduce(
+            &mut model,
+            AppEvent::OutputStarted {
+                priority: Priority::AutomaticOutput,
+            },
+        );
+        assert_eq!(
+            reduce(&mut model, AppEvent::UserInputStarted),
+            vec![
+                Effect::CancelOutput {
+                    priority: Priority::AutomaticOutput,
+                },
+                Effect::ClearTransientOutput,
+            ]
+        );
+        assert_eq!(model.active_output, None);
     }
 
     #[test]
@@ -221,8 +243,8 @@ mod tests {
     #[test]
     fn priorities_form_the_expected_preemption_order() {
         assert!(Priority::Lifecycle > Priority::UserInput);
-        assert!(Priority::UserInput > Priority::RequestedOutput);
-        assert!(Priority::RequestedOutput > Priority::AutomaticOutput);
+        assert!(Priority::RequestedOutput > Priority::UserInput);
+        assert!(Priority::UserInput > Priority::AutomaticOutput);
         assert!(Priority::AutomaticOutput > Priority::Maintenance);
     }
 }

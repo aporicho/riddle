@@ -13,7 +13,7 @@ use crate::{display, fonts, memory, oracle::Event, reader, runtime_control, task
 
 use super::lists::{accept_transcript, apply_local_command, HISTORY_VISIBLE};
 use super::oracle_controller::OracleTurn;
-use super::reply::{conjure, oracle_excuse, plan_reply_async};
+use super::reply::{conjure, oracle_excuse, plan_reply_async, plan_streaming_reply_async};
 use super::state::{State, TurnKind};
 use super::timing::heartbeat_deadline;
 
@@ -265,8 +265,13 @@ pub(super) fn request_reader(font: &fonts::FontBook, path: &Path) -> State {
 }
 
 fn replying(font: &fonts::FontBook, text: &str, rx: Option<OracleTurn>) -> State {
+    let plan = if rx.is_some() {
+        plan_streaming_reply_async(font, text)
+    } else {
+        plan_reply_async(font, text, None)
+    };
     State::Replying {
-        plan: plan_reply_async(font, text, None),
+        plan,
         next: Instant::now(),
         rx,
         page_full: false,

@@ -15,6 +15,8 @@ pub(super) struct LayoutResult {
     pub(super) strokes: Vec<Vec<(i32, i32)>>,
     pub(super) region: BBox,
     pub(super) next_y: i32,
+    pub(super) visible_graphemes: usize,
+    pub(super) truncated: bool,
 }
 
 pub(super) enum LayoutPoll {
@@ -33,6 +35,7 @@ impl LayoutJob {
         let (tx, rx) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
+        let started = std::time::Instant::now();
         std::thread::spawn(move || {
             if worker_cancelled.load(Ordering::Acquire) {
                 return;
@@ -41,11 +44,26 @@ impl LayoutJob {
             if worker_cancelled.load(Ordering::Acquire) {
                 return;
             }
-            let _ = tx.send(LayoutResult {
-                strokes: plan.strokes,
-                region: plan.region,
-                next_y: plan.next_y,
-            });
+            let strokes = plan.strokes.len();
+            let points = plan.strokes.iter().map(Vec::len).sum::<usize>();
+            let truncated = plan.truncated;
+            let delivered = tx
+                .send(LayoutResult {
+                    strokes: plan.strokes,
+                    region: plan.region,
+                    next_y: plan.next_y,
+                    visible_graphemes: plan.visible_graphemes,
+                    truncated,
+                })
+                .is_ok();
+            eprintln!(
+                "magic-paper: event=reply-layout-ready latency_ms={} strokes={} points={} truncated={} delivered={}",
+                started.elapsed().as_millis(),
+                strokes,
+                points,
+                truncated,
+                delivered,
+            );
         });
         Self { rx, cancelled }
     }

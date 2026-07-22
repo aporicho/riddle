@@ -404,67 +404,9 @@ mod local;
 use local::{emit_local_route, local_route};
 #[cfg(test)]
 use local::{evaluate_arithmetic, LocalRoute};
+mod paper;
 
-/// Does the visible draft contain screen-oriented formatting that should be
-/// rewritten semantically before it reaches physical paper?
-fn paper_answer_needs_rewrite(full: &str) -> bool {
-    let visible = full.split_once('\u{2042}').map(|p| p.0).unwrap_or(full);
-    let lower = visible.to_ascii_lowercase();
-    lower.contains("http://")
-        || lower.contains("https://")
-        || lower.contains("www.")
-        || visible.contains("](")
-        || visible.contains("**")
-        || visible.contains("```")
-        || visible.contains("cite")
-}
-
-/// A rare second pass: rewrite only the not-yet-inked tail as coherent paper
-/// prose. A clean prefix may already be on paper, so it is context only and
-/// must never be repeated.
-fn rewrite_paper_tail(
-    agent: &ureq::Agent,
-    base: &str,
-    key: &str,
-    model: &str,
-    written_prefix: &str,
-    draft_tail: &str,
-) -> Result<String, String> {
-    let instructions = "Rewrite only the remaining draft into the continuation that will be handwritten on physical paper. Preserve every fact, calculation, source name, and intended answer, but make it natural and concise. Text already written is context only: do not repeat or contradict it. Output only the rewritten continuation: no URL, Markdown, citation marker, reference list, search discussion, heading, or commentary. Use Traditional Chinese when the draft is Chinese.";
-    let input = format!(
-        "Text already written on paper:\n{}\n\nRemaining draft to rewrite:\n{}",
-        written_prefix.trim(),
-        draft_tail.trim(),
-    );
-    let body = format!(
-        concat!(
-            "{{\"model\":{},\"stream\":false,\"store\":false,",
-            "\"max_output_tokens\":600,\"reasoning\":{{\"effort\":\"none\"}},",
-            "\"instructions\":{},\"input\":{}}}"
-        ),
-        json_quote(model),
-        json_quote(instructions),
-        json_quote(&input),
-    );
-    let response = agent
-        .post(&format!("{base}/responses"))
-        .set("Authorization", &format!("Bearer {key}"))
-        .set("Content-Type", "application/json")
-        .send_string(&body)
-        .map_err(|e| match e {
-            ureq::Error::Status(code, r) => format!(
-                "http {code}: {}",
-                r.into_string().unwrap_or_default().trim()
-            ),
-            other => other.to_string(),
-        })?
-        .into_string()
-        .map_err(|e| e.to_string())?;
-    let rewritten = extract_assistant_text(&response)
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| "paper editor returned no answer".to_string())?;
-    Ok(rewritten.trim().to_string())
-}
+use paper::{paper_answer_needs_rewrite, paper_safe_fallback, rewrite_paper_tail};
 
 #[cfg(test)]
 mod tests;

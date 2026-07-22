@@ -29,6 +29,33 @@ pub(crate) enum PenTool {
     Eraser,
 }
 
+/// Application-level input ownership negotiated with the Remagic runtime.
+///
+/// `Writing` is the only mode in which the host may draw its low-latency ink
+/// overlay. The two locked modes still forward normalized input events so the
+/// application can dismiss an answer or interact with a modal paper page, but
+/// the host must never render those contacts as page ink.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InputMode {
+    Writing,
+    AnimationLocked,
+    Modal,
+}
+
+impl InputMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Writing => "writing",
+            Self::AnimationLocked => "animation_locked",
+            Self::Modal => "modal",
+        }
+    }
+
+    pub(crate) const fn ink_enabled(self) -> bool {
+        matches!(self, Self::Writing)
+    }
+}
+
 /// One normalized pen frame. Pressure is always in the inclusive 0..=4096
 /// range. `kernel_time_ns` is the kernel's CLOCK_MONOTONIC event timestamp
 /// when available, or CLOCK_MONOTONIC receive time when a transport/driver

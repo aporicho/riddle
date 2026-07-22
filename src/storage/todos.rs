@@ -1,5 +1,9 @@
 //! Persistent unscheduled TODO notes, separate from recurring tasks.
 
+use crate::storage::persistence::{
+    atomic_write, invalid_line, lock_exclusive, read_optional_utf8, unescape_field, StoreLock,
+};
+use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 
@@ -42,33 +46,74 @@ impl TodoStore {
             dir,
             entries: Vec::new(),
         };
-        store.load();
-        Some(store)
+        match store.load() {
+            Ok(()) => Some(store),
+            Err(error) => {
+                eprintln!(
+                    "magic-paper: TODOs disabled because {} could not be loaded: {error}",
+                    store.index_path().display()
+                );
+                None
+            }
+        }
     }
 
     fn index_path(&self) -> PathBuf {
         self.dir.join("index.tsv")
     }
 
-    fn load(&mut self) {
-        let Ok(text) = std::fs::read_to_string(self.index_path()) else {
-            return;
+    fn lock_exclusive(&self) -> io::Result<StoreLock> {
+        lock_exclusive(&self.dir)
+    }
+
+    fn load(&mut self) -> io::Result<()> {
+        let _lock = self.lock_exclusive()?;
+        self.load_unlocked()
+    }
+
+    fn load_unlocked(&mut self) -> io::Result<()> {
+        let path = self.index_path();
+        let Some(contents) = read_optional_utf8(&path)? else {
+            self.entries.clear();
+            return Ok(());
         };
-        for line in text.lines() {
-            let Some((id, text)) = line.split_once('\t') else {
-                continue;
-            };
-            let Ok(id) = id.parse() else {
-                continue;
-            };
-            self.entries.push(Todo {
-                id,
-                text: unescape(text),
-            });
-            if self.entries.len() == MAX_TODOS {
-                break;
+        let mut entries = Vec::new();
+        let mut ids = HashSet::new();
+        for (line_index, line) in contents.lines().enumerate() {
+            let line_number = line_index + 1;
+            if line.is_empty() {
+                return Err(invalid_line(&path, line_number, "empty TODO record"));
+            }
+            let columns = line.split('\t').collect::<Vec<_>>();
+            if columns.len() != 2 {
+                return Err(invalid_line(
+                    &path,
+                    line_number,
+                    "TODO record must contain exactly two columns",
+                ));
+            }
+            let id = columns[0]
+                .parse::<u64>()
+                .map_err(|_| invalid_line(&path, line_number, "invalid TODO id"))?;
+            if !ids.insert(id) {
+                return Err(invalid_line(&path, line_number, "duplicate TODO id"));
+            }
+            let text = unescape_field(columns[1])
+                .map_err(|error| invalid_line(&path, line_number, &error.to_string()))?;
+            if text.trim().is_empty() {
+                return Err(invalid_line(&path, line_number, "TODO text is empty"));
+            }
+            entries.push(Todo { id, text });
+            if entries.len() > MAX_TODOS {
+                return Err(invalid_line(
+                    &path,
+                    line_number,
+                    "TODO store exceeds its maximum size",
+                ));
             }
         }
+        self.entries = entries;
+        Ok(())
     }
 
     fn persist(&self) -> io::Result<()> {
@@ -76,9 +121,13 @@ impl TodoStore {
         for todo in &self.entries {
             out.push_str(&format!("{}\t{}\n", todo.id, escape(&todo.text)));
         }
-        let tmp = self.dir.join("index.tsv.new");
-        std::fs::write(&tmp, out)?;
-        std::fs::rename(tmp, self.index_path())
+        atomic_write(&self.index_path(), out.as_bytes())
+    }
+
+    fn recover_after_failed_persist(&mut self, fallback: Vec<Todo>) {
+        if self.load_unlocked().is_err() {
+            self.entries = fallback;
+        }
     }
 
     /// `TODO 买牛奶` adds a note. The bare word is reserved for opening the
@@ -91,37 +140,48 @@ impl TodoStore {
         let Some(text) = parse_add(transcript) else {
             return Ok(None);
         };
+        let _lock = self
+            .lock_exclusive()
+            .map_err(|error| format!("lock TODO store: {error}"))?;
+        self.load_unlocked()
+            .map_err(|error| format!("load TODO store: {error}"))?;
         if self.entries.len() >= MAX_TODOS {
             return Err(format!("at most {MAX_TODOS} TODOs are allowed"));
         }
-        let id = self
-            .entries
-            .iter()
-            .map(|todo| todo.id)
-            .max()
-            .map(|id| id.saturating_add(1))
-            .unwrap_or(now)
-            .max(now);
+        let id = match self.entries.iter().map(|todo| todo.id).max() {
+            Some(previous) => previous
+                .checked_add(1)
+                .ok_or_else(|| "TODO id space is exhausted".to_string())?
+                .max(now),
+            None => now,
+        };
+        let old_entries = self.entries.clone();
         let todo = Todo { id, text };
         self.entries.push(todo.clone());
         if let Err(e) = self.persist() {
-            self.entries.pop();
+            self.recover_after_failed_persist(old_entries);
             return Err(format!("save TODO: {e}"));
         }
         Ok(Some(todo))
     }
 
     pub fn delete_number(&mut self, number: usize) -> Result<Todo, String> {
+        let _lock = self
+            .lock_exclusive()
+            .map_err(|error| format!("lock TODO store: {error}"))?;
+        self.load_unlocked()
+            .map_err(|error| format!("load TODO store: {error}"))?;
         if number == 0 || number > self.entries.len() {
             return Err(format!(
                 "TODO {number} does not exist (there are {})",
                 self.entries.len()
             ));
         }
+        let old_entries = self.entries.clone();
         let index = number - 1;
         let todo = self.entries.remove(index);
         if let Err(e) = self.persist() {
-            self.entries.insert(index, todo.clone());
+            self.recover_after_failed_persist(old_entries);
             return Err(format!("save TODO deletion: {e}"));
         }
         Ok(todo)
@@ -176,25 +236,6 @@ fn escape(s: &str) -> String {
         .replace('\n', "\\n")
 }
 
-fn unescape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('t') => out.push('\t'),
-            Some('n') => out.push('\n'),
-            Some('\\') => out.push('\\'),
-            Some(other) => out.push(other),
-            None => {}
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,9 +275,88 @@ mod tests {
             dir: dir.clone(),
             entries: Vec::new(),
         };
-        reopened.load();
+        reopened.load().unwrap();
         assert_eq!(reopened.entries, store.entries);
         assert_eq!(reopened.panel_lines(), vec!["1  給媽媽打電話"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn corrupt_todo_index_is_reported_and_never_overwritten() {
+        let mut store = tmp_store("corrupt-index");
+        store.add_from_transcript("TODO 买牛奶", 100).unwrap();
+        let cached = store.entries.clone();
+        let corrupt = b"broken TODO record\n";
+        std::fs::write(store.index_path(), corrupt).unwrap();
+
+        let error = store.load().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(store.entries, cached);
+        assert!(store
+            .add_from_transcript("TODO 打电话", 101)
+            .unwrap_err()
+            .contains("load TODO store"));
+        assert_eq!(std::fs::read(store.index_path()).unwrap(), corrupt);
+        let _ = std::fs::remove_dir_all(store.dir);
+    }
+
+    #[test]
+    fn non_not_found_todo_read_error_is_not_an_empty_store() {
+        let mut store = tmp_store("read-error");
+        std::fs::create_dir(store.index_path()).unwrap();
+        let error = store.load().unwrap_err();
+        assert_ne!(error.kind(), io::ErrorKind::NotFound);
+        assert!(store.add_from_transcript("TODO 买牛奶", 100).is_err());
+        assert!(store.index_path().is_dir());
+        let _ = std::fs::remove_dir_all(store.dir);
+    }
+
+    #[test]
+    fn failed_atomic_todo_replacement_keeps_original_bytes_and_cache() {
+        let mut store = tmp_store("atomic-failure");
+        store.add_from_transcript("TODO 买牛奶", 100).unwrap();
+        let before = std::fs::read(store.index_path()).unwrap();
+        std::fs::create_dir(store.dir.join("index.tsv.new")).unwrap();
+
+        assert!(store
+            .add_from_transcript("TODO 打电话", 101)
+            .unwrap_err()
+            .contains("save TODO"));
+        assert_eq!(std::fs::read(store.index_path()).unwrap(), before);
+        assert_eq!(store.panel_lines(), vec!["1  买牛奶"]);
+        let _ = std::fs::remove_dir_all(store.dir);
+    }
+
+    #[test]
+    fn concurrent_todo_additions_reload_under_one_lock() {
+        let original = tmp_store("concurrent-add");
+        let dir = original.dir.clone();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for (command, now) in [("TODO 买牛奶", 100), ("TODO 打电话", 100)] {
+            let dir = dir.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let mut store = TodoStore {
+                    dir,
+                    entries: Vec::new(),
+                };
+                barrier.wait();
+                store.add_from_transcript(command, now).unwrap().unwrap().id
+            }));
+        }
+        barrier.wait();
+        let ids = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_ne!(ids[0], ids[1]);
+        let mut reopened = TodoStore {
+            dir: dir.clone(),
+            entries: Vec::new(),
+        };
+        reopened.load().unwrap();
+        assert_eq!(reopened.entries.len(), 2);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

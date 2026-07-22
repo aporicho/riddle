@@ -57,6 +57,18 @@ pub(super) fn json_str_field(s: &str, key: &str) -> Option<String> {
 /// We only trust text that belongs to an assistant message (the user echo also
 /// contains a "text" field, which we must NOT return).
 pub(super) fn extract_assistant_text(s: &str) -> Option<String> {
+    // OpenAI Responses non-streaming objects do not promise object-key
+    // ordering.  In particular, compatible gateways commonly serialize
+    // `content` before `role`; the legacy substring parser below then starts
+    // looking only after the text and incorrectly reports an empty answer.
+    // Decode the documented response shape first and keep the old event-line
+    // fallback for pi's incremental RPC messages.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(s) {
+        if let Some(text) = response_assistant_text(&value) {
+            return Some(text);
+        }
+    }
+
     // Require this line to be an assistant message.
     if !s.contains("\"role\":\"assistant\"") {
         return None;
@@ -107,6 +119,31 @@ pub(super) fn extract_assistant_text(s: &str) -> Option<String> {
     } else {
         Some(out)
     }
+}
+
+fn response_assistant_text(value: &serde_json::Value) -> Option<String> {
+    let output = value.get("output")?.as_array()?;
+    for message in output {
+        if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let mut answer = String::new();
+        for part in message.get("content")?.as_array()? {
+            if !matches!(
+                part.get("type").and_then(serde_json::Value::as_str),
+                Some("output_text" | "text")
+            ) {
+                continue;
+            }
+            if let Some(text) = part.get("text").and_then(serde_json::Value::as_str) {
+                answer.push_str(text);
+            }
+        }
+        if !answer.is_empty() {
+            return Some(answer);
+        }
+    }
+    None
 }
 
 pub(super) fn json_quote(s: &str) -> String {

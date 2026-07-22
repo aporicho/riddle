@@ -1,13 +1,15 @@
 use std::time::Instant;
 
-use super::super::input::QtfbPenTransition;
+mod modal;
+
+use super::super::input::{gate_pen_frame, PenGate, QtfbPenTransition};
 use super::super::lifecycle::LifecycleStage;
-use super::super::lists::{finish_paper_list_stroke, PaperListContext};
 use super::super::oracle_controller::cancel_speculative;
 use super::super::state::{State, TurnKind};
 use super::Engine;
 use crate::fb::BBox;
 use crate::platform::{DamageRect, PenFrame, PenPhase, PenTool, RefreshIntent};
+use crate::ui::pointer::PointerTool;
 use crate::{pen, qtfb};
 
 impl Engine<'_> {
@@ -50,121 +52,164 @@ impl Engine<'_> {
         self.stylus_on = writing;
         self.stylus_tapped |= writing;
         if !writing {
+            self.update_modal_contact(PointerTool::Pen, frame.x, frame.y);
             return self.finish_pen_contact();
         }
-        self.begin_user_input();
         let radius = 2 + frame.pressure as i32 * 3 / pen::MAX_PRESSURE;
-        self.apply_frame(frame, "raw", radius)
+        match self.prepare_pen_frame(frame) {
+            Ok(true) => self.apply_frame(frame, "raw", radius),
+            Ok(false) => true,
+            Err(()) => false,
+        }
     }
 
-    fn begin_user_input(&mut self) {
-        if self.input_priority.begin_pen(
-            &mut self.state,
-            self.turn_kind,
-            &mut self.surf,
-            self.disp,
-            &mut self.user_ink,
-        ) {
-            self.ui_scheduler_lease = None;
-            self.turn_kind = TurnKind::User;
-            self.turn_tasks.clear();
-            self.turn_reply.clear();
-            self.turn_transcript = None;
+    /// Return true when this frame may reach the page/modal handler, false
+    /// when it is intentionally swallowed, and Err when fail-closed mode
+    /// negotiation requires the application loop to stop.
+    fn prepare_pen_frame(&mut self, frame: PenFrame) -> Result<bool, ()> {
+        self.pen_down = true;
+        let action = gate_pen_frame(
+            self.input_mode,
+            frame,
+            matches!(self.state, State::AnswerVisible { .. }),
+            self.turn_kind == TurnKind::Heartbeat
+                && matches!(
+                    self.state,
+                    State::Thinking { .. }
+                        | State::Replying { .. }
+                        | State::AnswerVisible { .. }
+                        | State::FadingReply { .. }
+                ),
+        );
+        match action {
+            PenGate::Apply => {
+                self.input_priority.begin_pen();
+                Ok(true)
+            }
+            PenGate::Ignore => Ok(false),
+            PenGate::FadeAnswer => {
+                self.begin_answer_fade();
+                Ok(false)
+            }
+            PenGate::CancelHeartbeat => {
+                if self.cancel_heartbeat_for_pen() {
+                    self.input_priority.begin_pen();
+                    Ok(true)
+                } else {
+                    Err(())
+                }
+            }
         }
+    }
+
+    fn begin_answer_fade(&mut self) {
+        let old = std::mem::replace(&mut self.state, State::AwaitingPenUp);
+        self.state = match old {
+            State::AnswerVisible { region, .. } => {
+                eprintln!("magic-paper: event=answer-fade-trigger source=fresh-pen-down");
+                State::FadingReply {
+                    stage: 0,
+                    next: Instant::now(),
+                    region,
+                }
+            }
+            other => other,
+        };
+    }
+
+    fn cancel_heartbeat_for_pen(&mut self) -> bool {
+        let old = std::mem::replace(&mut self.state, State::AwaitingPenUp);
+        let (request, region) = match old {
+            State::Thinking { rx, .. } => (Some(rx), None),
+            State::Replying { plan, rx, .. } => (rx, Some(plan.region)),
+            State::AnswerVisible { region, .. } | State::FadingReply { region, .. } => {
+                (None, Some(region))
+            }
+            other => {
+                self.state = other;
+                return true;
+            }
+        };
+        if let Some(request) = request {
+            request.cancel("heartbeat-preempted-by-pen");
+        }
+        if let Some(region) = region.filter(|region| !region.is_empty()) {
+            let (x, y, width, height) = region.rect();
+            self.surf.fill_rect(
+                x as usize,
+                y as usize,
+                width as usize,
+                height as usize,
+                crate::surface::WHITE,
+            );
+            self.disp
+                .present_region(x, y, width, height, RefreshIntent::MonoQuality);
+        }
+        self.ui_scheduler_lease = None;
+        self.turn_kind = TurnKind::User;
+        self.turn_tasks.clear();
+        self.turn_strokes.clear();
+        self.turn_reply.clear();
+        self.turn_transcript = None;
+        self.turn_failed = false;
+        self.user_ink.clear();
+        if !self.set_input_mode(crate::platform::InputMode::Writing) {
+            return false;
+        }
+        self.state = State::Listening { last_pen: None };
+        eprintln!("magic-paper: event=heartbeat-cancelled reason=fresh-pen-down");
+        true
     }
 
     fn apply_frame(&mut self, frame: PenFrame, source: &'static str, radius: i32) -> bool {
-        if matches!(
-            self.state,
-            State::Listening { .. } | State::Lingering { .. } | State::FadingReply { .. }
-        ) {
-            self.pen_trace.begin(source, frame.x, frame.y);
+        if self.input_mode == crate::platform::InputMode::Modal {
+            self.record_modal_pen(frame);
+            return true;
         }
-        match &mut self.state {
-            State::TaskList { panel }
-            | State::TodoList { panel }
-            | State::HistoryList { panel }
-            | State::ReaderList { panel, .. } => {
-                self.pen_down = true;
-                add_damage(
-                    &mut self.ink_dirty,
-                    panel.pen_point(&mut self.surf, frame.x, frame.y),
-                );
-            }
-            State::FontList { panel } => {
-                self.pen_down = true;
-                add_damage(
-                    &mut self.ink_dirty,
-                    panel.pen_point(&mut self.surf, frame.x, frame.y),
-                );
-            }
-            State::Listening { last_pen } => {
-                cancel_speculative(&mut self.speculative, "writing resumed");
-                self.speculative_attempted = false;
-                self.pen_down = true;
-                let damage = draw_page_point(&mut self.user_ink, &mut self.surf, frame, radius);
-                add_damage(&mut self.ink_dirty, damage);
-                self.ink_flush_urgent |= self.pen_trace.ink_changed();
-                *last_pen = Some(Instant::now());
-            }
-            State::Lingering { region, .. } | State::FadingReply { region, .. } => {
-                let (x, y, w, h) = region.rect();
-                self.surf.fill_rect(
-                    x as usize,
-                    y as usize,
-                    w as usize,
-                    h as usize,
-                    crate::surface::WHITE,
-                );
-                self.disp.present_region(x, y, w, h, RefreshIntent::Ink);
-                self.pen_down = true;
-                let damage = draw_page_point(&mut self.user_ink, &mut self.surf, frame, radius);
-                add_damage(&mut self.ink_dirty, damage);
-                self.ink_flush_urgent |= self.pen_trace.ink_changed();
-                self.state = State::Listening {
-                    last_pen: Some(Instant::now()),
-                };
-            }
-            _ => {}
+        if let State::Listening { last_pen } = &mut self.state {
+            cancel_speculative(&mut self.speculative, "writing resumed");
+            self.speculative_attempted = false;
+            self.pen_down = true;
+            let damage = draw_page_point(&mut self.user_ink, &mut self.surf, frame, radius);
+            // Draw before starting/logging telemetry so stderr backpressure can
+            // never delay the first local ink mutation.
+            self.pen_trace.begin(source, frame.x, frame.y);
+            add_damage(&mut self.ink_dirty, damage);
+            self.ink_flush_urgent |= self.pen_trace.ink_changed();
+            *last_pen = Some(Instant::now());
         }
         true
     }
 
     fn finish_pen_contact(&mut self) -> bool {
         self.input_priority.end_pen();
-        if is_list(&self.state) {
-            self.pen_down = false;
-            return !self.finish_list_stroke();
+        let was_down = std::mem::replace(&mut self.pen_down, false);
+        self.stylus_on = false;
+        if self
+            .modal_contact
+            .as_ref()
+            .is_some_and(|contact| contact.tool == PointerTool::Pen)
+        {
+            return self.finish_modal_contact(PointerTool::Pen);
         }
-        if self.pen_down {
-            self.pen_down = false;
+        if is_list(&self.state) {
+            return true;
+        }
+        if matches!(self.state, State::AwaitingPenUp) {
+            if !self.set_input_mode(crate::platform::InputMode::Writing) {
+                return false;
+            }
+            self.state = State::Listening { last_pen: None };
+            eprintln!("magic-paper: event=answer-fade-contact-released writing_reenabled=true");
+            return true;
+        }
+        if was_down && matches!(self.state, State::Listening { .. }) {
             self.user_ink.pen_up();
             if let State::Listening { last_pen } = &mut self.state {
                 *last_pen = Some(Instant::now());
             }
         }
         true
-    }
-
-    fn finish_list_stroke(&mut self) -> bool {
-        let path = finish_paper_list_stroke(
-            &mut self.state,
-            PaperListContext {
-                memory_store: &mut self.store,
-                task_store: &mut self.task_store,
-                todo_store: &mut self.todo_store,
-                next_heartbeat: &mut self.next_heartbeat,
-                surf: &mut self.surf,
-                font: &mut self.font,
-                disp: self.disp,
-            },
-        );
-        if let Some(path) = path {
-            self.reader_target = Some(path);
-            true
-        } else {
-            false
-        }
     }
 
     pub(super) fn pump_host_events(&mut self) -> bool {
@@ -202,7 +247,7 @@ impl Engine<'_> {
             } => {
                 self.trace_host_release(&event, recovered);
                 if was_down {
-                    self.pen_down = false;
+                    self.update_modal_contact(PointerTool::Pen, event.x, event.y);
                     return self.finish_forwarded_pen();
                 }
                 return true;
@@ -211,7 +256,10 @@ impl Engine<'_> {
                 close_orphan,
                 recovered_press,
             } => {
-                if close_orphan && !self.close_orphaned_pen() {
+                if close_orphan
+                    && orphan_recovery_may_release(&self.state)
+                    && !self.close_orphaned_pen()
+                {
                     return false;
                 }
                 let phase = if recovered_press {
@@ -225,17 +273,18 @@ impl Engine<'_> {
                 )
             }
         };
-        self.begin_user_input();
         self.stylus_on = true;
         self.stylus_tapped = true;
-        if matches!(
-            self.state,
-            State::Listening { .. } | State::Lingering { .. } | State::FadingReply { .. }
-        ) {
-            self.pen_trace.begin("qtfb", frame.x, frame.y);
+        match self.prepare_pen_frame(frame) {
+            Ok(true) => {
+                let keep_running =
+                    self.apply_frame(frame, "qtfb", 2 + event.pressure_percent() / 45);
+                self.pen_trace.qtfb_edge(event.input_type, recovered_press);
+                keep_running
+            }
+            Ok(false) => true,
+            Err(()) => false,
         }
-        self.pen_trace.qtfb_edge(event.input_type, recovered_press);
-        self.apply_frame(frame, "qtfb", 2 + event.pressure_percent() / 45)
     }
 
     fn trace_host_release(&mut self, event: &qtfb::InputEvent, recovered: bool) {
@@ -245,30 +294,18 @@ impl Engine<'_> {
             self.pen_trace.recovered_release();
             eprintln!("magic-paper: event=pen-release-recovered source=qtfb reason=pressure-zero");
         }
-        self.input_priority.end_pen();
-        self.stylus_on = false;
     }
 
     fn close_orphaned_pen(&mut self) -> bool {
-        self.input_priority.end_pen();
         self.pen_trace.recovered_release();
         eprintln!(
             "magic-paper: event=pen-release-recovered source=qtfb reason=new-pressure-after-gap"
         );
-        self.pen_down = false;
-        self.stylus_on = false;
         self.finish_forwarded_pen()
     }
 
     fn finish_forwarded_pen(&mut self) -> bool {
-        if is_list(&self.state) {
-            return !self.finish_list_stroke();
-        }
-        self.user_ink.pen_up();
-        if let State::Listening { last_pen } = &mut self.state {
-            *last_pen = Some(Instant::now());
-        }
-        true
+        self.finish_pen_contact()
     }
 
     fn handle_touch(&mut self, event: qtfb::InputEvent) -> bool {
@@ -278,36 +315,25 @@ impl Engine<'_> {
                     self.primary_touch = Some(event.dev_id);
                     self.stylus_on = true;
                     self.stylus_tapped = true;
-                }
-                if self.primary_touch == Some(event.dev_id) {
-                    self.panel_point(event.x, event.y);
+                    if self.input_mode == crate::platform::InputMode::Modal {
+                        self.begin_modal_contact(PointerTool::Finger, event.x, event.y);
+                    }
                 }
             }
             qtfb::INPUT_TOUCH_UPDATE if self.primary_touch == Some(event.dev_id) => {
-                self.panel_point(event.x, event.y);
+                self.update_modal_contact(PointerTool::Finger, event.x, event.y);
             }
             qtfb::INPUT_TOUCH_RELEASE if self.primary_touch == Some(event.dev_id) => {
                 self.primary_touch = None;
                 self.stylus_on = false;
-                if is_list(&self.state) && self.finish_list_stroke() {
+                self.update_modal_contact(PointerTool::Finger, event.x, event.y);
+                if !self.finish_modal_contact(PointerTool::Finger) {
                     return false;
                 }
             }
             _ => {}
         }
         true
-    }
-
-    fn panel_point(&mut self, x: i32, y: i32) {
-        let damage = match &mut self.state {
-            State::TaskList { panel }
-            | State::TodoList { panel }
-            | State::HistoryList { panel }
-            | State::ReaderList { panel, .. } => panel.pen_point(&mut self.surf, x, y),
-            State::FontList { panel } => panel.pen_point(&mut self.surf, x, y),
-            _ => BBox::empty(),
-        };
-        add_damage(&mut self.ink_dirty, damage);
     }
 
     pub(super) fn open_reader_target(&mut self) {
@@ -349,6 +375,13 @@ impl Engine<'_> {
             }
         }
     }
+}
+
+/// A time gap is useful for recovering an ordinary lost QTFB release, but it
+/// is not physical proof that the contact which dismissed an answer went Up.
+/// That safety barrier may be released only by the host's actual Up/zero frame.
+pub(super) fn orphan_recovery_may_release(state: &State) -> bool {
+    !matches!(state, State::AwaitingPenUp)
 }
 
 fn is_pen_event(input_type: i32) -> bool {

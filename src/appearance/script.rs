@@ -3,6 +3,7 @@
 //! yield them for stroke-by-stroke animation.
 
 use ab_glyph::{Font, Glyph, PxScale, ScaleFont};
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::fonts::{FontBook, FontId};
 
@@ -116,6 +117,19 @@ pub fn measure_with(fonts: &FontBook, primary: FontId, text: &str, px: f32) -> f
         prev = Some((font_id, id));
     }
     caret
+}
+
+/// Measure the tallest resolved face used by one line.  Handwriting faces
+/// have independent calibration factors, so a fixed `base_px * 1.2` line
+/// height can overlap lines or run off the bottom after font calibration.
+pub fn line_height(fonts: &FontBook, text: &str, px: f32) -> f32 {
+    text.chars()
+        .map(|character| {
+            let (font_id, font) = fonts.resolve(fonts.selected(), character);
+            font.as_scaled(PxScale::from(fonts.calibrated_px(font_id, px)))
+                .height()
+        })
+        .fold(px, f32::max)
 }
 
 /// Zhang-Suen thinning: reduce the mask to 1px-wide skeleton lines.
@@ -361,11 +375,26 @@ pub fn wrap(font: &FontBook, text: &str, px: f32, max_px: f32) -> Vec<String> {
                 ""
             };
             let cand = format!("{cur}{separator}{}", piece.text);
-            if measure(font, &cand, px) <= max_px || cur.is_empty() {
+            if measure(font, &cand, px) <= max_px {
                 cur = cand;
             } else {
-                lines.push(std::mem::take(&mut cur));
-                cur = piece.text;
+                if !cur.is_empty() {
+                    lines.push(std::mem::take(&mut cur));
+                }
+
+                // A URL, identifier or other unbroken Latin token may be
+                // wider than the entire Move panel.  Split it by grapheme
+                // cluster so its centered origin can never become negative;
+                // ordinary words and CJK pieces keep their natural wrapping.
+                let chunks = hard_wrap_piece(font, &piece.text, px, max_px);
+                let chunk_count = chunks.len();
+                for (index, chunk) in chunks.into_iter().enumerate() {
+                    if index + 1 == chunk_count {
+                        cur = chunk;
+                    } else {
+                        lines.push(chunk);
+                    }
+                }
             }
         }
         if !cur.is_empty() {
@@ -375,119 +404,24 @@ pub fn wrap(font: &FontBook, text: &str, px: f32, max_px: f32) -> Vec<String> {
     lines
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pipeline_produces_strokes() {
-        let font = FontBook::for_test(
-            ab_glyph::FontRef::try_from_slice(include_bytes!(
-                "../../fonts/ChenYuluoyan-2.0-Thin.ttf"
-            ))
-            .unwrap(),
-            None,
-        );
-        let mut line = rasterize_line(&font, "Yes, Harry?", 96.0);
-        assert!(line.width > 100 && line.height > 50);
-        let inked_before: usize = line.mask.iter().filter(|&&v| v).count();
-        thin(&mut line);
-        let inked_after: usize = line.mask.iter().filter(|&&v| v).count();
-        assert!(
-            inked_after * 3 < inked_before,
-            "thinning should slim the glyphs: {inked_before} -> {inked_after}"
-        );
-        let strokes = trace(&line);
-        assert!(!strokes.is_empty());
-        let total: usize = strokes.iter().map(|s| s.len()).sum();
-        println!(
-            "strokes={} total_points={} ({}x{})",
-            strokes.len(),
-            total,
-            line.width,
-            line.height
-        );
-        assert!(total > 200, "expected a decent path length, got {total}");
-        // Wrap sanity.
-        let lines = wrap(
-            &font,
-            "Do you know anything about the Chamber of Secrets?",
-            96.0,
-            1380.0,
-        );
-        assert!(lines.len() >= 2);
-    }
-
-    #[test]
-    fn wraps_unspaced_chinese_without_orphaning_punctuation() {
-        let font = FontBook::for_test(
-            ab_glyph::FontRef::try_from_slice(include_bytes!(
-                "../../fonts/ChenYuluoyan-2.0-Thin.ttf"
-            ))
-            .unwrap(),
-            None,
-        );
-        // Visible Chinese replies are prompted as Traditional Chinese; the
-        // writer's original-script transcript is stored but never rendered.
-        for c in "你好世界回答問題這是一段繁體中文已經說話嗎".chars() {
-            assert_ne!(
-                font.font(font.selected()).glyph_id(c).0,
-                0,
-                "font is missing Chinese glyph {c}"
-            );
+fn hard_wrap_piece(font: &FontBook, text: &str, px: f32, max_px: f32) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for grapheme in UnicodeSegmentation::graphemes(text, true) {
+        let candidate = format!("{current}{grapheme}");
+        if current.is_empty() || measure(font, &candidate, px) <= max_px {
+            current = candidate;
+        } else {
+            chunks.push(std::mem::take(&mut current));
+            current.push_str(grapheme);
         }
-
-        let max = measure(&font, "你好，", 96.0) + 1.0;
-        let lines = wrap(&font, "你好，世界。回答問題！", 96.0, max);
-
-        assert!(lines.len() >= 3, "expected Chinese text to wrap: {lines:?}");
-        assert_eq!(lines.concat(), "你好，世界。回答問題！");
-        assert!(lines
-            .iter()
-            .all(|line| !line.starts_with(['，', '。', '！'])));
-
-        let mut rendered = rasterize_line(&font, "你好，世界。", 96.0);
-        thin(&mut rendered);
-        assert!(
-            !trace(&rendered).is_empty(),
-            "Chinese glyphs should produce pen strokes"
-        );
     }
-
-    #[test]
-    fn calibration_changes_measurement_and_rasterization_together() {
-        let mut font = FontBook::for_test(
-            ab_glyph::FontRef::try_from_slice(include_bytes!(
-                "../../fonts/ChenYuluoyan-2.0-Thin.ttf"
-            ))
-            .unwrap(),
-            None,
-        );
-        let normal_width = measure(&font, "字體大小", 80.0);
-        let normal = rasterize_line(&font, "字體大小", 80.0);
-        font.set_scale_for_test(FontId::ChenYuluoyan, 150);
-        let calibrated_width = measure(&font, "字體大小", 80.0);
-        let calibrated = rasterize_line(&font, "字體大小", 80.0);
-        assert!(calibrated_width > normal_width * 1.45);
-        assert!(calibrated.width > normal.width);
-        assert!(calibrated.height > normal.height);
+    if !current.is_empty() {
+        chunks.push(current);
     }
-
-    #[test]
-    fn handwriting_calibration_never_changes_ui_metrics() {
-        let mut font = FontBook::for_test(
-            ab_glyph::FontRef::try_from_slice(include_bytes!(
-                "../../fonts/ChenYuluoyan-2.0-Thin.ttf"
-            ))
-            .unwrap(),
-            None,
-        );
-        let before = measure_ui(&font, "字体与大小", 80.0);
-        let before_raster = rasterize_ui_line(&font, "帮助", 80.0);
-        font.set_scale_for_test(FontId::ChenYuluoyan, 180);
-        assert_eq!(measure_ui(&font, "字体与大小", 80.0), before);
-        let after_raster = rasterize_ui_line(&font, "帮助", 80.0);
-        assert_eq!(after_raster.width, before_raster.width);
-        assert_eq!(after_raster.height, before_raster.height);
-    }
+    chunks
 }
+
+#[cfg(test)]
+#[path = "script/tests.rs"]
+mod tests;

@@ -268,6 +268,21 @@ fn responses_sse_delta_extraction() {
 }
 
 #[test]
+fn nonstreaming_responses_extracts_text_when_content_precedes_role() {
+    let response = r#"{
+        "output":[{
+            "type":"message",
+            "content":[{"type":"output_text","text":"整理後的紙面答案。"}],
+            "role":"assistant"
+        }]
+    }"#;
+    assert_eq!(
+        extract_assistant_text(response).as_deref(),
+        Some("整理後的紙面答案。")
+    );
+}
+
+#[test]
 fn paper_editor_detects_screen_formatting_only_in_visible_reply() {
     assert!(paper_answer_needs_rewrite("See **this**.\n⁂原文"));
     assert!(paper_answer_needs_rewrite(
@@ -276,6 +291,15 @@ fn paper_editor_detects_screen_formatting_only_in_visible_reply() {
     assert!(!paper_answer_needs_rewrite(
         "出自《六韜·文韜·文師》。\n⁂主人寫了https://example.test"
     ));
+}
+
+#[test]
+fn paper_fallback_preserves_link_labels_without_screen_markup() {
+    let draft = "答案见[原论文](https://example.com/paper)，**结论**成立 citeturn1";
+    let safe = paper_safe_fallback(draft);
+    assert!(safe.contains("原论文"));
+    assert!(safe.contains("结论"));
+    assert!(!paper_answer_needs_rewrite(&safe));
 }
 
 #[test]

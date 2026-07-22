@@ -2,7 +2,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::sync::atomic::Ordering;
 
 use super::super::{
-    json_quote, json_str_field, log_llm_terminal, paper_answer_needs_rewrite,
+    json_quote, json_str_field, log_llm_terminal, paper_answer_needs_rewrite, paper_safe_fallback,
     responses_delta_content, rewrite_paper_tail, system_prompt, Event, StreamParser,
     EXTERNAL_OCR_PROTOCOL,
 };
@@ -200,6 +200,8 @@ struct PaperStream<'a> {
     first_model_text: bool,
     first_paper_event: bool,
     searched: bool,
+    search_started_logged: bool,
+    search_completed_logged: bool,
     failed: Option<String>,
     holding_tail: bool,
     held_tail: String,
@@ -217,6 +219,8 @@ impl<'a> PaperStream<'a> {
             first_model_text: true,
             first_paper_event: true,
             searched: false,
+            search_started_logged: false,
+            search_completed_logged: false,
             failed: None,
             holding_tail: false,
             held_tail: String::new(),
@@ -227,7 +231,30 @@ impl<'a> PaperStream<'a> {
     }
 
     fn accept(&mut self, data: &str) {
-        self.searched |= data.contains("web_search_call");
+        if data.contains("web_search_call") {
+            self.searched = true;
+            let completed = data.contains("web_search_call.completed");
+            if !completed && !self.search_started_logged {
+                self.search_started_logged = true;
+                eprintln!(
+                    "magic-paper: event=web-search-start request={}:{} domain={} latency_ms={}",
+                    std::process::id(),
+                    self.request.request_id,
+                    self.request.domain,
+                    self.asked.elapsed().as_millis(),
+                );
+            }
+            if completed && !self.search_completed_logged {
+                self.search_completed_logged = true;
+                eprintln!(
+                    "magic-paper: event=web-search-done request={}:{} domain={} latency_ms={}",
+                    std::process::id(),
+                    self.request.request_id,
+                    self.request.domain,
+                    self.asked.elapsed().as_millis(),
+                );
+            }
+        }
         if data.contains("\"type\":\"response.failed\"") {
             self.failed = json_str_field(data, "message").or_else(|| Some(data.to_owned()));
         }
@@ -323,6 +350,14 @@ impl<'a> PaperStream<'a> {
         if !self.holding_tail {
             return;
         }
+        let started = std::time::Instant::now();
+        eprintln!(
+            "magic-paper: event=paper-rewrite-start request={}:{} domain={} chars={}",
+            std::process::id(),
+            self.request.request_id,
+            self.request.domain,
+            self.held_tail.chars().count(),
+        );
         let rewritten = match &config.rewrite_model {
             Some(model) => rewrite_paper_tail(
                 &config.agent,
@@ -335,44 +370,53 @@ impl<'a> PaperStream<'a> {
             None => Err("no paper editor model is configured".into()),
         };
         if self.request.cancelled.load(Ordering::Acquire) {
+            eprintln!(
+                "magic-paper: event=paper-rewrite-cancelled request={}:{} domain={} latency_ms={}",
+                std::process::id(),
+                self.request.request_id,
+                self.request.domain,
+                started.elapsed().as_millis(),
+            );
             return;
         }
-        self.deliver_rewrite(rewritten);
+        let outcome = self.deliver_rewrite(rewritten);
+        eprintln!(
+            "magic-paper: event=paper-rewrite-{outcome} request={}:{} domain={} latency_ms={}",
+            std::process::id(),
+            self.request.request_id,
+            self.request.domain,
+            started.elapsed().as_millis(),
+        );
         if let Some(transcript) = self.held_transcript.take() {
             let _ = self.request.tx.send(Ok(Event::Transcript(transcript)));
         }
     }
 
-    fn deliver_rewrite(&mut self, rewritten: Result<String, String>) {
-        match rewritten {
-            Ok(text) if !paper_answer_needs_rewrite(&text) => {
-                if self.first_paper_event {
-                    eprintln!(
-                        "riddle: oracle first paper text +{}ms",
-                        self.asked.elapsed().as_millis()
-                    );
-                }
-                eprintln!("riddle: paper editor rewrote held response tail");
-                let _ = self.request.tx.send(Ok(Event::Ink(text)));
-            }
-            Ok(_) => send_failure(
+    fn deliver_rewrite(&mut self, rewritten: Result<String, String>) -> &'static str {
+        let (text, outcome) = match rewritten {
+            Ok(text) if !paper_answer_needs_rewrite(&text) => (text, "done"),
+            Ok(_) | Err(_) => (paper_safe_fallback(&self.held_tail), "fallback"),
+        };
+        if text.trim().is_empty() || paper_answer_needs_rewrite(&text) {
+            send_failure(
                 &self.request.tx,
                 "llm-error",
                 self.request.request_id,
                 self.request.domain,
                 &self.request.terminal,
                 "paper-editor",
-                "paper editor kept non-paper formatting".into(),
-            ),
-            Err(error) => send_failure(
-                &self.request.tx,
-                "llm-error",
-                self.request.request_id,
-                self.request.domain,
-                &self.request.terminal,
-                "paper-editor",
-                format!("paper editor failed: {error}"),
-            ),
+                "paper editor and local fallback produced no safe answer".into(),
+            );
+            return "error";
         }
+        if self.first_paper_event {
+            eprintln!(
+                "riddle: oracle first paper text +{}ms",
+                self.asked.elapsed().as_millis()
+            );
+            self.first_paper_event = false;
+        }
+        let _ = self.request.tx.send(Ok(Event::Ink(text)));
+        outcome
     }
 }

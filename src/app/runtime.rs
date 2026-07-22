@@ -3,7 +3,9 @@
 //! The root owns setup/teardown and durable runtime state. Lifecycle, input,
 //! power, and page-state transitions live in focused sibling modules.
 
-use crate::{display, fb, fonts, ink, memory, pen, power, runtime_env, tasks, todos, touch};
+use crate::{
+    display, fb, fonts, ink, memory, pen, power, runtime_control, runtime_env, tasks, todos, touch,
+};
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -11,10 +13,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::fb::{screen_h, screen_w, BBox};
-use crate::platform::RefreshIntent;
+use crate::platform::{InputMode, RefreshIntent};
 use crate::surface::WHITE;
 
-use super::input::{InputPriority, PenSequence, PenTrace, QtfbPenState};
+use super::input::{InputPriority, ModalContact, PenSequence, PenTrace, QtfbPenState};
 use super::lifecycle::{LifecycleClient, LifecycleStage};
 use super::oracle_controller::{OracleController, SpeculativeRequest};
 use super::state::{State, TurnKind};
@@ -68,6 +70,9 @@ pub(super) struct Engine<'a> {
     live_ink: display::LegacyLiveInkAdapter<'a>,
     takeover: bool,
     hosted: bool,
+    managed: bool,
+    input_mode: InputMode,
+    input_mode_synced: bool,
     agent_queue_mode: bool,
     pen_dev: Option<pen::PenDevice>,
     touch_dev: Option<touch::TouchDevice>,
@@ -106,6 +111,7 @@ pub(super) struct Engine<'a> {
     last_flush: Instant,
     reader_target: Option<PathBuf>,
     primary_touch: Option<i32>,
+    modal_contact: Option<ModalContact>,
     flush_every: Duration,
 }
 
@@ -121,9 +127,11 @@ pub(super) fn run(launch_mode: runtime_env::LaunchMode) -> std::io::Result<RunOu
     commit_initial_frame(&disp, &mut surf, &mut lifecycle)?;
 
     let sigterm = termination_flag()?;
-    let mut engine = Engine::new(&disp, surf, font, lifecycle);
+    let mut engine = Engine::new(&disp, surf, font, lifecycle, runtime_managed);
     eprintln!("riddle: the diary is open");
-    engine.run_loop(&sigterm);
+    if engine.set_input_mode(InputMode::Writing) {
+        engine.run_loop(&sigterm);
+    }
     let (mut lifecycle, lifecycle_exit) = engine.close();
     disp.terminate();
     finish_lifecycle(&mut lifecycle, lifecycle_exit)
@@ -192,6 +200,7 @@ impl<'a> Engine<'a> {
         surf: crate::surface::Surface,
         font: fonts::FontBook,
         lifecycle: LifecycleClient,
+        managed: bool,
     ) -> Self {
         let takeover = matches!(disp, display::Display::Quill);
         let hosted = !takeover;
@@ -213,6 +222,9 @@ impl<'a> Engine<'a> {
             lifecycle_frame_sequence: 1,
             takeover,
             hosted,
+            managed,
+            input_mode: InputMode::AnimationLocked,
+            input_mode_synced: false,
             agent_queue_mode,
             pen_dev: devices.pen,
             touch_dev: devices.touch,
@@ -253,6 +265,7 @@ impl<'a> Engine<'a> {
             last_flush: Instant::now(),
             reader_target: None,
             primary_touch: None,
+            modal_contact: None,
             flush_every: if takeover {
                 Duration::from_millis(8)
             } else {
@@ -266,6 +279,7 @@ impl<'a> Engine<'a> {
         self.input_priority.enter_background();
         self.oracle.invalidate_active_turn();
         super::oracle_controller::cancel_speculative(&mut self.speculative, "diary closed");
+        self.cancel_modal_contact();
         suspend_visible_state(&mut self.state, &mut self.surf, &mut self.user_ink);
         self.pen_trace.finish("diary-closed");
         (self.lifecycle, self.lifecycle_exit)
@@ -277,6 +291,79 @@ impl<'a> Engine<'a> {
             message,
             retryable: true,
         };
+    }
+
+    pub(super) fn set_input_mode(&mut self, mode: InputMode) -> bool {
+        if !input_mode_needs_request(self.input_mode_synced, self.input_mode, mode) {
+            return true;
+        }
+        if self.managed {
+            let token = self
+                .lifecycle
+                .active_token()
+                .cloned()
+                .or_else(runtime_env::launch_token);
+            let result = token
+                .as_ref()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "managed input mode has no foreground lifecycle token",
+                    )
+                })
+                .and_then(|token| runtime_control::set_input_mode(token, mode));
+            if let Err(error) = result {
+                // The local half closes immediately even if the runtime kept
+                // its previous setting. No further contact may mutate paper.
+                self.input_mode = InputMode::AnimationLocked;
+                self.input_mode_synced = false;
+                self.fail(
+                    LifecycleStage::Runtime,
+                    format!("could not set input mode {}: {error}", mode.as_str()),
+                );
+                eprintln!(
+                    "magic-paper: event=input-mode-failed requested={} error={error}",
+                    mode.as_str()
+                );
+                return false;
+            }
+        }
+        self.input_mode = mode;
+        self.input_mode_synced = true;
+        eprintln!(
+            "magic-paper: event=input-mode-changed mode={} ink_enabled={}",
+            mode.as_str(),
+            mode.ink_enabled()
+        );
+        true
+    }
+
+    pub(super) fn input_mode_failed(&self) -> bool {
+        matches!(self.lifecycle_exit, LifecycleExit::Failed { .. })
+    }
+}
+
+fn input_mode_needs_request(synced: bool, current: InputMode, requested: InputMode) -> bool {
+    !synced || current != requested
+}
+
+pub(super) fn input_mode_for_state(state: &State) -> InputMode {
+    match state {
+        State::Listening { .. } => InputMode::Writing,
+        State::Help { .. }
+        | State::Conjuring { .. }
+        | State::MemoryShown { .. }
+        | State::TaskList { .. }
+        | State::TodoList { .. }
+        | State::FontList { .. }
+        | State::HistoryList { .. }
+        | State::ReaderList { .. } => InputMode::Modal,
+        State::Drinking { .. }
+        | State::Thinking { .. }
+        | State::Replying { .. }
+        | State::AnswerVisible { .. }
+        | State::FadingReply { .. }
+        | State::AwaitingPenUp => InputMode::AnimationLocked,
     }
 }
 
@@ -376,10 +463,11 @@ pub(super) fn suspend_visible_state(
             user_ink.clear();
             State::Listening { last_pen: None }
         }
-        State::Lingering { region, .. } | State::FadingReply { region, .. } => {
+        State::AnswerVisible { region, .. } | State::FadingReply { region, .. } => {
             clear_region(surf, region);
             State::Listening { last_pen: None }
         }
+        State::AwaitingPenUp => State::Listening { last_pen: None },
         State::Conjuring { saved, .. } => {
             surf.paste_rect(0, 0, screen_w(), screen_h(), &saved);
             State::Listening { last_pen: None }
@@ -401,3 +489,7 @@ pub(super) fn suspend_visible_state(
         | State::ReaderList { .. }) => stable,
     };
 }
+
+#[cfg(test)]
+#[path = "runtime/tests.rs"]
+mod tests;

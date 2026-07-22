@@ -289,7 +289,9 @@ impl QtfbClient {
         });
     }
 
-    /// NOTE: the server sleeps its handler thread for 1s after this — call rarely.
+    /// Cache mode changes because some legacy AppLoad hosts handled this
+    /// packet expensively. The managed Remagic display host applies it without
+    /// sleeping, so a real transition does not add a fixed one-second stall.
     fn send_refresh_mode(&self, mode: i32) -> io::Result<()> {
         let mut msg = [0u8; 24];
         msg[0] = MESSAGE_SET_REFRESH_MODE;

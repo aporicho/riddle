@@ -24,7 +24,9 @@ pub fn screen_h() -> usize {
 
 #[cfg(test)]
 pub fn test_init_screen() {
-    init_screen(1620, 2160);
+    // Paper Pro Move's real logical qtfb canvas.  Layout tests must exercise
+    // the narrow device rather than silently passing on a much larger page.
+    init_screen(954, 1696);
 }
 
 /// Grow-only pixel bounding box, used to build update/dissolve regions.
@@ -46,7 +48,7 @@ impl BBox {
         }
     }
     pub fn is_empty(&self) -> bool {
-        self.x0 > self.x1
+        self.x0 > self.x1 || self.y0 > self.y1
     }
     pub fn add(&mut self, x: i32, y: i32, margin: i32) {
         self.x0 = self.x0.min(x - margin).max(0);
@@ -61,5 +63,28 @@ impl BBox {
             self.x1 - self.x0 + 1,
             self.y1 - self.y0 + 1,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BBox;
+
+    #[test]
+    fn either_invalid_axis_makes_a_box_empty() {
+        assert!(BBox {
+            x0: 0,
+            x1: 10,
+            y0: 20,
+            y1: 10,
+        }
+        .is_empty());
+        assert!(BBox {
+            x0: 10,
+            x1: 0,
+            y0: 0,
+            y1: 20,
+        }
+        .is_empty());
     }
 }

@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::platform::RefreshIntent;
 use crate::surface::Surface;
+use crate::ui::pointer::Gesture;
 use crate::{display, fonts, memory, reader, tasks, todos, ui};
 
 use super::state::{State, TurnKind};
@@ -25,6 +26,7 @@ pub(super) struct PaperListContext<'a> {
 pub(super) fn finish_paper_list_stroke(
     state: &mut State,
     context: PaperListContext<'_>,
+    gesture: Gesture,
 ) -> Option<PathBuf> {
     let PaperListContext {
         memory_store,
@@ -36,11 +38,11 @@ pub(super) fn finish_paper_list_stroke(
         disp,
     } = context;
     if matches!(state, State::FontList { .. }) {
-        finish_font_stroke(state, surf, font, disp);
+        finish_font_stroke(state, surf, font, disp, gesture);
         return None;
     }
     if matches!(state, State::ReaderList { .. }) {
-        return finish_reader_stroke(state, surf, font, disp);
+        return finish_reader_stroke(state, surf, font, disp, gesture);
     }
     let mut stores = ListStores {
         memory: memory_store,
@@ -48,7 +50,7 @@ pub(super) fn finish_paper_list_stroke(
         todos: todo_store,
         next_heartbeat,
     };
-    finish_stored_list_stroke(state, &mut stores, surf, font, disp);
+    finish_stored_list_stroke(state, &mut stores, surf, font, disp, gesture);
     None
 }
 
@@ -64,9 +66,10 @@ fn finish_font_stroke(
     surf: &mut Surface,
     font: &mut fonts::FontBook,
     disp: &display::Display,
+    gesture: Gesture,
 ) {
     let action = match state {
-        State::FontList { panel } => panel.pen_up(),
+        State::FontList { panel } => panel.interact(gesture),
         _ => return,
     };
     match action {
@@ -118,9 +121,10 @@ fn finish_reader_stroke(
     surf: &mut Surface,
     font: &fonts::FontBook,
     disp: &display::Display,
+    gesture: Gesture,
 ) -> Option<PathBuf> {
     let action = match state {
-        State::ReaderList { panel, .. } => panel.pen_up(),
+        State::ReaderList { panel, .. } => panel.interact(gesture),
         _ => return None,
     };
     match action {
@@ -164,10 +168,11 @@ fn finish_stored_list_stroke(
     surf: &mut Surface,
     font: &fonts::FontBook,
     disp: &display::Display,
+    gesture: Gesture,
 ) {
     let action = match state {
         State::TaskList { panel } | State::TodoList { panel } | State::HistoryList { panel } => {
-            panel.pen_up()
+            panel.interact(gesture)
         }
         _ => None,
     };

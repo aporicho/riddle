@@ -129,6 +129,10 @@ impl LifecycleClient {
         self.transport.is_some() && !self.disconnected
     }
 
+    pub(super) fn active_token(&self) -> Option<&AppToken> {
+        self.active_token.as_ref()
+    }
+
     pub(super) fn report_ready_after_frame(&mut self, frame_sequence: u64) -> io::Result<()> {
         if frame_sequence == 0 {
             return Err(io::Error::new(

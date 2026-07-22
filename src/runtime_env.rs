@@ -7,6 +7,8 @@
 use std::io;
 use std::path::PathBuf;
 
+use crate::platform::AppToken;
+
 // `RIDDLE_SYSTEMD_MANAGED` belongs to the old standalone takeover supervisor;
 // it says nothing about the Remagic lifecycle/display contract.
 const MANAGED_VARS: [&str; 2] = ["REMAGIC_RUNTIME_MANAGED", "REMAGIC_MANAGED"];
@@ -45,6 +47,29 @@ pub fn require_external_integrations(component: &str) -> io::Result<()> {
     } else {
         Ok(())
     }
+}
+
+/// Initial foreground token injected by the supervised runner. Subsequent
+/// foreground epochs come from the lifecycle channel and take precedence.
+pub fn launch_token() -> Option<AppToken> {
+    std::env::var("REMAGIC_APP_TOKEN")
+        .ok()
+        .and_then(|value| parse_launch_token(&value))
+}
+
+fn parse_launch_token(value: &str) -> Option<AppToken> {
+    let value: serde_json::Value = serde_json::from_str(value).ok()?;
+    let token = AppToken {
+        app_id: value.get("app_id")?.as_str()?.to_owned(),
+        generation: value.get("generation")?.as_u64()?,
+        foreground_epoch: value.get("foreground_epoch")?.as_u64()?,
+        lease_id: value.get("lease_id")?.as_u64(),
+    };
+    (token.app_id == "magicpaper"
+        && token.generation != 0
+        && token.foreground_epoch != 0
+        && token.lease_id.is_some_and(|lease_id| lease_id != 0))
+    .then_some(token)
 }
 
 /// Resolve one durable path. A component-specific override wins, followed by
@@ -165,7 +190,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        choose_persistent_path, env_flag_enabled, validate_values, LaunchMode, MANAGED_VARS,
+        choose_persistent_path, env_flag_enabled, parse_launch_token, validate_values, LaunchMode,
+        MANAGED_VARS,
     };
 
     #[test]
@@ -232,5 +258,25 @@ mod tests {
             !choose_persistent_path(None, None, true, "tasks", "/home/root/riddle-data/tasks",)
                 .starts_with("/home/root")
         );
+    }
+
+    #[test]
+    fn launch_token_requires_the_complete_magicpaper_foreground_fence() {
+        let token = parse_launch_token(
+            r#"{"app_id":"magicpaper","generation":7,"foreground_epoch":11,"lease_id":13}"#,
+        )
+        .unwrap();
+        assert_eq!(token.generation, 7);
+        assert_eq!(token.foreground_epoch, 11);
+        assert_eq!(token.lease_id, Some(13));
+        for invalid in [
+            r#"{"app_id":"koreader","generation":7,"foreground_epoch":11,"lease_id":13}"#,
+            r#"{"app_id":"magicpaper","generation":0,"foreground_epoch":11,"lease_id":13}"#,
+            r#"{"app_id":"magicpaper","generation":7,"foreground_epoch":0,"lease_id":13}"#,
+            r#"{"app_id":"magicpaper","generation":7,"foreground_epoch":11,"lease_id":0}"#,
+            "not-json",
+        ] {
+            assert!(parse_launch_token(invalid).is_none(), "{invalid}");
+        }
     }
 }

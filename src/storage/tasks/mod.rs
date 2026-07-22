@@ -5,16 +5,22 @@
 //! deliberately separate from page memories: it is small, explicit, survives
 //! restarts, and can be checked without spending an oracle request.
 
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
-use std::os::fd::AsRawFd;
-use std::path::{Path, PathBuf};
+use crate::storage::persistence::{
+    atomic_write, invalid_line, lock_exclusive, read_optional_utf8, unescape_field, StoreLock,
+};
+use std::collections::HashSet;
+use std::io;
+use std::path::PathBuf;
 
 mod formatting;
+mod lease;
 mod parser;
 
 pub use formatting::heartbeat_prompt;
-use formatting::{describe_interval, describe_interval_zh, escape, unescape};
+use formatting::{describe_interval, describe_interval_zh, escape};
+pub use lease::{acquire_scheduler_lease, external_scheduler_active, SchedulerLease};
+#[cfg(test)]
+use lease::{acquire_scheduler_lease_in, external_scheduler_active_in};
 
 use parser::parse_command;
 
@@ -80,80 +86,8 @@ pub struct TaskStore {
     pub entries: Vec<Task>,
 }
 
-/// Process-lifetime lease held by the screenless task agent. Its advisory lock
-/// lets every UI mode (managed QTFB or legacy takeover) prove that it must not
-/// run a second scheduler.
-pub struct SchedulerLease(File);
-
-impl Drop for SchedulerLease {
-    fn drop(&mut self) {
-        unsafe {
-            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
-        }
-    }
-}
-
 fn task_dir() -> PathBuf {
     crate::runtime_env::persistent_path("RIDDLE_TASKS_DIR", "tasks", "/home/root/riddle-data/tasks")
-}
-
-fn scheduler_lock_file(dir: &Path) -> io::Result<File> {
-    std::fs::create_dir_all(dir)?;
-    OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(dir.join("scheduler.lock"))
-}
-
-fn acquire_scheduler_lease_in(dir: &Path) -> io::Result<SchedulerLease> {
-    let file = scheduler_lock_file(dir)?;
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        let error = io::Error::last_os_error();
-        return Err(io::Error::new(
-            if error.kind() == io::ErrorKind::WouldBlock {
-                io::ErrorKind::AlreadyExists
-            } else {
-                error.kind()
-            },
-            format!("task scheduler lease unavailable: {error}"),
-        ));
-    }
-    Ok(SchedulerLease(file))
-}
-
-pub fn acquire_scheduler_lease() -> io::Result<SchedulerLease> {
-    acquire_scheduler_lease_in(&task_dir())
-}
-
-/// Fail closed: if ownership cannot be checked, the interactive UI must not
-/// risk issuing duplicate scheduled API requests.
-fn external_scheduler_active_in(dir: &Path) -> bool {
-    let Ok(file) = scheduler_lock_file(dir) else {
-        return true;
-    };
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return true;
-    }
-    unsafe {
-        libc::flock(file.as_raw_fd(), libc::LOCK_UN);
-    }
-    false
-}
-
-pub fn external_scheduler_active() -> bool {
-    external_scheduler_active_in(&task_dir())
-}
-
-struct TaskLock(File);
-
-impl Drop for TaskLock {
-    fn drop(&mut self) {
-        unsafe {
-            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
-        }
-    }
 }
 
 impl TaskStore {
@@ -171,75 +105,111 @@ impl TaskStore {
             dir,
             entries: Vec::new(),
         };
-        store.load();
-        Some(store)
+        match store.load() {
+            Ok(()) => Some(store),
+            Err(error) => {
+                eprintln!(
+                    "magic-paper: tasks disabled because {} could not be loaded: {error}",
+                    store.index_path().display()
+                );
+                None
+            }
+        }
     }
 
     fn index_path(&self) -> PathBuf {
         self.dir.join("index.tsv")
     }
 
-    fn lock_exclusive(&self) -> io::Result<TaskLock> {
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(self.dir.join("index.lock"))?;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(TaskLock(file))
+    fn lock_exclusive(&self) -> io::Result<StoreLock> {
+        lock_exclusive(&self.dir)
     }
 
-    fn load(&mut self) {
-        let Ok(_lock) = self.lock_exclusive() else {
-            return;
-        };
-        self.load_unlocked();
+    fn load(&mut self) -> io::Result<()> {
+        let _lock = self.lock_exclusive()?;
+        self.load_unlocked()
     }
 
-    fn load_unlocked(&mut self) {
-        self.entries.clear();
-        let Ok(text) = std::fs::read_to_string(self.index_path()) else {
-            return;
+    fn load_unlocked(&mut self) -> io::Result<()> {
+        let path = self.index_path();
+        let Some(text) = read_optional_utf8(&path)? else {
+            self.entries.clear();
+            return Ok(());
         };
-        for line in text.lines() {
-            let mut cols = line.splitn(5, '\t');
-            let (Some(id), Some(interval), Some(next_due), Some(state_or_instruction)) =
-                (cols.next(), cols.next(), cols.next(), cols.next())
-            else {
-                continue;
-            };
-            let (Ok(id), Ok(interval_secs), Ok(next_due)) =
-                (id.parse(), interval.parse(), next_due.parse())
-            else {
-                continue;
-            };
+        let mut entries = Vec::new();
+        let mut ids = HashSet::new();
+        for (line_index, line) in text.lines().enumerate() {
+            let line_number = line_index + 1;
+            if line.is_empty() {
+                return Err(invalid_line(&path, line_number, "empty task record"));
+            }
+            let columns = line.split('\t').collect::<Vec<_>>();
+            if !matches!(columns.len(), 4 | 5) {
+                return Err(invalid_line(
+                    &path,
+                    line_number,
+                    "task record must contain four legacy columns or five current columns",
+                ));
+            }
+            let id = columns[0]
+                .parse::<u64>()
+                .map_err(|_| invalid_line(&path, line_number, "invalid task id"))?;
+            let interval_secs = columns[1]
+                .parse::<u64>()
+                .map_err(|_| invalid_line(&path, line_number, "invalid task interval"))?;
+            let next_due = columns[2]
+                .parse::<u64>()
+                .map_err(|_| invalid_line(&path, line_number, "invalid task due time"))?;
             if interval_secs < MIN_INTERVAL_SECS {
-                continue;
+                return Err(invalid_line(
+                    &path,
+                    line_number,
+                    "task interval is below the supported minimum",
+                ));
+            }
+            if !ids.insert(id) {
+                return Err(invalid_line(&path, line_number, "duplicate task id"));
             }
             // MagicPaper 0.4.2 stored four columns. The fifth-column layout
             // adds state while treating every old task as active.
-            let (paused, instruction) = match cols.next() {
-                Some(instruction) => match state_or_instruction {
-                    "active" => (false, instruction),
-                    "paused" => (true, instruction),
-                    _ => continue,
-                },
-                None => (false, state_or_instruction),
+            let (paused, encoded_instruction) = if columns.len() == 4 {
+                (false, columns[3])
+            } else {
+                let paused = match columns[3] {
+                    "active" => false,
+                    "paused" => true,
+                    _ => {
+                        return Err(invalid_line(&path, line_number, "invalid task state"));
+                    }
+                };
+                (paused, columns[4])
             };
-            self.entries.push(Task {
+            let instruction = unescape_field(encoded_instruction)
+                .map_err(|error| invalid_line(&path, line_number, &error.to_string()))?;
+            if instruction.trim().is_empty() {
+                return Err(invalid_line(
+                    &path,
+                    line_number,
+                    "task instruction is empty",
+                ));
+            }
+            entries.push(Task {
                 id,
                 interval_secs,
                 next_due,
-                instruction: unescape(instruction),
+                instruction,
                 paused,
             });
-            if self.entries.len() == MAX_TASKS {
-                break;
+            if entries.len() > MAX_TASKS {
+                return Err(invalid_line(
+                    &path,
+                    line_number,
+                    "task store exceeds its maximum size",
+                ));
             }
         }
+        self.entries = entries;
+        Ok(())
     }
 
     fn persist(&self) -> io::Result<()> {
@@ -254,15 +224,13 @@ impl TaskStore {
                 escape(&task.instruction)
             ));
         }
-        let tmp = self.dir.join("index.tsv.new");
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&tmp)?;
-        file.write_all(out.as_bytes())?;
-        file.sync_all()?;
-        std::fs::rename(tmp, self.index_path())
+        atomic_write(&self.index_path(), out.as_bytes())
+    }
+
+    fn recover_after_failed_persist(&mut self, fallback: Vec<Task>) {
+        if self.load_unlocked().is_err() {
+            self.entries = fallback;
+        }
     }
 
     /// Apply a handwritten recurring-task command. Task numbers are the
@@ -279,7 +247,8 @@ impl TaskStore {
         let _lock = self
             .lock_exclusive()
             .map_err(|error| format!("lock task store: {error}"))?;
-        self.load_unlocked();
+        self.load_unlocked()
+            .map_err(|error| format!("load task store: {error}"))?;
         let old_entries = self.entries.clone();
         let change = match command {
             TaskCommand::Add {
@@ -289,14 +258,13 @@ impl TaskStore {
                 if self.entries.len() >= MAX_TASKS {
                     return Err(format!("at most {MAX_TASKS} tasks are allowed"));
                 }
-                let id = self
-                    .entries
-                    .iter()
-                    .map(|t| t.id)
-                    .max()
-                    .map(|id| id.saturating_add(1))
-                    .unwrap_or(now)
-                    .max(now);
+                let id = match self.entries.iter().map(|task| task.id).max() {
+                    Some(previous) => previous
+                        .checked_add(1)
+                        .ok_or_else(|| "task id space is exhausted".to_string())?
+                        .max(now),
+                    None => now,
+                };
                 let task = Task {
                     id,
                     interval_secs,
@@ -354,7 +322,7 @@ impl TaskStore {
             }
         };
         if let Err(e) = self.persist() {
-            self.entries = old_entries;
+            self.recover_after_failed_persist(old_entries);
             return Err(format!("save task change: {e}"));
         }
         Ok(Some(change))
@@ -376,11 +344,13 @@ impl TaskStore {
         let _lock = self
             .lock_exclusive()
             .map_err(|error| format!("lock task store: {error}"))?;
-        self.load_unlocked();
+        self.load_unlocked()
+            .map_err(|error| format!("load task store: {error}"))?;
+        let old_entries = self.entries.clone();
         let index = self.index(number)?;
         let task = self.entries.remove(index);
         if let Err(e) = self.persist() {
-            self.entries.insert(index, task.clone());
+            self.recover_after_failed_persist(old_entries);
             return Err(format!("save task deletion: {e}"));
         }
         Ok(task)
@@ -392,15 +362,16 @@ impl TaskStore {
         let _lock = self
             .lock_exclusive()
             .map_err(|error| format!("lock task store: {error}"))?;
-        self.load_unlocked();
+        self.load_unlocked()
+            .map_err(|error| format!("load task store: {error}"))?;
+        let old_entries = self.entries.clone();
         let index = self.index(number)?;
-        let before = self.entries[index].clone();
         self.entries[index].paused = !self.entries[index].paused;
         if !self.entries[index].paused {
             self.entries[index].next_due = now.saturating_add(self.entries[index].interval_secs);
         }
         if let Err(error) = self.persist() {
-            self.entries[index] = before;
+            self.recover_after_failed_persist(old_entries);
             return Err(format!("save task toggle: {error}"));
         }
         Ok(self.entries[index].clone())
@@ -432,7 +403,7 @@ impl TaskStore {
             return Ok(false);
         }
         let _lock = self.lock_exclusive()?;
-        self.load_unlocked();
+        self.load_unlocked()?;
         if expected.iter().any(|snapshot| {
             self.entries
                 .iter()
@@ -441,12 +412,16 @@ impl TaskStore {
         }) {
             return Ok(false);
         }
+        let old_entries = self.entries.clone();
         for snapshot in expected {
             if let Some(task) = self.entries.iter_mut().find(|task| task.id == snapshot.id) {
                 task.next_due = now.saturating_add(task.interval_secs);
             }
         }
-        self.persist()?;
+        if let Err(error) = self.persist() {
+            self.recover_after_failed_persist(old_entries);
+            return Err(error);
+        }
         Ok(true)
     }
 

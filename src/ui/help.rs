@@ -7,6 +7,8 @@ use crate::fonts::FontBook;
 use crate::script;
 use crate::surface::{Surface, BLACK, WHITE};
 
+use super::pointer::{invert_mono, Gesture, HitRect, Point, PointerTool};
+
 /// Does the committed ink look like a single big "?" (with or without its
 /// dot)? Deliberately forgiving: a false positive only shows the guide.
 pub fn looks_like_question_mark(strokes: &[Vec<(i32, i32, i32)>]) -> bool {
@@ -144,7 +146,7 @@ const BODY_HOSTED: &[&str] = &[
     "单按电源键返回应用管理器。",
     "快速按三次电源键返回原版界面。",
 ];
-const FOOTER: &str = "用笔点一下页面即可关闭说明";
+const FOOTER: &str = "关闭说明";
 
 const TITLE_PX: f32 = 72.0;
 const BODY_PX: f32 = 42.0;
@@ -162,11 +164,70 @@ fn fitted_base_sizes(body_lines: usize, page_h: usize) -> (f32, f32, f32) {
 /// The open guide panel: remembers the pixels it covered.
 pub struct Help {
     pub region: BBox,
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
+    panel_rect: HitRect,
+    close_rect: HitRect,
     saved: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HelpHit {
+    Close,
+    Panel,
+    Outside,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HelpAction {
+    Close,
+    Outside,
+    Consume,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HelpPreview {
+    tool: PointerTool,
+    rect: HitRect,
+    start: Point,
+    pressed: bool,
+}
+
+impl HelpPreview {
+    pub const fn rect(self) -> HitRect {
+        self.rect
+    }
+
+    pub const fn is_visible(self) -> bool {
+        self.pressed
+    }
+
+    pub fn update(&mut self, point: Point) -> bool {
+        let next = self.rect.contains(point);
+        let changed = self.pressed != next;
+        self.pressed = next;
+        changed
+    }
+
+    pub fn render(self, surface: &mut Surface) {
+        if self.pressed {
+            invert_mono(surface, self.rect);
+        }
+    }
+
+    pub fn release_gesture(self, end: Point) -> Gesture {
+        if self.pressed {
+            Gesture::Tap {
+                tool: self.tool,
+                at: end,
+            }
+        } else {
+            Gesture::Swipe {
+                tool: self.tool,
+                from: self.start,
+                to: self.start,
+                bounds: HitRect::from_xywh(self.start.x, self.start.y, 1, 1),
+            }
+        }
+    }
 }
 
 /// Draw the guide panel centered on the page; returns it for later dismissal.
@@ -182,7 +243,11 @@ pub fn show(surf: &mut Surface, font: &FontBook, takeover: bool) -> Help {
     let line_h = (body_px * 1.3) as usize;
     let footer_h = (footer_px * 1.4) as usize;
 
-    let mut wmax = script::measure_ui(font, TITLE, title_base_px);
+    let mut wmax = script::measure_ui(font, TITLE, title_base_px).max(script::measure_ui(
+        font,
+        FOOTER,
+        footer_base_px,
+    ));
     for l in body {
         wmax = wmax.max(script::measure_ui(font, l, body_base_px));
     }
@@ -205,25 +270,85 @@ pub fn show(surf: &mut Surface, font: &FontBook, takeover: bool) -> Help {
         }
         y += line_h;
     }
-    blit_centered(surf, font, FOOTER, footer_base_px, px, pw, y);
+    let footer_width = script::measure_ui(font, FOOTER, footer_base_px) as usize;
+    let close_w = (footer_width + 72).min(pw.saturating_sub(PAD * 2)).max(160);
+    let close_h = footer_h + 20;
+    let close_x = px + pw.saturating_sub(close_w) / 2;
+    let close_y = y.saturating_sub(10);
+    let close_rect = HitRect::from_xywh(
+        close_x as i32,
+        close_y as i32,
+        close_w as i32,
+        close_h as i32,
+    );
+    draw_hit_frame(surf, close_rect, 2);
+    blit_centered(surf, font, FOOTER, footer_base_px, close_x, close_w, y);
 
     let mut region = BBox::empty();
     region.add(px as i32, py as i32, 2);
     region.add((px + pw) as i32, (py + ph) as i32, 2);
     Help {
         region,
-        x: px,
-        y: py,
-        w: pw,
-        h: ph,
+        panel_rect: HitRect::from_xywh(px as i32, py as i32, pw as i32, ph as i32),
+        close_rect,
         saved,
     }
 }
 
 impl Help {
+    #[cfg(test)]
+    pub const fn panel_rect(&self) -> HitRect {
+        self.panel_rect
+    }
+
+    #[cfg(test)]
+    pub const fn close_rect(&self) -> HitRect {
+        self.close_rect
+    }
+
+    pub fn hit_test(&self, point: Point) -> HelpHit {
+        if self.close_rect.contains(point) {
+            HelpHit::Close
+        } else if self.panel_rect.contains(point) {
+            HelpHit::Panel
+        } else {
+            HelpHit::Outside
+        }
+    }
+
+    pub fn begin_preview(&self, tool: PointerTool, point: Point) -> Option<HelpPreview> {
+        (self.hit_test(point) == HelpHit::Close).then_some(HelpPreview {
+            tool,
+            rect: self.close_rect,
+            start: point,
+            pressed: true,
+        })
+    }
+
+    /// Classify a modal contact without drawing it. Runtime decides whether
+    /// `Outside` also dismisses. Ordinary panel taps and every non-tap gesture
+    /// are consumed so modal input cannot fall through to page ink.
+    pub fn interact(&self, gesture: Gesture) -> Option<HelpAction> {
+        let Gesture::Tap { at, .. } = gesture else {
+            return Some(HelpAction::Consume);
+        };
+        Some(match self.hit_test(at) {
+            HelpHit::Close => HelpAction::Close,
+            HelpHit::Panel => HelpAction::Consume,
+            HelpHit::Outside => HelpAction::Outside,
+        })
+    }
+
     /// Put back what the panel covered; returns the region to refresh.
     pub fn dismiss(self, surf: &mut Surface) -> BBox {
-        surf.paste_rect(self.x, self.y, self.w, self.h, &self.saved);
+        let panel = self.panel_rect;
+        surf.paste_rect(
+            panel.x0 as usize,
+            panel.y0 as usize,
+            panel.width() as usize,
+            panel.height() as usize,
+            &self.saved,
+        );
         self.region
     }
 }
@@ -261,6 +386,17 @@ fn frame(surf: &mut Surface, x: usize, y: usize, w: usize, h: usize, t: usize) {
     surf.fill_rect(x + w - t, y, t, h, BLACK);
 }
 
+fn draw_hit_frame(surf: &mut Surface, rect: HitRect, thickness: usize) {
+    frame(
+        surf,
+        rect.x0 as usize,
+        rect.y0 as usize,
+        rect.width() as usize,
+        rect.height() as usize,
+        thickness,
+    );
+}
+
 fn blit_centered(
     surf: &mut Surface,
     font: &FontBook,
@@ -282,187 +418,5 @@ fn blit_centered(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn stroke(pts: &[(i32, i32)]) -> Vec<(i32, i32, i32)> {
-        pts.iter().map(|&(x, y)| (x, y, 3)).collect()
-    }
-
-    /// Parametric "?": hook (arc sweeping over the top and curling back) then
-    /// a straight descender; optional dot.
-    fn question_mark(scale: f32, with_dot: bool, reversed: bool) -> Vec<Vec<(i32, i32, i32)>> {
-        let mut pts = Vec::new();
-        let (cx, cy, r) = (200.0 * scale, 180.0 * scale, 120.0 * scale);
-        let mut deg = 180.0f32;
-        while deg <= 450.0 {
-            let a = deg.to_radians();
-            pts.push(((cx + r * a.cos()) as i32, (cy + r * a.sin()) as i32));
-            deg += 6.0;
-        }
-        let (dx, dy) = (cx as i32, (cy + r) as i32);
-        for i in 1..=20 {
-            pts.push((dx, dy + (i as f32 * 13.0 * scale) as i32));
-        }
-        if reversed {
-            pts.reverse();
-        }
-        let mut out = vec![stroke(&pts)];
-        if with_dot {
-            let ddy = dy + (300.0 * scale) as i32 + 60;
-            out.push(stroke(&[(dx - 5, ddy), (dx + 5, ddy + 5), (dx, ddy + 8)]));
-        }
-        out
-    }
-
-    #[test]
-    fn detects_question_marks() {
-        assert!(looks_like_question_mark(&question_mark(1.5, true, false)));
-        assert!(looks_like_question_mark(&question_mark(1.5, false, false)));
-        assert!(looks_like_question_mark(&question_mark(1.5, true, true)));
-        assert!(looks_like_question_mark(&question_mark(3.0, true, false)));
-    }
-
-    #[test]
-    fn rejects_non_question_marks() {
-        // Too small (normal end-of-sentence "?").
-        assert!(!looks_like_question_mark(&question_mark(0.5, true, false)));
-        // "!" — vertical bar plus dot.
-        let bar: Vec<(i32, i32)> = (0..40).map(|i| (200, 60 + i * 12)).collect();
-        assert!(!looks_like_question_mark(&[
-            stroke(&bar),
-            stroke(&[(200, 600), (204, 604)])
-        ]));
-        // "7" — flat top bar, diagonal descender.
-        let mut seven: Vec<(i32, i32)> = (0..20).map(|i| (80 + i * 12, 60)).collect();
-        seven.extend((0..40).map(|i| (320 - i * 4, 60 + i * 12)));
-        assert!(!looks_like_question_mark(&[stroke(&seven)]));
-        // Two long strokes side by side (writing, not a glyph).
-        let l1: Vec<(i32, i32)> = (0..40).map(|i| (100, 60 + i * 10)).collect();
-        let l2: Vec<(i32, i32)> = (0..40).map(|i| (400, 60 + i * 10)).collect();
-        assert!(!looks_like_question_mark(&[stroke(&l1), stroke(&l2)]));
-        // Empty / too many strokes.
-        assert!(!looks_like_question_mark(&[]));
-        let dot = stroke(&[(0, 0), (1, 1)]);
-        assert!(!looks_like_question_mark(&[
-            dot.clone(),
-            dot.clone(),
-            dot.clone(),
-            dot
-        ]));
-    }
-
-    #[test]
-    fn modal_renders_and_restores() {
-        crate::fb::test_init_screen();
-        let (w, h) = (screen_w(), screen_h());
-        let mut buf = vec![0xFFu8; w * h * 4];
-        let ptr = buf.as_mut_ptr();
-        let mut surf = Surface::new(ptr, buf.len(), w, h, w * 4, crate::surface::PixFmt::Rgb32);
-        let font = FontBook::for_test(
-            ab_glyph::FontRef::try_from_slice(include_bytes!("../../fonts/DancingScript.ttf"))
-                .unwrap(),
-            None,
-        );
-
-        // Scribble something under the panel area so restore is observable.
-        surf.fill_rect(700, 1000, 200, 200, BLACK);
-        let before = surf.copy_rect(0, 0, w, h);
-
-        let panel = show(&mut surf, &font, true);
-        let (px, py, pw, ph) = panel.region.rect();
-        assert!(pw > 400 && ph > 400, "panel too small: {pw}x{ph}");
-        // Panel must contain ink (text + frame).
-        let mut black = 0;
-        for y in py..py + ph {
-            for x in px..px + pw {
-                if surf.luma(x, y) < 128 {
-                    black += 1;
-                }
-            }
-        }
-        assert!(black > 5000, "panel looks empty: {black} dark px");
-
-        // Dump for visual inspection.
-        let out = std::env::temp_dir().join("riddle-help-modal.png");
-        let mut gray = vec![0u8; w * h];
-        for y in 0..h {
-            for x in 0..w {
-                gray[y * w + x] = surf.luma(x as i32, y as i32);
-            }
-        }
-        let file = std::fs::File::create(&out).unwrap();
-        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
-        enc.set_color(png::ColorType::Grayscale);
-        enc.set_depth(png::BitDepth::Eight);
-        enc.write_header().unwrap().write_image_data(&gray).unwrap();
-        eprintln!("modal snapshot: {}", out.display());
-
-        // Dismissing must restore the page byte-for-byte.
-        panel.dismiss(&mut surf);
-        assert_eq!(before, surf.copy_rect(0, 0, w, h), "restore is not exact");
-    }
-
-    #[test]
-    fn sleep_page_renders_and_restores() {
-        crate::fb::test_init_screen();
-        let (w, h) = (screen_w(), screen_h());
-        let mut buf = vec![0xFFu8; w * h * 4];
-        let ptr = buf.as_mut_ptr();
-        let mut surf = Surface::new(ptr, buf.len(), w, h, w * 4, crate::surface::PixFmt::Rgb32);
-        let font = FontBook::for_test(
-            ab_glyph::FontRef::try_from_slice(include_bytes!("../../fonts/DancingScript.ttf"))
-                .unwrap(),
-            None,
-        );
-
-        surf.fill_rect(300, 300, 400, 400, BLACK);
-        let before = surf.copy_rect(0, 0, w, h);
-
-        let saved = show_sleep(&mut surf, &font);
-        let mut black = 0usize;
-        for y in 0..h {
-            for x in 0..w {
-                if surf.luma(x as i32, y as i32) < 128 {
-                    black += 1;
-                }
-            }
-        }
-        assert!(black > 10_000, "sleep page looks empty: {black} dark px");
-
-        let out = std::env::temp_dir().join("riddle-sleep-page.png");
-        let mut gray = vec![0u8; w * h];
-        for y in 0..h {
-            for x in 0..w {
-                gray[y * w + x] = surf.luma(x as i32, y as i32);
-            }
-        }
-        let file = std::fs::File::create(&out).unwrap();
-        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
-        enc.set_color(png::ColorType::Grayscale);
-        enc.set_depth(png::BitDepth::Eight);
-        enc.write_header().unwrap().write_image_data(&gray).unwrap();
-        eprintln!("sleep snapshot: {}", out.display());
-
-        restore_sleep(&mut surf, &saved);
-        assert_eq!(
-            before,
-            surf.copy_rect(0, 0, w, h),
-            "sleep restore is not exact"
-        );
-    }
-
-    #[test]
-    fn handwriting_calibration_does_not_resize_the_ui_manual() {
-        let face =
-            ab_glyph::FontRef::try_from_slice(include_bytes!("../../fonts/DancingScript.ttf"))
-                .unwrap();
-        let mut font = FontBook::for_test(face, None);
-        font.set_scale_for_test(crate::fonts::FontId::ChenYuluoyan, 180);
-        let (title, body, footer) = fitted_base_sizes(BODY_TAKEOVER.len(), 1696);
-        let text_height =
-            title * 1.4 + body * 1.3 * (BODY_TAKEOVER.len() as f32 + 0.5) + footer * 1.4;
-        assert!(text_height + (2 * PAD) as f32 <= 1656.5);
-        assert_eq!(font.calibrated_px(crate::fonts::FontId::Ui, body), body);
-    }
-}
+#[path = "help/tests.rs"]
+mod tests;

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use super::super::lifecycle::{LifecycleCommand, LifecycleStage};
 use super::super::oracle_controller::cancel_speculative;
 use super::super::state::TurnKind;
-use super::{suspend_visible_state, Engine, LifecycleExit};
+use super::{input_mode_for_state, suspend_visible_state, Engine, LifecycleExit};
 use crate::fb::BBox;
 use crate::platform::RefreshIntent;
 
@@ -32,6 +32,9 @@ impl Engine<'_> {
                 break;
             }
             self.tick_state();
+            if self.input_mode_failed() {
+                break;
+            }
             self.stylus_tapped = false;
             self.wait_for_next_tick();
         }
@@ -88,6 +91,7 @@ impl Engine<'_> {
         }
         self.qtfb_pen.reset();
         self.primary_touch = None;
+        self.cancel_modal_contact();
         self.pen_down = false;
         self.stylus_on = false;
         self.stylus_tapped = false;
@@ -103,6 +107,9 @@ impl Engine<'_> {
             return false;
         }
         self.lifecycle_frame_sequence = sequence;
+        if !self.set_input_mode(input_mode_for_state(&self.state)) {
+            return false;
+        }
         if let Err(error) = self.lifecycle.report_ready_after_frame(sequence) {
             self.fail(
                 LifecycleStage::Foreground,
@@ -140,10 +147,15 @@ impl Engine<'_> {
 
     fn reset_for_background(&mut self) {
         self.lifecycle_foreground = false;
+        // The next foreground lease re-enables manifest direct ink before the
+        // application is recalled, so our cached mode no longer describes the
+        // host even when the enum value itself has not changed.
+        self.input_mode_synced = false;
         self.input_priority.enter_background();
         self.oracle.invalidate_active_turn();
         cancel_speculative(&mut self.speculative, "application entered background");
         self.user_ink.pen_up();
+        self.cancel_modal_contact();
         suspend_visible_state(&mut self.state, &mut self.surf, &mut self.user_ink);
         self.pen_down = false;
         self.qtfb_pen.reset();
