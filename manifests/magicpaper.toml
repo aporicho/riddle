@@ -3,7 +3,7 @@ id = "magicpaper"
 name = "MagicPaper"
 kind = "user"
 description = "手写 AI 魔法纸"
-version = "0.7.0"
+version = "0.7.1"
 package = "magicpaper"
 supported_devices = ["paper_pro", "paper_pro_move"]
 supported_os = []
@@ -76,7 +76,6 @@ name = "Asia/Shanghai"
 [runtime.fonts]
 directories = [
   "/home/root/apps/magicpaper/current/payload/share/fonts",
-  "/home/root/.local/share/fonts",
 ]
 
 [runtime.certificates]
