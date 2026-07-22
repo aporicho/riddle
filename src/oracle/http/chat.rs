@@ -122,7 +122,7 @@ fn open_response(agent: &ureq::Agent, config: &ChatConfig) -> Result<ureq::Respo
             };
             let detail = response.into_string().unwrap_or_default();
             if detail.contains("max_completion_tokens") {
-                eprintln!("riddle: endpoint wants max_completion_tokens; retrying");
+                eprintln!("magicpaper: endpoint wants max_completion_tokens; retrying");
                 post(agent, config, "max_completion_tokens").map_err(|error| http_error(*error))
             } else {
                 Err(format!("http 400: {}", detail.trim()))
@@ -179,7 +179,7 @@ fn stream_response(
     let mut stream = ChatStream::new(request, asked);
     for line in BufReader::new(reader).lines() {
         if request.cancelled.load(Ordering::Acquire) {
-            eprintln!("riddle: speculative chat request cancelled");
+            eprintln!("magicpaper: speculative chat request cancelled");
             return Ok(());
         }
         let line = line.map_err(|error| StreamFailure {
@@ -245,7 +245,7 @@ impl<'a> ChatStream<'a> {
         for event in events {
             if self.first {
                 eprintln!(
-                    "riddle: oracle first chunk +{}ms",
+                    "magicpaper: oracle first chunk +{}ms",
                     self.asked.elapsed().as_millis()
                 );
                 self.first = false;

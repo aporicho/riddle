@@ -87,12 +87,16 @@ pub struct TaskStore {
 }
 
 fn task_dir() -> PathBuf {
-    crate::runtime_env::persistent_path("RIDDLE_TASKS_DIR", "tasks", "/home/root/riddle-data/tasks")
+    crate::runtime_env::persistent_path(
+        "MAGICPAPER_TASKS_DIR",
+        "tasks",
+        "/home/root/.local/share/magicpaper/tasks",
+    )
 }
 
 impl TaskStore {
     pub fn open() -> Option<Self> {
-        match std::env::var("RIDDLE_TASKS").as_deref() {
+        match std::env::var("MAGICPAPER_TASKS").as_deref() {
             Ok("off") | Ok("0") | Ok("no") | Ok("false") => return None,
             _ => {}
         }

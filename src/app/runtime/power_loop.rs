@@ -22,7 +22,7 @@ impl Engine<'_> {
         };
         match action {
             power::ClickAction::Triple => {
-                eprintln!("riddle: triple power quit");
+                eprintln!("magicpaper: triple power quit");
                 button.wait_for_release(Duration::from_millis(700));
                 true
             }
@@ -35,7 +35,7 @@ impl Engine<'_> {
     }
 
     fn sleep_and_wake(&mut self) {
-        eprintln!("riddle: sleeping (power button)");
+        eprintln!("magicpaper: sleeping (power button)");
         let saved = ui::help::show_sleep(&mut self.surf, &self.font);
         self.refresh
             .request_full(self.disp, self.surf.w, self.surf.h);
@@ -43,7 +43,7 @@ impl Engine<'_> {
         if let Some(button) = self.power_dev.as_mut() {
             suspend_until_success(button);
         }
-        eprintln!("riddle: waking");
+        eprintln!("magicpaper: waking");
         ui::help::restore_sleep(&mut self.surf, &saved);
         self.refresh
             .request_full(self.disp, self.surf.w, self.surf.h);
@@ -87,9 +87,9 @@ fn suspend_until_success(button: &mut power::PowerButton) {
             }
         }
         if attempt == 8 {
-            eprintln!("riddle: suspend never happened ({attempt} tries); waking the page");
+            eprintln!("magicpaper: suspend never happened ({attempt} tries); waking the page");
             return;
         }
-        eprintln!("riddle: suspend aborted (EPD discharge timer), retrying");
+        eprintln!("magicpaper: suspend aborted (EPD discharge timer), retrying");
     }
 }

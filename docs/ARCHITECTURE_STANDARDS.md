@@ -1,6 +1,6 @@
 # Architecture and review-size standards
 
-MagicPaper is an application hosted by Remagic. It owns its document model and
+MagicPaper is an application hosted by ReMagic. It owns its document model and
 user experience, but it does not own raw input, the physical panel, process
 supervision, or system/application switching.
 

@@ -14,7 +14,7 @@ pub(super) fn unix_now() -> u64 {
 }
 
 pub(super) fn heartbeat_retry_interval() -> Duration {
-    let secs = std::env::var("RIDDLE_HEARTBEAT_RETRY_SECONDS")
+    let secs = std::env::var("MAGICPAPER_HEARTBEAT_RETRY_SECONDS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(HEARTBEAT_RETRY_DEFAULT.as_secs())

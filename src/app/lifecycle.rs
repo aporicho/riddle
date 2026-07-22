@@ -1,4 +1,4 @@
-//! Optional Remagic application-lifecycle command client.
+//! Optional ReMagic application-lifecycle command client.
 //!
 //! Managed launches pass a bidirectional inherited `SOCK_SEQPACKET`; a local
 //! UNIX stream remains available for development. The wire codec and transport

@@ -17,9 +17,9 @@ const MAX_REPLY_BYTES: usize = 32 * 1024;
 
 fn queue_dir() -> PathBuf {
     crate::runtime_env::persistent_path(
-        "RIDDLE_AGENT_QUEUE_DIR",
+        "MAGICPAPER_AGENT_QUEUE_DIR",
         "agent",
-        "/home/root/riddle-data/agent",
+        "/home/root/.local/share/magicpaper/agent",
     )
 }
 

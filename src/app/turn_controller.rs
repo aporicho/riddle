@@ -84,7 +84,7 @@ fn first_event_error(error: String, rx: &OracleTurn, ctx: &mut FirstEventContext
         rx.request_id(),
         error.lines().next().unwrap_or("unknown error")
     );
-    eprintln!("riddle: oracle failed: {error}");
+    eprintln!("magicpaper: oracle failed: {error}");
     *ctx.turn_failed = true;
     replying(ctx.font, &oracle_excuse(&error), None)
 }
@@ -93,7 +93,7 @@ fn show_memory(id: u64, ctx: &mut FirstEventContext<'_>) -> State {
     match conjure(ctx.font, ctx.memory_store, id, ctx.surface, ctx.display) {
         Some(state) => state,
         None => {
-            eprintln!("riddle: memory {id} is missing");
+            eprintln!("magicpaper: memory {id} is missing");
             *ctx.turn_failed = true;
             replying(ctx.font, &oracle_excuse("lost page"), None)
         }

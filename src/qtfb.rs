@@ -42,7 +42,7 @@ pub const INPUT_PEN_RELEASE: i32 = 0x21;
 pub const INPUT_PEN_UPDATE: i32 = 0x22;
 /// Runtime convention: dev_id 0 is the marker tip, 1 is the eraser tip.
 /// Upstream AppLoad currently sends 0 for every pen event, so this remains
-/// backward compatible while allowing the Remagic fork to preserve erasers.
+/// backward compatible while allowing the ReMagic fork to preserve erasers.
 pub const PEN_DEVICE_ERASER: i32 = 1;
 #[allow(dead_code)]
 pub const INPUT_VKB_RELEASE: i32 = 0x41;
@@ -290,7 +290,7 @@ impl QtfbClient {
     }
 
     /// Cache mode changes because some legacy AppLoad hosts handled this
-    /// packet expensively. The managed Remagic display host applies it without
+    /// packet expensively. The managed ReMagic display host applies it without
     /// sleeping, so a real transition does not add a fixed one-second stall.
     fn send_refresh_mode(&self, mode: i32) -> io::Result<()> {
         let mut msg = [0u8; 24];

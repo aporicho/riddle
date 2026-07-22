@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_PREF_DIR: &str = "/home/root/riddle-data/preferences";
+const DEFAULT_PREF_DIR: &str = "/home/root/.local/share/magicpaper/preferences";
 const SETTINGS_FILE: &str = "settings.json";
 const SETTINGS_SCHEMA: u32 = 1;
 
@@ -105,7 +105,7 @@ pub(crate) struct UserPreferences {
 impl UserPreferences {
     pub(crate) fn open() -> Self {
         let dir = crate::runtime_env::persistent_path(
-            "RIDDLE_PREFERENCES_DIR",
+            "MAGICPAPER_PREFERENCES_DIR",
             "preferences",
             DEFAULT_PREF_DIR,
         );

@@ -26,7 +26,7 @@ mod lifecycle_loop;
 mod power_loop;
 mod state_loop;
 
-pub(super) const PNG_PATH: &str = "/tmp/riddle-page.png";
+pub(super) const PNG_PATH: &str = "/tmp/magicpaper-page.png";
 pub(super) const IDLE_PREASK: Duration = Duration::from_millis(1000);
 pub(super) const DRINK_STAGES: u32 = 14;
 pub(super) const DRINK_STAGE_DELAY: Duration = Duration::from_millis(50);
@@ -128,7 +128,7 @@ pub(super) fn run(launch_mode: runtime_env::LaunchMode) -> std::io::Result<RunOu
 
     let sigterm = termination_flag()?;
     let mut engine = Engine::new(&disp, surf, font, lifecycle, runtime_managed);
-    eprintln!("riddle: the diary is open");
+    eprintln!("magicpaper: the diary is open");
     if engine.set_input_mode(InputMode::Writing) {
         engine.run_loop(&sigterm);
     }
@@ -277,7 +277,7 @@ impl<'a> Engine<'a> {
     }
 
     fn close(mut self) -> (LifecycleClient, LifecycleExit) {
-        eprintln!("riddle: the diary closes");
+        eprintln!("magicpaper: the diary closes");
         self.input_priority.enter_background();
         self.oracle.invalidate_active_turn();
         super::oracle_controller::cancel_speculative(&mut self.speculative, "diary closed");
@@ -372,9 +372,9 @@ pub(super) fn input_mode_for_state(state: &State) -> InputMode {
 
 fn open_devices(takeover: bool, hosted: bool) -> Devices {
     if !takeover {
-        eprintln!("riddle: hosted QTFB input enabled; raw input devices left ungrabbed");
+        eprintln!("magicpaper: hosted QTFB input enabled; raw input devices left ungrabbed");
         if hosted {
-            eprintln!("riddle: Remagic manager owns the power-button lifecycle");
+            eprintln!("magicpaper: ReMagic manager owns the power-button lifecycle");
         }
         return Devices {
             pen: None,
@@ -383,10 +383,10 @@ fn open_devices(takeover: bool, hosted: bool) -> Devices {
         };
     }
     let pen = pen::PenDevice::open()
-        .map_err(|error| eprintln!("riddle: raw pen unavailable ({error})"))
+        .map_err(|error| eprintln!("magicpaper: raw pen unavailable ({error})"))
         .ok();
     let power = power::PowerButton::open()
-        .map_err(|error| eprintln!("riddle: no power button ({error})"))
+        .map_err(|error| eprintln!("magicpaper: no power button ({error})"))
         .ok();
     Devices {
         pen,
@@ -400,7 +400,7 @@ fn open_stores() -> Stores {
     let tasks = tasks::TaskStore::open();
     let todos = todos::TodoStore::open();
     if let Some(store) = &memory {
-        eprintln!("riddle: memory holds {} pages", store.entries.len());
+        eprintln!("magicpaper: memory holds {} pages", store.entries.len());
     }
     if let Some(store) = &tasks {
         eprintln!(
@@ -423,7 +423,7 @@ fn open_stores() -> Stores {
 
 fn log_display(disp: &display::Display, surf: &crate::surface::Surface, takeover: bool) {
     eprintln!(
-        "riddle: display {} ({}x{} stride {})",
+        "magicpaper: display {} ({}x{} stride {})",
         if takeover { "quill/takeover" } else { "qtfb" },
         surf.w,
         surf.h,

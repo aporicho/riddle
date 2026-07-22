@@ -105,27 +105,27 @@ pub struct HttpOracle {
 impl HttpOracle {
     pub fn new(remember: bool) -> std::io::Result<Self> {
         crate::runtime_env::require_external_integrations("HTTP oracle")?;
-        let key = nonempty_env("RIDDLE_OPENAI_KEY")
-            .ok_or_else(|| std::io::Error::other("RIDDLE_OPENAI_KEY is missing or blank"))?;
-        let base = nonempty_env("RIDDLE_OPENAI_BASE")
+        let key = nonempty_env("MAGICPAPER_OPENAI_KEY")
+            .ok_or_else(|| std::io::Error::other("MAGICPAPER_OPENAI_KEY is missing or blank"))?;
+        let base = nonempty_env("MAGICPAPER_OPENAI_BASE")
             .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
         let base = base.trim_end_matches('/').to_string();
-        // A vision-capable default; override with RIDDLE_OPENAI_MODEL.
+        // A vision-capable default; override with MAGICPAPER_OPENAI_MODEL.
         let model =
-            std::env::var("RIDDLE_OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+            std::env::var("MAGICPAPER_OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
         // Thinking models (Gemini 3.x, o-series…) count hidden reasoning
         // tokens against max_tokens: a tight cap starves the visible reply to
         // one sentence (finish_reason=length). The persona already keeps
         // replies short, so the cap is only a runaway guard — leave headroom.
-        let max_tokens = std::env::var("RIDDLE_OPENAI_MAX_TOKENS")
+        let max_tokens = std::env::var("MAGICPAPER_OPENAI_MAX_TOKENS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(2000);
         // Sent as "reasoning_effort" only when set: reasoning models accept it
         // ("low" ≈ faster first ink), but some providers reject the field on
         // non-reasoning models, so it must stay out of the default request.
-        let reasoning = std::env::var("RIDDLE_OPENAI_REASONING").ok();
-        let api = match std::env::var("RIDDLE_OPENAI_API")
+        let reasoning = std::env::var("MAGICPAPER_OPENAI_REASONING").ok();
+        let api = match std::env::var("MAGICPAPER_OPENAI_API")
             .unwrap_or_else(|_| "chat_completions".into())
             .to_ascii_lowercase()
             .as_str()
@@ -134,13 +134,13 @@ impl HttpOracle {
             _ => HttpApi::ChatCompletions,
         };
         let web_search = matches!(
-            std::env::var("RIDDLE_WEB_SEARCH")
+            std::env::var("MAGICPAPER_WEB_SEARCH")
                 .unwrap_or_default()
                 .to_ascii_lowercase()
                 .as_str(),
             "auto" | "on" | "true" | "1"
         );
-        let rewrite_model = std::env::var("RIDDLE_PAPER_REWRITE_MODEL")
+        let rewrite_model = std::env::var("MAGICPAPER_PAPER_REWRITE_MODEL")
             .ok()
             .filter(|s| !s.trim().is_empty());
         let ocr = PaddleOcr::from_env()?;
@@ -154,7 +154,7 @@ impl HttpOracle {
             .timeout(std::time::Duration::from_secs(115))
             .build();
         eprintln!(
-            "riddle: http oracle base={base} model={model} api={api:?} max_tokens={max_tokens} reasoning={} web_search={} rewrite={} input={}",
+            "magicpaper: http oracle base={base} model={model} api={api:?} max_tokens={max_tokens} reasoning={} web_search={} rewrite={} input={}",
             reasoning.as_deref().unwrap_or("-"),
             if web_search { "auto" } else { "off" },
             rewrite_model.as_deref().unwrap_or("-"),

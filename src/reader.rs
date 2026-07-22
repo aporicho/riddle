@@ -349,12 +349,12 @@ pub fn validated_target(path: &Path) -> io::Result<PathBuf> {
 fn library_roots() -> (PathBuf, PathBuf) {
     (
         library_root(
-            "RIDDLE_REMARKABLE_LIBRARY",
+            "MAGICPAPER_REMARKABLE_LIBRARY",
             "reader/remarkable",
             REMARKABLE_LIBRARY,
         ),
         library_root(
-            "RIDDLE_KOREADER_LIBRARY",
+            "MAGICPAPER_KOREADER_LIBRARY",
             "reader/koreader",
             KOREADER_LIBRARY,
         ),

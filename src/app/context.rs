@@ -8,7 +8,7 @@ pub(super) fn build_ctx(
     task_store: &Option<tasks::TaskStore>,
     todo_store: &Option<todos::TodoStore>,
 ) -> oracle::TurnContext {
-    let turns: usize = std::env::var("RIDDLE_MEMORY_TURNS")
+    let turns: usize = std::env::var("MAGICPAPER_MEMORY_TURNS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(20);

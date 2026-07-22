@@ -13,19 +13,19 @@ const USAGE: &str = "\
 MagicPaper (MP) — your living magical paper
 
 usage:
-  riddle                      open the hosted qtfb diary (requires QTFB_KEY)
-  riddle --legacy-takeover    explicitly own display and raw input via libquill
-  riddle --oracle-test [PNG]  run one oracle turn against PNG (default
-                              /tmp/riddle-page.png) and print the streamed
+  magicpaper                      open the hosted qtfb diary (requires QTFB_KEY)
+  magicpaper --legacy-takeover    explicitly own display and raw input via libquill
+  magicpaper --oracle-test [PNG]  run one oracle turn against PNG (default
+                              /tmp/magicpaper-page.png) and print the streamed
                               reply; verifies key + endpoint + model
-  riddle --ocr-test PNG       send one PNG only to the configured PaddleOCR
+  magicpaper --ocr-test PNG       send one PNG only to the configured PaddleOCR
                               service and print its recognized text
-  riddle --agent              run the screenless scheduled-task worker
-  riddle --power-launcher     watch for three quick power-button presses and
+  magicpaper --agent              run the screenless scheduled-task worker
+  magicpaper --power-launcher     watch for three quick power-button presses and
                               launch the standalone diary
-  riddle --version            print the version
+  magicpaper --version            print the version
 
-standalone configuration lives in /home/root/.config/riddle/oracle.env.
+standalone configuration lives in /home/root/.config/magicpaper/oracle.env.
 ";
 
 pub(crate) fn entry() {
@@ -40,7 +40,7 @@ pub(crate) fn entry() {
         }
         Some("--ocr-test") => {
             let Some(png) = args.get(2) else {
-                eprintln!("riddle: --ocr-test needs a PNG path");
+                eprintln!("magicpaper: --ocr-test needs a PNG path");
                 std::process::exit(2);
             };
             match oracle::paddle_ocr_test(png) {
@@ -54,7 +54,7 @@ pub(crate) fn entry() {
         }
         Some("--power-launcher") => {
             if let Err(e) = power::launcher_loop() {
-                eprintln!("riddle: power launcher fatal: {e}");
+                eprintln!("magicpaper: power launcher fatal: {e}");
                 std::process::exit(1);
             }
             return;
@@ -71,7 +71,7 @@ pub(crate) fn entry() {
                 Ok(RunOutcome::Closed) => {}
                 Ok(RunOutcome::Failed) => std::process::exit(1),
                 Err(error) => {
-                    eprintln!("riddle: fatal: {error}");
+                    eprintln!("magicpaper: fatal: {error}");
                     std::process::exit(1);
                 }
             }
@@ -86,7 +86,7 @@ pub(crate) fn entry() {
             return;
         }
         Some(flag) if flag.starts_with('-') => {
-            eprintln!("riddle: unknown flag {flag}\n");
+            eprintln!("magicpaper: unknown flag {flag}\n");
             eprint!("{USAGE}");
             std::process::exit(2);
         }
@@ -96,7 +96,7 @@ pub(crate) fn entry() {
         Ok(RunOutcome::Closed) => {}
         Ok(RunOutcome::Failed) => std::process::exit(1),
         Err(e) => {
-            eprintln!("riddle: fatal: {e}");
+            eprintln!("magicpaper: fatal: {e}");
             std::process::exit(1);
         }
     }

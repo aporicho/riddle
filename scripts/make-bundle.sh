@@ -1,44 +1,44 @@
 #!/usr/bin/env bash
-# Stage the AppLoad bundle into dist/riddle/, ready for `remagic publish`.
+# Stage the AppLoad bundle into dist/magicpaper/, ready for `remagic publish`.
 # Prereq: ./build-takeover.sh has produced the takeover binary.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BIN=target/aarch64-unknown-linux-gnu/release/riddle-takeover
+BIN=target/aarch64-unknown-linux-gnu/release/magicpaper-takeover
 QUILL=${QUILL_DIR:-../quill-move}
 [ -f "$BIN" ] || { echo "build first: ./build-takeover.sh" >&2; exit 1; }
 [ -f "$QUILL/build/libquill.so" ] || { echo "missing $QUILL/build/libquill.so" >&2; exit 1; }
 
-rm -rf dist/riddle
-mkdir -p dist/riddle
-install -m 755 "$BIN" dist/riddle/riddle
-install -m 755 "$QUILL/build/libquill.so" dist/riddle/
-install -m 755 scripts/appload-launch.sh scripts/riddle-launch.sh scripts/riddle-takeover.sh scripts/riddle-restore.sh dist/riddle/
-install -m 644 systemd/riddle-takeover.service systemd/riddle-power-launcher.service dist/riddle/
-install -m 644 external.manifest.json icon.png oracle.env.default oracle.env.example settings.schema.json dist/riddle/
+rm -rf dist/magicpaper
+mkdir -p dist/magicpaper
+install -m 755 "$BIN" dist/magicpaper/magicpaper
+install -m 755 "$QUILL/build/libquill.so" dist/magicpaper/
+install -m 755 scripts/appload-launch.sh scripts/magicpaper-launch.sh scripts/magicpaper-takeover.sh scripts/magicpaper-restore.sh dist/magicpaper/
+install -m 644 systemd/magicpaper-takeover.service systemd/magicpaper-power-launcher.service dist/magicpaper/
+install -m 644 external.manifest.json icon.png oracle.env.default oracle.env.example settings.schema.json dist/magicpaper/
 
 # Optional local-only handwriting fonts. Their licenses are not part of this
 # repository, so callers must provide extracted TTF paths explicitly. The app
 # remains usable with its embedded OFL ChenYuluoyan font when either is absent.
-mkdir -p dist/riddle/fonts
+mkdir -p dist/magicpaper/fonts
 MAGICPAPER_UI_FONT=${MAGICPAPER_UI_FONT:-${HOME:?}/Downloads/方正屏显雅宋.TTF}
 [ -f "$MAGICPAPER_UI_FONT" ] || { echo "missing $MAGICPAPER_UI_FONT" >&2; exit 1; }
 printf '%s  %s\n' \
     dbbdf59d7035d980abecf4f820e615b72107865a00f6eb41a1bbb9d9d1492fd1 \
     "$MAGICPAPER_UI_FONT" | sha256sum -c - >/dev/null
-install -m 644 "$MAGICPAPER_UI_FONT" dist/riddle/fonts/FZPingXianYaSong.ttf
+install -m 644 "$MAGICPAPER_UI_FONT" dist/magicpaper/fonts/FZPingXianYaSong.ttf
 if [ -n "${MAGICPAPER_BUTTER_FONT:-}" ]; then
     [ -f "$MAGICPAPER_BUTTER_FONT" ] || { echo "missing $MAGICPAPER_BUTTER_FONT" >&2; exit 1; }
-    install -m 644 "$MAGICPAPER_BUTTER_FONT" dist/riddle/fonts/ButterShiSan.ttf
+    install -m 644 "$MAGICPAPER_BUTTER_FONT" dist/magicpaper/fonts/ButterShiSan.ttf
 else
     echo "note: MAGICPAPER_BUTTER_FONT not set; 黄油拾叁体 will be unavailable" >&2
 fi
 if [ -n "${MAGICPAPER_851_FONT:-}" ]; then
     [ -f "$MAGICPAPER_851_FONT" ] || { echo "missing $MAGICPAPER_851_FONT" >&2; exit 1; }
-    install -m 644 "$MAGICPAPER_851_FONT" dist/riddle/fonts/851LakeusNightWriting.ttf
+    install -m 644 "$MAGICPAPER_851_FONT" dist/magicpaper/fonts/851LakeusNightWriting.ttf
 else
     echo "note: MAGICPAPER_851_FONT not set; 851 远星夜行 will be unavailable" >&2
 fi
 
-echo "staged: $(du -sh dist/riddle | cut -f1) in dist/riddle/"
-echo "publish with: remagic publish dist/riddle -catalog-dir <remagic checkout>"
+echo "staged: $(du -sh dist/magicpaper | cut -f1) in dist/magicpaper/"
+echo "publish with: remagic publish dist/magicpaper -catalog-dir <remagic checkout>"

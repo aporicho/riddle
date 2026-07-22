@@ -67,7 +67,7 @@ impl ReplyController {
         if *page_full || plan.next_y > screen_h() as i32 - 200 {
             if !*page_full {
                 *page_full = true;
-                eprintln!("riddle: reply reached the page bottom; draining hidden stream tail");
+                eprintln!("magicpaper: reply reached the page bottom; draining hidden stream tail");
             }
             return;
         }

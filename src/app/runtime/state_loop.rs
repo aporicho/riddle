@@ -161,7 +161,7 @@ impl Engine<'_> {
         let (x, y, width, height) = panel.region.rect();
         self.disp
             .present_region(x, y, width, height, RefreshIntent::Ui);
-        eprintln!("riddle: guide shown");
+        eprintln!("magicpaper: guide shown");
         State::Help {
             panel: Some(panel),
             until: Instant::now() + Duration::from_secs(45),
@@ -234,7 +234,7 @@ impl Engine<'_> {
                 }
             }
             Err(error) => {
-                eprintln!("riddle: speculative rasterize failed; will retry at commit: {error}")
+                eprintln!("magicpaper: speculative rasterize failed; will retry at commit: {error}")
             }
         }
     }
@@ -404,7 +404,7 @@ impl Engine<'_> {
                 let (x, y, width, height) = region.rect();
                 self.disp
                     .present_region(x, y, width, height, RefreshIntent::Ui);
-                eprintln!("riddle: guide dismissed");
+                eprintln!("magicpaper: guide dismissed");
                 State::Help { panel: None, until }
             }
             Some(panel) => State::Help {

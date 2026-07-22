@@ -34,14 +34,14 @@ impl OracleController {
         let current_generation = Arc::new(AtomicU64::new(0));
         match oracle::Oracle::spawn(remember) {
             Ok(oracle) => {
-                eprintln!("riddle: oracle ready");
+                eprintln!("magicpaper: oracle ready");
                 Self {
                     oracle: Some(oracle),
                     current_generation,
                 }
             }
             Err(error) => {
-                eprintln!("riddle: oracle spawn failed: {error}");
+                eprintln!("magicpaper: oracle spawn failed: {error}");
                 Self {
                     oracle: None,
                     current_generation,

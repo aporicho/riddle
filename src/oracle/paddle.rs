@@ -47,35 +47,35 @@ impl OcrResult {
 impl PaddleOcr {
     pub(super) fn from_env() -> std::io::Result<Option<Self>> {
         crate::runtime_env::require_external_integrations("PaddleOCR")?;
-        let token = match std::env::var("RIDDLE_OCR_TOKEN") {
+        let token = match std::env::var("MAGICPAPER_OCR_TOKEN") {
             Ok(token) if !token.trim().is_empty() => token,
             _ => return Ok(None),
         };
-        let provider = std::env::var("RIDDLE_OCR_PROVIDER")
+        let provider = std::env::var("MAGICPAPER_OCR_PROVIDER")
             .unwrap_or_else(|_| "paddle".into())
             .to_ascii_lowercase();
         if provider != "paddle" && provider != "paddleocr" {
             return Err(std::io::Error::other(format!(
-                "unsupported RIDDLE_OCR_PROVIDER {provider}"
+                "unsupported MAGICPAPER_OCR_PROVIDER {provider}"
             )));
         }
-        let job_url = std::env::var("RIDDLE_OCR_URL")
+        let job_url = std::env::var("MAGICPAPER_OCR_URL")
             .unwrap_or_else(|_| "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs".into())
             .trim_end_matches('/')
             .to_string();
-        let model = std::env::var("RIDDLE_OCR_MODEL").unwrap_or_else(|_| "PP-OCRv6".into());
-        let poll_ms = std::env::var("RIDDLE_OCR_POLL_MS")
+        let model = std::env::var("MAGICPAPER_OCR_MODEL").unwrap_or_else(|_| "PP-OCRv6".into());
+        let poll_ms = std::env::var("MAGICPAPER_OCR_POLL_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(250)
             .clamp(250, 5000);
-        let timeout_secs = std::env::var("RIDDLE_OCR_TIMEOUT_SECONDS")
+        let timeout_secs = std::env::var("MAGICPAPER_OCR_TIMEOUT_SECONDS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(60)
             .clamp(10, 115);
         let speculative = matches!(
-            std::env::var("RIDDLE_OCR_SPECULATIVE")
+            std::env::var("MAGICPAPER_OCR_SPECULATIVE")
                 .unwrap_or_else(|_| "on".into())
                 .to_ascii_lowercase()
                 .as_str(),

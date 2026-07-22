@@ -170,7 +170,7 @@ fn consume_response<'a>(
     let mut paper = PaperStream::new(request, asked);
     for line in BufReader::new(reader).lines() {
         if request.cancelled.load(Ordering::Acquire) {
-            eprintln!("riddle: speculative Responses request cancelled");
+            eprintln!("magicpaper: speculative Responses request cancelled");
             return Ok(paper);
         }
         let line = line.map_err(|error| StreamFailure {
@@ -263,7 +263,7 @@ impl<'a> PaperStream<'a> {
         };
         if self.first_model_text {
             eprintln!(
-                "riddle: oracle first model text +{}ms",
+                "magicpaper: oracle first model text +{}ms",
                 self.asked.elapsed().as_millis()
             );
             self.first_model_text = false;
@@ -301,7 +301,7 @@ impl<'a> PaperStream<'a> {
                 Ok(other) => {
                     if self.first_paper_event && matches!(other, Event::Show(_)) {
                         eprintln!(
-                            "riddle: oracle first paper event +{}ms",
+                            "magicpaper: oracle first paper event +{}ms",
                             self.asked.elapsed().as_millis()
                         );
                         self.first_paper_event = false;
@@ -334,7 +334,7 @@ impl<'a> PaperStream<'a> {
         }
         if self.first_paper_event {
             eprintln!(
-                "riddle: oracle first paper text +{}ms",
+                "magicpaper: oracle first paper text +{}ms",
                 self.asked.elapsed().as_millis()
             );
             self.first_paper_event = false;
@@ -411,7 +411,7 @@ impl<'a> PaperStream<'a> {
         }
         if self.first_paper_event {
             eprintln!(
-                "riddle: oracle first paper text +{}ms",
+                "magicpaper: oracle first paper text +{}ms",
                 self.asked.elapsed().as_millis()
             );
             self.first_paper_event = false;

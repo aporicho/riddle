@@ -58,7 +58,7 @@ impl Engine<'_> {
                 self.surf.paste_rect(0, 0, screen_w(), screen_h(), &saved);
                 self.refresh
                     .request_full(self.disp, self.surf.w, self.surf.h);
-                eprintln!("riddle: memory dismissed");
+                eprintln!("magicpaper: memory dismissed");
                 State::MemoryShown {
                     saved: None,
                     until,

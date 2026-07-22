@@ -1,0 +1,18 @@
+[Unit]
+Description=MagicPaper full-screen living paper
+After=home.mount
+ConditionPathExists=/home/root/apps/magicpaper/magicpaper
+
+[Service]
+Type=simple
+Environment=HOME=/home/root
+Environment=MAGICPAPER_SYSTEMD_MANAGED=1
+WorkingDirectory=/home/root/apps/magicpaper
+ExecStart=/bin/bash /home/root/apps/magicpaper/magicpaper-takeover.sh
+ExecStopPost=-/home/root/apps/magicpaper/magicpaper-restore.sh
+KillMode=control-group
+TimeoutStopSec=20
+Restart=no
+SuccessExitStatus=143
+StandardOutput=journal
+StandardError=journal

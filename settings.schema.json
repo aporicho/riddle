@@ -3,118 +3,118 @@
   "env": "oracle.env",
   "fields": [
     {
-      "key": "RIDDLE_OPENAI_KEY",
+      "key": "MAGICPAPER_OPENAI_KEY",
       "label": "API key",
       "kind": "secret",
       "placeholder": "sk-… / AIza…",
       "help": "Stored only on the tablet."
     },
     {
-      "key": "RIDDLE_OPENAI_BASE",
+      "key": "MAGICPAPER_OPENAI_BASE",
       "label": "API base URL",
       "kind": "text",
       "placeholder": "https://api.openai.com/v1"
     },
     {
-      "key": "RIDDLE_OPENAI_MODEL",
+      "key": "MAGICPAPER_OPENAI_MODEL",
       "label": "Model",
       "kind": "text",
       "placeholder": "gpt-5.6-terra",
       "help": "With PaddleOCR configured this model receives text only and does not need vision."
     },
     {
-      "key": "RIDDLE_OCR_TOKEN",
+      "key": "MAGICPAPER_OCR_TOKEN",
       "label": "PaddleOCR token",
       "kind": "secret",
       "placeholder": "AI Studio access token",
       "help": "Enables external OCR. The token is stored only on the tablet; OpenAI then receives recognized text instead of the page image."
     },
     {
-      "key": "RIDDLE_OCR_MODEL",
+      "key": "MAGICPAPER_OCR_MODEL",
       "label": "OCR model",
       "kind": "text",
       "placeholder": "PP-OCRv6",
       "help": "PP-OCRv6 is the fast default. PaddleOCR-VL-1.6 remains supported for document-layout OCR."
     },
     {
-      "key": "RIDDLE_OCR_SPECULATIVE",
+      "key": "MAGICPAPER_OCR_SPECULATIVE",
       "label": "Speculative OCR",
       "kind": "select",
       "options": ["", "on", "off"],
       "help": "On by default: submit after one second of idle time. Turn off to avoid possible extra paid jobs after a mid-sentence pause."
     },
     {
-      "key": "RIDDLE_OPENAI_API",
+      "key": "MAGICPAPER_OPENAI_API",
       "label": "API mode",
       "kind": "select",
       "options": ["chat_completions", "responses"],
       "help": "Responses enables model-managed tools such as web search."
     },
     {
-      "key": "RIDDLE_OPENAI_REASONING",
+      "key": "MAGICPAPER_OPENAI_REASONING",
       "label": "Reasoning effort",
       "kind": "select",
       "options": ["", "none", "low", "medium", "high", "xhigh"],
       "help": "Only for reasoning models. Low balances accuracy and first-ink latency."
     },
     {
-      "key": "RIDDLE_WEB_SEARCH",
+      "key": "MAGICPAPER_WEB_SEARCH",
       "label": "Background web search",
       "kind": "select",
       "options": ["", "auto"],
       "help": "In Responses mode, MP searches quotations, provenance, current and uncertain facts in the background."
     },
     {
-      "key": "RIDDLE_PAPER_REWRITE_MODEL",
+      "key": "MAGICPAPER_PAPER_REWRITE_MODEL",
       "label": "Paper editor model",
       "kind": "text",
       "placeholder": "gpt-5.6-luna",
       "help": "Rare fallback that rewrites web/Markdown formatting as natural paper prose."
     },
     {
-      "key": "RIDDLE_OPENAI_MAX_TOKENS",
+      "key": "MAGICPAPER_OPENAI_MAX_TOKENS",
       "label": "Max tokens",
       "kind": "text",
       "placeholder": "2000",
       "help": "Runaway guard. Thinking models count hidden reasoning tokens against it — keep it roomy."
     },
     {
-      "key": "RIDDLE_MEMORY",
+      "key": "MAGICPAPER_MEMORY",
       "label": "MagicPaper remembers",
       "kind": "select",
       "options": ["", "off"],
       "help": "When on (default), MP keeps your pages on the tablet, follows the conversation, and \"show me…\" conjures past pages. \"off\" disables page memory."
     },
     {
-      "key": "RIDDLE_MEMORY_TURNS",
+      "key": "MAGICPAPER_MEMORY_TURNS",
       "label": "Recent dialogue turns",
       "kind": "text",
       "placeholder": "20",
       "help": "Number of recent page/reply pairs carried as continuous conversation."
     },
     {
-      "key": "RIDDLE_TZ_OFFSET",
+      "key": "MAGICPAPER_TZ_OFFSET",
       "label": "Timezone offset",
       "kind": "text",
       "placeholder": "-4",
       "help": "Hours from UTC, so the dates of conjured memories read right."
     },
     {
-      "key": "RIDDLE_TASKS",
+      "key": "MAGICPAPER_TASKS",
       "label": "Recurring tasks",
       "kind": "select",
       "options": ["", "off"],
       "help": "On by default. Write a command such as 任务 每五分钟讲一个冷笑话 to add a persistent task."
     },
     {
-      "key": "RIDDLE_TODOS",
+      "key": "MAGICPAPER_TODOS",
       "label": "TODO list",
       "kind": "select",
       "options": ["", "off"],
       "help": "On by default. Write TODO followed by text to add an item; write TODO alone to open the list."
     },
     {
-      "key": "RIDDLE_HEARTBEAT_RETRY_SECONDS",
+      "key": "MAGICPAPER_HEARTBEAT_RETRY_SECONDS",
       "label": "Task retry delay",
       "kind": "text",
       "placeholder": "30",
@@ -125,28 +125,28 @@
     {
       "name": "Gemini",
       "values": {
-        "RIDDLE_OPENAI_BASE": "https://generativelanguage.googleapis.com/v1beta/openai",
-        "RIDDLE_OPENAI_MODEL": "gemini-3.5-flash",
-        "RIDDLE_OPENAI_REASONING": "low"
+        "MAGICPAPER_OPENAI_BASE": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "MAGICPAPER_OPENAI_MODEL": "gemini-3.5-flash",
+        "MAGICPAPER_OPENAI_REASONING": "low"
       }
     },
     {
       "name": "OpenAI",
       "values": {
-        "RIDDLE_OPENAI_BASE": "https://api.openai.com/v1",
-        "RIDDLE_OPENAI_MODEL": "gpt-5.6-terra",
-        "RIDDLE_OPENAI_API": "responses",
-        "RIDDLE_OPENAI_REASONING": "low",
-        "RIDDLE_WEB_SEARCH": "auto",
-        "RIDDLE_PAPER_REWRITE_MODEL": "gpt-5.6-luna"
+        "MAGICPAPER_OPENAI_BASE": "https://api.openai.com/v1",
+        "MAGICPAPER_OPENAI_MODEL": "gpt-5.6-terra",
+        "MAGICPAPER_OPENAI_API": "responses",
+        "MAGICPAPER_OPENAI_REASONING": "low",
+        "MAGICPAPER_WEB_SEARCH": "auto",
+        "MAGICPAPER_PAPER_REWRITE_MODEL": "gpt-5.6-luna"
       }
     },
     {
       "name": "OpenRouter",
       "values": {
-        "RIDDLE_OPENAI_BASE": "https://openrouter.ai/api/v1",
-        "RIDDLE_OPENAI_MODEL": "openai/gpt-4o-mini",
-        "RIDDLE_OPENAI_REASONING": ""
+        "MAGICPAPER_OPENAI_BASE": "https://openrouter.ai/api/v1",
+        "MAGICPAPER_OPENAI_MODEL": "openai/gpt-4o-mini",
+        "MAGICPAPER_OPENAI_REASONING": ""
       }
     }
   ]

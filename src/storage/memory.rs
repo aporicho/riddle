@@ -4,13 +4,13 @@
 //! back in the writer's own hand.
 //!
 //! Everything lives on the tablet, in plain files under
-//! `/home/root/riddle-data/memories` (override: `RIDDLE_MEMORY_DIR`):
+//! `/home/root/.local/share/magicpaper/memories` (override: `MAGICPAPER_MEMORY_DIR`):
 //!
 //!   index.tsv        one line per memory: id \t transcript \t reply
 //!                    (tabs/newlines/backslashes escaped)
 //!   <id>.strokes     the pen strokes: one line per stroke, "x,y,r;x,y,r;…"
 //!
-//! Delete the directory and the diary forgets. `RIDDLE_MEMORY=off` disables
+//! Delete the directory and the diary forgets. `MAGICPAPER_MEMORY=off` disables
 //! remembering entirely (no storage, no context sent with requests).
 
 use crate::storage::persistence::{
@@ -55,17 +55,17 @@ impl MemoryStore {
 
     /// Open (or start) the diary's memory. Returns None when memory is off.
     pub fn open() -> Option<Self> {
-        match std::env::var("RIDDLE_MEMORY").as_deref() {
+        match std::env::var("MAGICPAPER_MEMORY").as_deref() {
             Ok("off") | Ok("0") | Ok("no") | Ok("false") => return None,
             _ => {}
         }
         let dir = crate::runtime_env::persistent_path(
-            "RIDDLE_MEMORY_DIR",
+            "MAGICPAPER_MEMORY_DIR",
             "memories",
-            "/home/root/riddle-data/memories",
+            "/home/root/.local/share/magicpaper/memories",
         );
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            eprintln!("riddle: memory disabled ({}: {e})", dir.display());
+            eprintln!("magicpaper: memory disabled ({}: {e})", dir.display());
             return None;
         }
         let mut store = Self {
@@ -76,7 +76,7 @@ impl MemoryStore {
             Ok(()) => Some(store),
             Err(error) => {
                 eprintln!(
-                    "riddle: memory disabled because {} could not be loaded: {error}",
+                    "magicpaper: memory disabled because {} could not be loaded: {error}",
                     store.index_path().display()
                 );
                 None
@@ -165,7 +165,7 @@ impl MemoryStore {
     /// Remember a finished turn. Strokes are decimated before writing.
     pub fn append(&mut self, id: u64, transcript: &str, reply: &str, strokes: &Strokes) {
         if let Err(error) = self.try_append(id, transcript, reply, strokes) {
-            eprintln!("riddle: memory not kept: {error}");
+            eprintln!("magicpaper: memory not kept: {error}");
         }
     }
 
@@ -232,7 +232,7 @@ impl MemoryStore {
         for dropped_id in dropped {
             if let Err(error) = std::fs::remove_file(self.strokes_path(dropped_id)) {
                 if error.kind() != io::ErrorKind::NotFound {
-                    eprintln!("riddle: pruned memory index but not strokes: {error}");
+                    eprintln!("magicpaper: pruned memory index but not strokes: {error}");
                 }
             }
         }
@@ -346,7 +346,7 @@ impl MemoryStore {
         self.entries = updated;
         if let Err(error) = std::fs::remove_file(self.strokes_path(entry.id)) {
             if error.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("riddle: deleted history index but not strokes: {error}");
+                eprintln!("magicpaper: deleted history index but not strokes: {error}");
             }
         }
         Ok(entry)
@@ -395,9 +395,9 @@ fn escape(s: &str) -> String {
 
 /// "the 6th of July, in the evening" — how the diary speaks of a moment.
 /// Local time via libc so the device's timezone is respected; the writer can
-/// nudge it with RIDDLE_TZ_OFFSET (hours) if the tablet clock runs on UTC.
+/// nudge it with MAGICPAPER_TZ_OFFSET (hours) if the tablet clock runs on UTC.
 pub fn spoken_date(id: u64) -> String {
-    let offset: i64 = std::env::var("RIDDLE_TZ_OFFSET")
+    let offset: i64 = std::env::var("MAGICPAPER_TZ_OFFSET")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
         .map(|h| (h * 3600.0) as i64)

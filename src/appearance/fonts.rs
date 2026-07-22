@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use ab_glyph::{Font, FontRef};
 
 const CHEN_BYTES: &[u8] = include_bytes!("../../fonts/ChenYuluoyan-2.0-Thin.ttf");
-const DEFAULT_PREF_DIR: &str = "/home/root/riddle-data/preferences";
+const DEFAULT_PREF_DIR: &str = "/home/root/.local/share/magicpaper/preferences";
 const FONT_PREF_FILE: &str = "font";
 const FONT_SCALE_PREF_FILE: &str = "font_scales";
 const UI_FONT_FILE: &str = "FZPingXianYaSong.ttf";
@@ -94,7 +94,7 @@ impl FontBook {
     pub fn open() -> std::io::Result<Self> {
         let chen = FontRef::try_from_slice(CHEN_BYTES).map_err(std::io::Error::other)?;
         let font_dir = runtime_font_dir();
-        let ui_font_path = std::env::var_os("RIDDLE_UI_FONT")
+        let ui_font_path = std::env::var_os("MAGICPAPER_UI_FONT")
             .map(PathBuf::from)
             .unwrap_or_else(|| font_dir.join(UI_FONT_FILE));
         let ui_font = load_required(&ui_font_path)?;
@@ -130,7 +130,7 @@ impl FontBook {
         );
 
         let preference_dir = crate::runtime_env::persistent_path(
-            "RIDDLE_PREFERENCES_DIR",
+            "MAGICPAPER_PREFERENCES_DIR",
             "preferences",
             DEFAULT_PREF_DIR,
         );
@@ -340,7 +340,7 @@ fn load_scales(preference_dir: &Path) -> [u16; 5] {
 }
 
 fn runtime_font_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("RIDDLE_FONT_DIR") {
+    if let Some(dir) = std::env::var_os("MAGICPAPER_FONT_DIR") {
         return PathBuf::from(dir);
     }
     std::env::current_exe()

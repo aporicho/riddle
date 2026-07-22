@@ -12,8 +12,8 @@
 //! sentence-sized chunks on the channel, and the channel disconnecting marks
 //! end-of-reply, so the quill starts writing seconds before the model finishes.
 //!
-//! Selection: set `RIDDLE_OPENAI_KEY` (and optionally `RIDDLE_OPENAI_BASE` /
-//! `RIDDLE_OPENAI_MODEL`) to use HTTP; otherwise riddle falls back to pi.
+//! Selection: set `MAGICPAPER_OPENAI_KEY` (and optionally `MAGICPAPER_OPENAI_BASE` /
+//! `MAGICPAPER_OPENAI_MODEL`) to use HTTP; otherwise magicpaper falls back to pi.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
@@ -54,7 +54,7 @@ pub(super) fn log_llm_terminal(
     true
 }
 
-const DATA_DIR: &str = "/home/root/riddle-data";
+const DATA_DIR: &str = "/home/root/.local/share/magicpaper";
 const NODE_BIN: &str = "/home/root/node/bin";
 
 /// What a turn carries besides the page image: the diary's memory.
@@ -235,7 +235,7 @@ fn trim_nonempty(value: String) -> Option<String> {
 pub fn paddle_ocr_test(png_path: &str) -> Result<String, String> {
     let ocr = PaddleOcr::from_env()
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "RIDDLE_OCR_TOKEN is not set".to_string())?;
+        .ok_or_else(|| "MAGICPAPER_OCR_TOKEN is not set".to_string())?;
     let png = std::fs::read(png_path).map_err(|error| format!("read image: {error}"))?;
     ocr.recognize(0, "cli", &png, &AtomicBool::new(false))
         .map(|result| result.text)
@@ -243,7 +243,7 @@ pub fn paddle_ocr_test(png_path: &str) -> Result<String, String> {
 
 impl Oracle {
     /// Pick a backend from the environment and start it. HTTP if
-    /// `RIDDLE_OPENAI_KEY` is set (the zero-setup path), otherwise pi.
+    /// `MAGICPAPER_OPENAI_KEY` is set (the zero-setup path), otherwise pi.
     /// `remember` teaches the model the memory protocol (catalog + ⁂).
     pub fn spawn(remember: bool) -> std::io::Result<Self> {
         Self::spawn_for_mode(remember, crate::runtime_env::test_mode())
@@ -254,11 +254,11 @@ impl Oracle {
             eprintln!("magic-paper: oracle = deterministic offline test backend");
             return Ok(Oracle::Deterministic(DeterministicOracle));
         }
-        if nonempty_env("RIDDLE_OPENAI_KEY").is_some() {
-            eprintln!("riddle: oracle = OpenAI-compatible HTTP");
+        if nonempty_env("MAGICPAPER_OPENAI_KEY").is_some() {
+            eprintln!("magicpaper: oracle = OpenAI-compatible HTTP");
             Ok(Oracle::Http(Box::new(HttpOracle::new(remember)?)))
         } else {
-            eprintln!("riddle: oracle = pi (set RIDDLE_OPENAI_KEY for the HTTP backend)");
+            eprintln!("magicpaper: oracle = pi (set MAGICPAPER_OPENAI_KEY for the HTTP backend)");
             Ok(Oracle::Pi(PiOracle::spawn(remember)?))
         }
     }

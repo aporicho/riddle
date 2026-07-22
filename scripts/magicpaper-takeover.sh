@@ -1,5 +1,5 @@
 #!/bin/bash
-# Launch the diary in full-takeover mode: stop xochitl, run riddle against the
+# Launch the diary in full-takeover mode: stop xochitl, run magicpaper against the
 # vendor e-ink engine (instant ink), ALWAYS restore xochitl on exit.
 #
 # Exit the diary: power button, 5-finger tap, or SIGTERM. Escape hatch if
@@ -7,8 +7,8 @@
 
 set -u
 
-WAKELOCK=riddle-takeover
-RUN_LOCK=/run/riddle-takeover.lock
+WAKELOCK=magicpaper-takeover
+RUN_LOCK=/run/magicpaper-takeover.lock
 READER_REQUEST=/run/magicpaper-koreader.request
 READER_ERROR=/run/magicpaper-koreader.error
 RM_LIBRARY=/home/root/.local/share/remarkable/xochitl
@@ -40,7 +40,7 @@ restore() {
     allow_xochitl
     # A persistent systemd unit owns restoration through ExecStopPost. Keep
     # the in-script fallback only for direct/legacy launches.
-    if [ -z "${REMAGIC_SESSION:-}" ] && [ -z "${RIDDLE_SYSTEMD_MANAGED:-}" ]; then
+    if [ -z "${REMAGIC_SESSION:-}" ] && [ -z "${MAGICPAPER_SYSTEMD_MANAGED:-}" ]; then
         systemctl reset-failed xochitl.service paperweight.service 2>/dev/null || true
         systemctl start xochitl
     fi
@@ -48,24 +48,24 @@ restore() {
 }
 
 # Fail before touching xochitl if the standalone bundle is incomplete.
-if [ ! -x "$HERE/riddle" ]; then
-    echo "riddle-takeover: missing executable: $HERE/riddle" >&2
+if [ ! -x "$HERE/magicpaper" ]; then
+    echo "magicpaper-takeover: missing executable: $HERE/magicpaper" >&2
     exit 1
 fi
 if [ ! -r "$HERE/libquill.so" ]; then
-    echo "riddle-takeover: missing display library: $HERE/libquill.so" >&2
+    echo "magicpaper-takeover: missing display library: $HERE/libquill.so" >&2
     exit 1
 fi
 if [ ! -r /usr/lib/plugins/scenegraph/libqsgepaper.so ]; then
-    echo "riddle-takeover: missing device display engine" >&2
+    echo "magicpaper-takeover: missing device display engine" >&2
     exit 1
 fi
 if ! mkdir "$RUN_LOCK" 2>/dev/null; then
-    echo "riddle-takeover: another takeover session is already active" >&2
+    echo "magicpaper-takeover: another takeover session is already active" >&2
     exit 1
 fi
 
-# Under the Remagic Home session host (REMAGIC_SESSION=1), xochitl is already
+# Under the ReMagic Home session host (REMAGIC_SESSION=1), xochitl is already
 # stopped and the session owns its restore — skip our own stop/restart.
 trap restore EXIT
 trap 'exit 130' INT
@@ -76,17 +76,17 @@ trap 'exit 143' TERM
 echo "$WAKELOCK" > /sys/power/wake_lock 2>/dev/null || true
 
 # Oracle config: standalone installs keep secrets outside the app directory:
-#   /home/root/.config/riddle/oracle.env
+#   /home/root/.config/magicpaper/oracle.env
 # A legacy oracle.env next to the binary remains supported as a fallback.
-#   RIDDLE_OPENAI_KEY=sk-...
-#   RIDDLE_OPENAI_BASE=https://api.openai.com/v1     # optional
-#   RIDDLE_OPENAI_MODEL=gpt-4o-mini                  # optional
-# Without it, riddle falls back to the pi backend (if pi is installed).
-CONFIG=${RIDDLE_CONFIG:-/home/root/.config/riddle/oracle.env}
-if [ "${RIDDLE_TEST_MODE:-}" = 1 ]; then
+#   MAGICPAPER_OPENAI_KEY=sk-...
+#   MAGICPAPER_OPENAI_BASE=https://api.openai.com/v1     # optional
+#   MAGICPAPER_OPENAI_MODEL=gpt-4o-mini                  # optional
+# Without it, magicpaper falls back to the pi backend (if pi is installed).
+CONFIG=${MAGICPAPER_CONFIG:-/home/root/.config/magicpaper/oracle.env}
+if [ "${MAGICPAPER_TEST_MODE:-}" = 1 ]; then
     # Device automation must not even parse the owner's credential file. The
     # Rust process independently selects its deterministic offline backend.
-    unset RIDDLE_OPENAI_KEY RIDDLE_OCR_TOKEN
+    unset MAGICPAPER_OPENAI_KEY MAGICPAPER_OCR_TOKEN
 elif [ -r "$CONFIG" ]; then
     set -a; . "$CONFIG"; set +a
 elif [ -r "$HERE/oracle.env" ]; then
@@ -115,7 +115,7 @@ find_koreader() {
 
 reader_error() {
     printf '%s\n' "$1" > "$READER_ERROR"
-    echo "riddle-takeover: $1" >&2
+    echo "magicpaper-takeover: $1" >&2
 }
 
 launch_koreader() {
@@ -139,7 +139,7 @@ launch_koreader() {
     fi
 
     ko_dir=${ko_script%/*}
-    echo "riddle-takeover: starting KOReader — $target"
+    echo "magicpaper-takeover: starting KOReader — $target"
     rm -f /tmp/epframebuffer.lock
 
     # The Move build of KOReader intentionally refuses a naked framebuffer.
@@ -196,7 +196,7 @@ launch_koreader() {
     if [ "$ko_status" -ne 0 ]; then
         reader_error "KOReader 異常退出，已返回 MagicPaper。"
     else
-        echo "riddle-takeover: KOReader closed; returning to MagicPaper"
+        echo "magicpaper-takeover: KOReader closed; returning to MagicPaper"
     fi
     # Give xochitl/einkface a brief moment to release the panel before libquill
     # reopens the vendor display engine.
@@ -213,7 +213,7 @@ while true; do
     # proprietary engine) comes from the device's scenegraph plugin directory.
     LD_LIBRARY_PATH="$HERE:/home/root/quill:/usr/lib/plugins/scenegraph" \
         PAPERTERM_SHELL= HOME=/home/root \
-        "$HERE/riddle" --legacy-takeover
+        "$HERE/magicpaper" --legacy-takeover
     status=$?
 
     if [ "$status" -eq 42 ]; then
@@ -227,6 +227,6 @@ while true; do
         continue
     fi
 
-    echo "riddle-takeover: diary closed ($status), restoring xochitl"
+    echo "magicpaper-takeover: diary closed ($status), restoring xochitl"
     exit "$status"
 done

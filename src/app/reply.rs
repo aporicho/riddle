@@ -38,7 +38,7 @@ pub(super) fn oracle_excuse(e: &str) -> String {
          Put an API key in oracle.env, then open me again."
             .into()
     } else if e.starts_with("http 401") || e.starts_with("http 403") {
-        "The oracle refused MagicPaper's key. Check RIDDLE_OPENAI_KEY in oracle.env.".into()
+        "The oracle refused MagicPaper's key. Check MAGICPAPER_OPENAI_KEY in oracle.env.".into()
     } else if e.starts_with("http ") {
         let code = e.split(':').next().unwrap_or("an error");
         format!("The oracle rejected MagicPaper's plea ({code}). Check the model and endpoint in oracle.env.")
@@ -65,7 +65,7 @@ pub(super) fn conjure(
     let entry = s.get(id)?.clone();
     let strokes = s.strokes(id).unwrap_or_default();
     eprintln!(
-        "riddle: conjuring memory {id} ({})",
+        "magicpaper: conjuring memory {id} ({})",
         memory::spoken_date(id)
     );
 

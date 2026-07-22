@@ -1,5 +1,5 @@
 //! Platform-facing contracts shared by the current device adapters and the
-//! future Remagic host protocol.
+//! future ReMagic host protocol.
 //!
 //! These types intentionally do not mention qtfb, Quill, Qt, or framebuffer
 //! memory.  Backends translate them at the platform boundary.
@@ -29,7 +29,7 @@ pub(crate) enum PenTool {
     Eraser,
 }
 
-/// Application-level input ownership negotiated with the Remagic runtime.
+/// Application-level input ownership negotiated with the ReMagic runtime.
 ///
 /// `Writing` is the only mode in which the host may draw its low-latency ink
 /// overlay. The two locked modes still forward normalized input events so the
@@ -103,7 +103,7 @@ pub(crate) struct FrameCommit {
 }
 
 /// Stable display contract. Implementations may be in-process today or an IPC
-/// client once the Remagic display host owns the panel.
+/// client once the ReMagic display host owns the panel.
 pub(crate) trait DisplayBackend {
     type Error;
 

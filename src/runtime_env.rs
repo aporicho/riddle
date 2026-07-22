@@ -1,4 +1,4 @@
-//! Shared detection of the Remagic-hosted runtime.
+//! Shared detection of the ReMagic-hosted runtime.
 //!
 //! Several generations of the launcher used different environment names.
 //! Keep the compatibility policy in one place so input, power, heartbeat and
@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use crate::platform::AppToken;
 
-// `RIDDLE_SYSTEMD_MANAGED` belongs to the old standalone takeover supervisor;
-// it says nothing about the Remagic lifecycle/display contract.
+// `MAGICPAPER_SYSTEMD_MANAGED` belongs to the old standalone takeover supervisor;
+// it says nothing about the ReMagic lifecycle/display contract.
 const MANAGED_VARS: [&str; 2] = ["REMAGIC_RUNTIME_MANAGED", "REMAGIC_MANAGED"];
 
 /// The normal entry is host-owned and requires qtfb. Full device takeover is
@@ -21,7 +21,7 @@ pub(crate) enum LaunchMode {
     LegacyTakeover,
 }
 
-/// True when MagicPaper is running as an application owned by Remagic.
+/// True when MagicPaper is running as an application owned by ReMagic.
 pub fn is_managed() -> bool {
     std::env::var_os("REMAGIC_RUNTIME_PROFILE").is_some()
         || MANAGED_VARS.iter().any(|name| {
@@ -35,14 +35,14 @@ pub fn is_managed() -> bool {
 /// it, so a stale or misspelled service variable cannot silently disable real
 /// integrations in production.
 pub fn test_mode() -> bool {
-    std::env::var("RIDDLE_TEST_MODE").as_deref() == Ok("1")
+    std::env::var("MAGICPAPER_TEST_MODE").as_deref() == Ok("1")
 }
 
 pub fn require_external_integrations(component: &str) -> io::Result<()> {
     if test_mode() {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("{component} is disabled in RIDDLE_TEST_MODE"),
+            format!("{component} is disabled in MAGICPAPER_TEST_MODE"),
         ))
     } else {
         Ok(())
@@ -73,12 +73,12 @@ fn parse_launch_token(value: &str) -> Option<AppToken> {
 }
 
 /// Resolve one durable path. A component-specific override wins, followed by
-/// `RIDDLE_DATA_DIR/<child>`. Test mode never falls back to `/home/root`; an
+/// `MAGICPAPER_DATA_DIR/<child>`. Test mode never falls back to `/home/root`; an
 /// unconfigured run is isolated under the process temp directory instead.
 pub fn persistent_path(override_var: &str, child: &str, production: &str) -> PathBuf {
     choose_persistent_path(
         std::env::var_os(override_var).map(PathBuf::from),
-        std::env::var_os("RIDDLE_DATA_DIR").map(PathBuf::from),
+        std::env::var_os("MAGICPAPER_DATA_DIR").map(PathBuf::from),
         test_mode(),
         child,
         production,
@@ -229,7 +229,7 @@ mod tests {
     fn legacy_takeover_is_explicit_and_never_managed() {
         assert!(validate_values(false, LaunchMode::LegacyTakeover, None, None, None).is_ok());
         assert!(validate_values(true, LaunchMode::LegacyTakeover, None, None, None).is_err());
-        assert!(!MANAGED_VARS.contains(&"RIDDLE_SYSTEMD_MANAGED"));
+        assert!(!MANAGED_VARS.contains(&"MAGICPAPER_SYSTEMD_MANAGED"));
     }
 
     #[test]
@@ -240,7 +240,7 @@ mod tests {
                 Some(PathBuf::from("/test/root")),
                 true,
                 "tasks",
-                "/home/root/riddle-data/tasks",
+                "/home/root/.local/share/magicpaper/tasks",
             ),
             PathBuf::from("/test/direct")
         );
@@ -250,14 +250,18 @@ mod tests {
                 Some(PathBuf::from("/test/root")),
                 true,
                 "tasks",
-                "/home/root/riddle-data/tasks",
+                "/home/root/.local/share/magicpaper/tasks",
             ),
             PathBuf::from("/test/root/tasks")
         );
-        assert!(
-            !choose_persistent_path(None, None, true, "tasks", "/home/root/riddle-data/tasks",)
-                .starts_with("/home/root")
-        );
+        assert!(!choose_persistent_path(
+            None,
+            None,
+            true,
+            "tasks",
+            "/home/root/.local/share/magicpaper/tasks",
+        )
+        .starts_with("/home/root"));
     }
 
     #[test]

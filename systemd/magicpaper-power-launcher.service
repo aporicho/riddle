@@ -1,13 +1,13 @@
 [Unit]
 Description=MagicPaper triple-power-button launcher
 After=home.mount systemd-udevd.service
-ConditionPathExists=/home/root/apps/riddle/riddle
+ConditionPathExists=/home/root/apps/magicpaper/magicpaper
 
 [Service]
 Type=simple
 Environment=HOME=/home/root
-Environment=LD_LIBRARY_PATH=/home/root/apps/riddle:/home/root/quill:/usr/lib/plugins/scenegraph
-ExecStart=/home/root/apps/riddle/riddle --power-launcher
+Environment=LD_LIBRARY_PATH=/home/root/apps/magicpaper:/home/root/quill:/usr/lib/plugins/scenegraph
+ExecStart=/home/root/apps/magicpaper/magicpaper --power-launcher
 Restart=always
 RestartSec=2
 Nice=10

@@ -19,7 +19,7 @@ impl Engine<'_> {
             .as_mut()
             .is_some_and(|device| device.drain_check_quit());
         if quit {
-            eprintln!("riddle: 5-finger quit");
+            eprintln!("magicpaper: 5-finger quit");
         }
         quit
     }

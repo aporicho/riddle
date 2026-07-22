@@ -1,14 +1,14 @@
-# MagicPaper (MP)
+# MagicPaper
 
-MagicPaper 是为 reMarkable Paper Pro Move 设计的纸面 AI 应用：用户直接用笔书写，墨迹在停笔后淡出，回答再以手写动画写回纸面。它没有键盘、聊天气泡或网页界面。
+MagicPaper（简称 MP）是正式产品名，仓库与发布标识为 `magicpaper`。它是为 reMarkable Paper Pro Move 设计的纸面 AI 应用：用户直接用笔书写，墨迹在停笔后淡出，回答再以手写动画写回纸面。它没有键盘、聊天气泡或网页界面。
 
-本项目由 Maxime Rivest 的 [`riddle`](https://github.com/MaximeRivest/riddle) 演进而来，并保留原项目历史和 MIT 署名。0.7.0 的正式运行方式是作为 Remagic Manager 托管的驻留应用；AppLoad、镇纸和旧独占脚本都不是其运行依赖。
+本项目由 Maxime Rivest 的 [`riddle`](https://github.com/MaximeRivest/riddle) 演进而来，并保留原项目历史和 MIT 署名。0.7.0 的正式运行方式是作为 ReMagic 托管的驻留应用；AppLoad、镇纸和旧独占脚本都不是其运行依赖。
 
 ## 与上游 riddle 的主要区别
 
 | 方面 | 上游 | MagicPaper 0.7.0 |
 |---|---|---|
-| 设备与运行方式 | Paper Pro、AppLoad/独占模式 | Paper Pro Move，由 Remagic 提供 QTFB、笔/触摸与生命周期 |
+| 设备与运行方式 | Paper Pro、AppLoad/独占模式 | Paper Pro Move，由 ReMagic 提供 QTFB、笔/触摸与生命周期 |
 | 定位 | Tom Riddle 日记 | 中文优先的纸面助手，简称 MP |
 | OCR | 回答模型直接看整页 | 可提前 1 秒提交 PP-OCRv6，再由回答模型结合上下文纠错 |
 | 回答 | 基础对话 | 计算直答、问答、长期对话、按需后台检索、纸面化整理，中文默认繁体 |
@@ -22,17 +22,17 @@ MagicPaper 是为 reMarkable Paper Pro Move 设计的纸面 AI 应用：用户�
 
 MagicPaper 只负责页面状态、笔迹解释、AI 请求、回答渲染和自己的持久数据。它不拥有物理面板、原始输入、前台切换、进程监督或系统恢复。
 
-正式启动时，Remagic 必须提供：
+正式启动时，ReMagic 必须提供：
 
 - `REMAGIC_RUNTIME_PROFILE=qtfb_compat`；
 - 稳定且唯一的 `QTFB_KEY` surface；
 - v2 双向 lifecycle 通道；
 - 经过 manifest 限定的 HOME/XDG、字体、证书和网络环境。
 
-缺少任一托管契约时应用会在打开显示或输入前失败，不会退回到偷偷抢占设备的模式。`--legacy-takeover` 仍保留给明确的兼容实验，但不能在 Remagic 托管进程中启用。
+缺少任一托管契约时应用会在打开显示或输入前失败，不会退回到偷偷抢占设备的模式。`--legacy-takeover` 仍保留给明确的兼容实验，但不能在 ReMagic 托管进程中启用。
 
 ```text
-笔事件 ──► Remagic display host ──► QTFB surface ──► MagicPaper 输入状态机
+笔事件 ──► ReMagic display host ──► QTFB surface ──► MagicPaper 输入状态机
                                                         │
                        停笔 1.0 s ─► 推测 OCR（可取消）  │
                        停笔 2.2/2.6 s ─► 提交当前回合   │
@@ -60,7 +60,7 @@ MagicPaper 只负责页面状态、笔迹解释、AI 请求、回答渲染和自
 | `字体` | 打开字体与每字体字号校准页 |
 | `设置`、`設定`、`settings` | 打开刷新、回答停留和字体设置页 |
 | `帮助`、`help` 或大问号 | 打开内置说明 |
-| `read` | 让 Remagic 打开 KOReader 书库 |
+| `read` | 让 ReMagic 打开 KOReader 书库 |
 | `read 书名` | 打开唯一匹配书籍；歧义时显示候选列表 |
 | `刷新`、`刷新屏幕`、`重新整理`、`refresh` | 执行一次完整刷新清除残影，不请求 API |
 
@@ -85,7 +85,7 @@ MagicPaper 只负责页面状态、笔迹解释、AI 请求、回答渲染和自
 默认持久数据位于：
 
 ```text
-/home/root/riddle-data/
+/home/root/.local/share/magicpaper/
 ├── memories/       对话、转写和原始笔迹
 ├── tasks/          周期任务
 ├── todos/          TODO
@@ -93,62 +93,62 @@ MagicPaper 只负责页面状态、笔迹解释、AI 请求、回答渲染和自
 └── agent/          前后台回答交接队列
 ```
 
-配置默认位于 `/home/root/.config/riddle/oracle.env`。安装、升级和自动化测试不得覆盖真实记忆、任务、TODO、字体配置或 API 配置。
+配置默认位于 `/home/root/.config/magicpaper/oracle.env`。安装、升级和自动化测试不得覆盖真实记忆、任务、TODO、字体配置或 API 配置。
 
 ## OCR 与回答后端
 
 复制示例配置并只在设备上填写密钥：
 
 ```sh
-install -m 600 oracle.env.example /home/root/.config/riddle/oracle.env
+install -m 600 oracle.env.example /home/root/.config/magicpaper/oracle.env
 ```
 
 OpenAI-compatible HTTP 后端的核心变量：
 
 ```sh
-RIDDLE_OPENAI_KEY=...
-RIDDLE_OPENAI_BASE=https://example.com/v1
-RIDDLE_OPENAI_MODEL=your-model
-RIDDLE_OPENAI_API=responses          # 或 chat_completions
-RIDDLE_OPENAI_REASONING=low
-RIDDLE_WEB_SEARCH=auto
-RIDDLE_OPENAI_MAX_TOKENS=2000
+MAGICPAPER_OPENAI_KEY=...
+MAGICPAPER_OPENAI_BASE=https://example.com/v1
+MAGICPAPER_OPENAI_MODEL=your-model
+MAGICPAPER_OPENAI_API=responses          # 或 chat_completions
+MAGICPAPER_OPENAI_REASONING=low
+MAGICPAPER_WEB_SEARCH=auto
+MAGICPAPER_OPENAI_MAX_TOKENS=2000
 ```
 
 可选 PaddleOCR：
 
 ```sh
-RIDDLE_OCR_TOKEN=...
-RIDDLE_OCR_URL=https://paddleocr.aistudio-app.com/api/v2/ocr/jobs
-RIDDLE_OCR_MODEL=PP-OCRv6
-RIDDLE_OCR_POLL_MS=250
-RIDDLE_OCR_TIMEOUT_SECONDS=60
+MAGICPAPER_OCR_TOKEN=...
+MAGICPAPER_OCR_URL=https://paddleocr.aistudio-app.com/api/v2/ocr/jobs
+MAGICPAPER_OCR_MODEL=PP-OCRv6
+MAGICPAPER_OCR_POLL_MS=250
+MAGICPAPER_OCR_TIMEOUT_SECONDS=60
 ```
 
-`RIDDLE_OCR_SPECULATIVE=off` 可关闭一秒预请求，避免停顿后继续书写造成已计费但弃用的远端任务。没有 HTTP 密钥时也可使用常驻 `pi --mode rpc` 后端；完整变量和注释见 `oracle.env.example`。
+`MAGICPAPER_OCR_SPECULATIVE=off` 可关闭一秒预请求，避免停顿后继续书写造成已计费但弃用的远端任务。没有 HTTP 密钥时也可使用常驻 `pi --mode rpc` 后端；完整变量和注释见 `oracle.env.example`。
 
 密钥不得提交到 Git。若密钥曾出现在终端日志、聊天或仓库历史中，应立即在提供商控制台撤销并重建。
 
 无屏诊断：
 
 ```sh
-riddle --ocr-test handwriting.png
-riddle --oracle-test handwriting.png
+magicpaper --ocr-test handwriting.png
+magicpaper --oracle-test handwriting.png
 ```
 
 ## 确定性测试模式
 
-设置精确值 `RIDDLE_TEST_MODE=1` 后，MagicPaper 使用确定性离线回答，并拒绝 HTTP、PaddleOCR、pi 和外部阅读器调用。`RIDDLE_DATA_DIR` 可把所有持久状态重定向到临时目录；也可按组件覆盖：
+设置精确值 `MAGICPAPER_TEST_MODE=1` 后，MagicPaper 使用确定性离线回答，并拒绝 HTTP、PaddleOCR、pi 和外部阅读器调用。`MAGICPAPER_DATA_DIR` 可把所有持久状态重定向到临时目录；也可按组件覆盖：
 
-- `RIDDLE_AGENT_QUEUE_DIR`
-- `RIDDLE_PI_DATA_DIR`、`RIDDLE_PI_HOME`
-- `RIDDLE_MEMORY_DIR`
-- `RIDDLE_TASKS_DIR`
-- `RIDDLE_TODOS_DIR`
-- `RIDDLE_PREFERENCES_DIR`
-- `RIDDLE_REMARKABLE_LIBRARY`、`RIDDLE_KOREADER_LIBRARY`
+- `MAGICPAPER_AGENT_QUEUE_DIR`
+- `MAGICPAPER_PI_DATA_DIR`、`MAGICPAPER_PI_HOME`
+- `MAGICPAPER_MEMORY_DIR`
+- `MAGICPAPER_TASKS_DIR`
+- `MAGICPAPER_TODOS_DIR`
+- `MAGICPAPER_PREFERENCES_DIR`
+- `MAGICPAPER_REMARKABLE_LIBRARY`、`MAGICPAPER_KOREADER_LIBRARY`
 
-测试模式在没有显式路径时也不会回退到 `/home/root`。Remagic 的设备验收通过临时 manifest 和 systemd runtime drop-in 使用生产二进制、生产显示栈和隔离数据，测试结束后比较真实数据指纹并恢复原会话。
+测试模式在没有显式路径时也不会回退到 `/home/root`。ReMagic 的设备验收通过临时 manifest 和 systemd runtime drop-in 使用生产二进制、生产显示栈和隔离数据，测试结束后比较真实数据指纹并恢复原会话。
 
 ## 构建与交付
 
@@ -160,15 +160,15 @@ riddle --oracle-test handwriting.png
 
 它会执行架构检查、格式检查、全部 target 测试、Clippy `-D warnings` 和 release/all-features 编译检查。
 
-正式设备包由同级 `remagic-manager` 统一构建和部署，它负责交叉编译、字体资源、QTFB shim、manifest、systemd 服务、校验和与事务安装：
+正式设备包由同级 `remagic` 统一构建和部署，它负责交叉编译、字体资源、QTFB shim、manifest、systemd 服务、校验和与事务安装：
 
 ```sh
-cd ../remagic-manager
+cd ../remagic
 ./scripts/build-bundle.sh
 ./scripts/deploy-usb.sh
 ```
 
-旧独占构建仍可通过 `build-takeover.sh` 和 `scripts/make-bundle.sh` 生成；兼容包会校验并打包 `${MAGICPAPER_UI_FONT:-$HOME/Downloads/方正屏显雅宋.TTF}`，但它只作为显式兼容路径，不参与 Remagic 的应用切换、驻留、故障恢复和自动化验收。
+旧独占构建仍可通过 `build-takeover.sh` 和 `scripts/make-bundle.sh` 生成；兼容包会校验并打包 `${MAGICPAPER_UI_FONT:-$HOME/Downloads/方正屏显雅宋.TTF}`，但它只作为显式兼容路径，不参与 ReMagic 的应用切换、驻留、故障恢复和自动化验收。
 
 ## 模块划分
 

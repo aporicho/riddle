@@ -99,7 +99,7 @@ pub fn looks_like_question_mark(strokes: &[Vec<(i32, i32, i32)>]) -> bool {
 }
 
 const TITLE: &str = "MagicPaper 使用说明";
-/// Takeover mode: riddle owns touch and the power button.
+/// Takeover mode: magicpaper owns touch and the power button.
 const BODY_TAKEOVER: &[&str] = &[
     "书写后停笔，MP 会读取墨迹并回答。",
     "等待时仍可继续写，新笔迹永远优先。",
@@ -124,7 +124,7 @@ const BODY_TAKEOVER: &[&str] = &[
     "单按电源键可休眠或唤醒。",
     "五指触碰仍可紧急退出。",
 ];
-/// Hosted mode: Remagic owns the device lifecycle and application switching.
+/// Hosted mode: ReMagic owns the device lifecycle and application switching.
 const BODY_HOSTED: &[&str] = &[
     "书写后停笔，MP 会读取墨迹并回答。",
     "等待时仍可继续写，新笔迹永远优先。",
@@ -234,7 +234,7 @@ impl HelpPreview {
 
 /// Draw the guide panel centered on the page; returns it for later dismissal.
 /// The gesture list depends on the display mode: takeover owns raw device
-/// controls, while hosted mode delegates switching and power to Remagic.
+/// controls, while hosted mode delegates switching and power to ReMagic.
 pub fn show(surf: &mut Surface, font: &FontBook, takeover: bool) -> Help {
     let body = if takeover { BODY_TAKEOVER } else { BODY_HOSTED };
     let (title_base_px, body_base_px, footer_base_px) = fitted_base_sizes(body.len(), screen_h());

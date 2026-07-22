@@ -19,12 +19,12 @@ const OPEN_APP_TIMEOUT: Duration = Duration::from_secs(40);
 const INPUT_MODE_TIMEOUT: Duration = Duration::from_secs(8);
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-/// Ask the Remagic runtime to foreground KOReader at `path`.
+/// Ask the ReMagic runtime to foreground KOReader at `path`.
 pub fn open_reader(path: &Path) -> io::Result<()> {
     if !external_reader_allowed(crate::runtime_env::test_mode()) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "external reader requests are disabled in RIDDLE_TEST_MODE",
+            "external reader requests are disabled in MAGICPAPER_TEST_MODE",
         ));
     }
     let socket = runtime_socket();

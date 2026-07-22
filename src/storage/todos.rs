@@ -29,14 +29,14 @@ pub struct TodoStore {
 
 impl TodoStore {
     pub fn open() -> Option<Self> {
-        match std::env::var("RIDDLE_TODOS").as_deref() {
+        match std::env::var("MAGICPAPER_TODOS").as_deref() {
             Ok("off") | Ok("0") | Ok("no") | Ok("false") => return None,
             _ => {}
         }
         let dir = crate::runtime_env::persistent_path(
-            "RIDDLE_TODOS_DIR",
+            "MAGICPAPER_TODOS_DIR",
             "todos",
-            "/home/root/riddle-data/todos",
+            "/home/root/.local/share/magicpaper/todos",
         );
         if let Err(e) = std::fs::create_dir_all(&dir) {
             eprintln!("magic-paper: TODOs disabled ({}: {e})", dir.display());

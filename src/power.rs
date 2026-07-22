@@ -103,7 +103,7 @@ impl PowerButton {
             }
             let grabbed = should_grab && unsafe { libc::ioctl(fd, EVIOCGRAB, 1i32) } == 0;
             eprintln!(
-                "riddle: power button /dev/input/event{i} ({})",
+                "magicpaper: power button /dev/input/event{i} ({})",
                 if grabbed { "grabbed" } else { "shared" }
             );
             return Ok(Self {
@@ -181,19 +181,20 @@ impl Drop for PowerButton {
 pub fn launcher_loop() -> io::Result<()> {
     let mut button = PowerButton::open_listener()?;
     let mut clicks = ClickTracker::new();
-    eprintln!("riddle: power launcher ready (triple-click to open)");
+    eprintln!("magicpaper: power launcher ready (triple-click to open)");
     loop {
         let presses = button.drain_press_count();
         if clicks.push(presses, Instant::now()) == ClickAction::Triple {
-            eprintln!("riddle: power launcher triple-click");
+            eprintln!("magicpaper: power launcher triple-click");
             // Keep the system awake while xochitl is stopped and Quill takes
             // ownership of the panel. The takeover restore hook releases it.
-            let _ = std::fs::write("/sys/power/wake_lock", b"riddle-takeover\n");
+            let _ = std::fs::write("/sys/power/wake_lock", b"magicpaper-takeover\n");
             let status =
-                std::process::Command::new("/home/root/apps/riddle/riddle-launch.sh").status();
+                std::process::Command::new("/home/root/apps/magicpaper/magicpaper-launch.sh")
+                    .status();
             if !status.as_ref().is_ok_and(|s| s.success()) {
-                eprintln!("riddle: power launcher failed: {status:?}");
-                let _ = std::fs::write("/sys/power/wake_unlock", b"riddle-takeover\n");
+                eprintln!("magicpaper: power launcher failed: {status:?}");
+                let _ = std::fs::write("/sys/power/wake_unlock", b"magicpaper-takeover\n");
             }
             // Ignore bounce and any trailing event from the triggering click.
             std::thread::sleep(Duration::from_millis(500));

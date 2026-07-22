@@ -1,7 +1,8 @@
 use super::*;
 
 fn tmp_store(name: &str) -> MemoryStore {
-    let dir = std::env::temp_dir().join(format!("riddle-mem-test-{}-{name}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("magicpaper-mem-test-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     MemoryStore {

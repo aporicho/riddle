@@ -36,7 +36,7 @@ fn query_touch_max_y(fd: RawFd) -> i32 {
         unsafe { libc::ioctl(fd, EVIOCGABS_MT_POSITION_Y, &mut info as *mut InputAbsInfo) };
     if result != 0 || info.maximum <= 0 {
         eprintln!(
-            "riddle: warning: touch EVIOCGABS failed ({}), assuming {}",
+            "magicpaper: warning: touch EVIOCGABS failed ({}), assuming {}",
             io::Error::last_os_error(),
             FALLBACK_TOUCH_MAX_Y
         );
@@ -88,7 +88,7 @@ impl TouchDevice {
                         return Err(io::Error::last_os_error());
                     }
                     let touch_max_y = query_touch_max_y(fd);
-                    eprintln!("riddle: touch digitizer Y range {touch_max_y}");
+                    eprintln!("magicpaper: touch digitizer Y range {touch_max_y}");
                     unsafe { libc::ioctl(fd, EVIOCGRAB, 1i32) };
                     return Ok(Self {
                         fd,

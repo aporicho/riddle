@@ -124,7 +124,7 @@ impl Engine<'_> {
                     request_id,
                     error.lines().next().unwrap_or("unknown error")
                 );
-                eprintln!("riddle: oracle failed mid-reply: {error}");
+                eprintln!("magicpaper: oracle failed mid-reply: {error}");
                 self.turn_failed = true;
                 true
             }
@@ -193,7 +193,7 @@ impl Engine<'_> {
             | Event::Settings
             | Event::HistoryList
             | Event::Help => {
-                eprintln!("riddle: modal directive arrived after visible prose");
+                eprintln!("magicpaper: modal directive arrived after visible prose");
             }
         }
         false

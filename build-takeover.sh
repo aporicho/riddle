@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build riddle in TAKEOVER mode (links libquill.so + vendor Qt/qsgepaper).
+# Build magicpaper in TAKEOVER mode (links libquill.so + vendor Qt/qsgepaper).
 #
 # Must link with the ferrari SDK's gcc — the Ubuntu cross-linker's glibc (2.34)
 # can't resolve GLIBC_2.36/2.38 symbols the device's Qt libs require. The SDK
@@ -23,13 +23,13 @@ fi
 
 # Point cargo's aarch64 linker at the SDK gcc. $CC includes the -mcpu/-sysroot
 # flags as one string; cargo wants a single program, so wrap it.
-cat > /tmp/riddle-sdk-cc.sh <<EOF
+cat > /tmp/magicpaper-sdk-cc.sh <<EOF
 #!/bin/bash
 exec $CC "\$@"
 EOF
-chmod +x /tmp/riddle-sdk-cc.sh
+chmod +x /tmp/magicpaper-sdk-cc.sh
 
-export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/tmp/riddle-sdk-cc.sh
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/tmp/magicpaper-sdk-cc.sh
 # rustc still targets aarch64-unknown-linux-gnu (glibc); the SDK gcc just links.
 
 cargo build --release --target aarch64-unknown-linux-gnu --features takeover "$@"
@@ -38,5 +38,5 @@ cargo build --release --target aarch64-unknown-linux-gnu --features takeover "$@
 # clobber this one. Copy the takeover binary to a distinct name so the two
 # never collide.
 OUT=target/aarch64-unknown-linux-gnu/release
-cp "$OUT/riddle" "$OUT/riddle-takeover"
-echo "built: $OUT/riddle-takeover (takeover; libquill-linked)"
+cp "$OUT/magicpaper" "$OUT/magicpaper-takeover"
+echo "built: $OUT/magicpaper-takeover (takeover; libquill-linked)"

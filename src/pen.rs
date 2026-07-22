@@ -47,7 +47,7 @@ fn query_abs_max(fd: RawFd, request: libc::c_ulong, fallback: i32) -> i32 {
     let result = unsafe { libc::ioctl(fd, request, &mut info as *mut InputAbsInfo) };
     if result != 0 || info.maximum <= 0 {
         eprintln!(
-            "riddle: warning: EVIOCGABS failed ({}), assuming {}",
+            "magicpaper: warning: EVIOCGABS failed ({}), assuming {}",
             io::Error::last_os_error(),
             fallback
         );
@@ -121,21 +121,24 @@ impl PenDevice {
         let clock_result = unsafe { libc::ioctl(fd, EVIOCSCLOCKID, &clock_id) };
         if clock_result != 0 {
             eprintln!(
-                "riddle: warning: marker does not support monotonic event timestamps ({})",
+                "magicpaper: warning: marker does not support monotonic event timestamps ({})",
                 io::Error::last_os_error()
             );
         }
         let grab = unsafe { libc::ioctl(fd, EVIOCGRAB, 1i32) };
         if grab != 0 {
             eprintln!(
-                "riddle: warning: EVIOCGRAB failed ({}) — xochitl will also see the pen",
+                "magicpaper: warning: EVIOCGRAB failed ({}) — xochitl will also see the pen",
                 io::Error::last_os_error()
             );
         }
-        eprintln!("riddle: pen device {path} opened (grabbed: {})", grab == 0);
+        eprintln!(
+            "magicpaper: pen device {path} opened (grabbed: {})",
+            grab == 0
+        );
         let digi_max_x = query_abs_max(fd, EVIOCGABS_X, FALLBACK_DIGI_MAX_X);
         let digi_max_y = query_abs_max(fd, EVIOCGABS_Y, FALLBACK_DIGI_MAX_Y);
-        eprintln!("riddle: pen digitizer range {digi_max_x}x{digi_max_y}");
+        eprintln!("magicpaper: pen digitizer range {digi_max_x}x{digi_max_y}");
         Ok(Self {
             fd,
             digi_max_x,

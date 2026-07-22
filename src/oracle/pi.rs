@@ -45,13 +45,14 @@ impl ReaderState {
 }
 
 fn spawn_process(remember: bool) -> std::io::Result<(Child, String)> {
-    let data_dir = crate::runtime_env::persistent_path("RIDDLE_PI_DATA_DIR", "pi", DATA_DIR);
+    let data_dir = crate::runtime_env::persistent_path("MAGICPAPER_PI_DATA_DIR", "pi", DATA_DIR);
     let _ = std::fs::create_dir_all(&data_dir);
     let path = std::env::var("PATH").unwrap_or_default();
-    let home = std::env::var("RIDDLE_PI_HOME").unwrap_or_else(|_| "/home/root".into());
-    let node_bin = std::env::var("RIDDLE_PI_BIN_DIR").unwrap_or_else(|_| NODE_BIN.to_string());
-    let provider = std::env::var("RIDDLE_PI_PROVIDER").unwrap_or_else(|_| "openai-codex".into());
-    let model = std::env::var("RIDDLE_PI_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".into());
+    let home = std::env::var("MAGICPAPER_PI_HOME").unwrap_or_else(|_| "/home/root".into());
+    let node_bin = std::env::var("MAGICPAPER_PI_BIN_DIR").unwrap_or_else(|_| NODE_BIN.to_string());
+    let provider =
+        std::env::var("MAGICPAPER_PI_PROVIDER").unwrap_or_else(|_| "openai-codex".into());
+    let model = std::env::var("MAGICPAPER_PI_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".into());
     let persona = system_prompt(remember);
     let pi_bin = format!("{node_bin}/pi");
     let child = Command::new(&pi_bin)
@@ -74,7 +75,7 @@ fn spawn_process(remember: bool) -> std::io::Result<(Child, String)> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(
-            std::fs::File::create("/tmp/riddle-oracle.log")
+            std::fs::File::create("/tmp/magicpaper-oracle.log")
                 .map(Stdio::from)
                 .unwrap_or_else(|_| Stdio::null()),
         )
@@ -129,7 +130,7 @@ fn emit_events(state: &ReaderState, events: Vec<Result<Event, String>>) {
     }
     if let Some(started) = state.asked.lock().unwrap().take() {
         eprintln!(
-            "riddle: oracle first chunk +{}ms",
+            "magicpaper: oracle first chunk +{}ms",
             started.elapsed().as_millis()
         );
     }
@@ -192,7 +193,7 @@ impl PiOracle {
         let stdout = child.stdout.take().expect("pi stdout was piped");
         let state = Arc::new(ReaderState::new());
         spawn_reader(stdout, Arc::clone(&state));
-        eprintln!("riddle: oracle pi rpc spawned (pid {pid}, bin {pi_bin})");
+        eprintln!("magicpaper: oracle pi rpc spawned (pid {pid}, bin {pi_bin})");
         Ok(Self {
             stdin: Arc::new(Mutex::new(stdin)),
             state,

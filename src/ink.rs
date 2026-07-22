@@ -178,7 +178,7 @@ impl Ink {
         let y0 = (by - 20).max(0) as usize;
         let x1 = ((bx + bw + 20) as usize).min(surf.w);
         let y1 = ((by + bh + 20) as usize).min(surf.h);
-        let max_edge = std::env::var("RIDDLE_IMAGE_MAX_EDGE")
+        let max_edge = std::env::var("MAGICPAPER_IMAGE_MAX_EDGE")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|&v| v >= 400)
