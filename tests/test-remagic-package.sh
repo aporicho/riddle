@@ -5,8 +5,8 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 TMP=$(mktemp -d /tmp/magicpaper-package-test.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
-# The config reader accepts application settings but cannot override ReMagic's
-# display, lifecycle, identity or path ownership contract.
+# The config reader accepts input-side settings but cannot import model keys or
+# override ReMagic's display, lifecycle, identity or path ownership contract.
 cat > "$TMP/oracle.env" <<'EOF'
 MAGICPAPER_OPENAI_KEY=test-placeholder
 MAGICPAPER_OPENAI_MODEL=test-model
@@ -22,8 +22,8 @@ EOF
     QTFB_KEY=77
     . "$ROOT/scripts/magicpaper-env"
     load_magicpaper_env "$TMP/oracle.env"
-    [ "$MAGICPAPER_OPENAI_KEY" = test-placeholder ]
-    [ "$MAGICPAPER_OPENAI_MODEL" = test-model ]
+    [ -z "${MAGICPAPER_OPENAI_KEY+x}" ]
+    [ -z "${MAGICPAPER_OPENAI_MODEL+x}" ]
     [ "$MAGICPAPER_OCR_TOKEN" = legacy-placeholder ]
     [ "$REMAGIC_DEVICE_PROFILE" = trusted-profile ]
     [ "$QTFB_KEY" = 77 ]

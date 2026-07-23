@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::oracle::{self, Event};
+use crate::pi_preferences::PiPreferenceValues;
 
 const IDLE_COMMIT_FAST: Duration = Duration::from_millis(2200);
 const IDLE_COMMIT_SLOW: Duration = Duration::from_millis(2600);
@@ -27,6 +28,7 @@ pub(super) struct OracleTurn {
 pub(super) struct OracleController {
     oracle: Option<oracle::Oracle>,
     current_generation: Arc<AtomicU64>,
+    control_rx: Option<mpsc::Receiver<oracle::AgentControlStatus>>,
 }
 
 impl OracleController {
@@ -38,6 +40,7 @@ impl OracleController {
                 Self {
                     oracle: Some(oracle),
                     current_generation,
+                    control_rx: None,
                 }
             }
             Err(error) => {
@@ -45,6 +48,7 @@ impl OracleController {
                 Self {
                     oracle: None,
                     current_generation,
+                    control_rx: None,
                 }
             }
         }
@@ -52,6 +56,37 @@ impl OracleController {
 
     pub(super) fn is_available(&self) -> bool {
         self.oracle.is_some()
+    }
+
+    pub(super) fn apply_pi_preferences(&mut self, values: PiPreferenceValues) {
+        if let Some(oracle) = &mut self.oracle {
+            oracle.apply_pi_preferences(values);
+        }
+    }
+
+    pub(super) fn start_agent_control(&mut self, command: oracle::AgentControlCommand) {
+        let Some(oracle) = &self.oracle else {
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        if oracle.start_agent_control(command, tx) {
+            self.control_rx = Some(rx);
+        }
+    }
+
+    pub(super) fn poll_agent_control(&mut self) -> Option<oracle::AgentControlStatus> {
+        let receiver = self.control_rx.as_ref()?;
+        match receiver.try_recv() {
+            Ok(status) => {
+                self.control_rx = None;
+                Some(status)
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.control_rx = None;
+                Some(oracle::AgentControlStatus::NetworkError)
+            }
+            Err(mpsc::TryRecvError::Empty) => None,
+        }
     }
 
     pub(super) fn supports_speculative(&self) -> bool {

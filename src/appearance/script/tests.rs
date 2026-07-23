@@ -113,3 +113,38 @@ fn handwriting_calibration_never_changes_ui_metrics() {
     assert_eq!(after_raster.width, before_raster.width);
     assert_eq!(after_raster.height, before_raster.height);
 }
+
+#[test]
+fn high_resolution_handwriting_trace_keeps_subpixel_paths_and_panel_dimensions() {
+    let font = test_font();
+    let traced = trace_handwriting(&font, "平滑回答", 72.0);
+    assert!(!traced.strokes.is_empty());
+    assert!(traced.width > 100 && traced.height > 30);
+    assert!(traced
+        .strokes
+        .iter()
+        .flatten()
+        .any(|&(x, y)| { x.fract().abs() > 0.01 || y.fract().abs() > 0.01 }));
+    assert!(traced.strokes.iter().flatten().all(|&(x, y)| {
+        x >= 0.0 && y >= 0.0 && x <= traced.width as f32 && y <= traced.height as f32
+    }));
+}
+
+#[test]
+fn path_simplification_preserves_a_corner_and_length_resampling() {
+    let noisy = vec![
+        (0.0, 0.0),
+        (1.0, 0.05),
+        (2.0, -0.05),
+        (3.0, 0.0),
+        (3.0, 3.0),
+    ];
+    let simplified = simplify_path(&noisy, 0.2);
+    assert_eq!(simplified, vec![(0.0, 0.0), (3.0, 0.0), (3.0, 3.0)]);
+    let sampled = resample_path(&simplified, 1.0);
+    assert_eq!(sampled.first(), Some(&(0.0, 0.0)));
+    assert_eq!(sampled.last(), Some(&(3.0, 3.0)));
+    assert!(sampled.windows(2).all(|pair| {
+        ((pair[1].0 - pair[0].0).powi(2) + (pair[1].1 - pair[0].1).powi(2)).sqrt() <= 1.01
+    }));
+}

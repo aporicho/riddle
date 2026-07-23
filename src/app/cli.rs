@@ -16,9 +16,9 @@ usage:
   magicpaper                      open the ReMagic-hosted diary (requires the
                               QTFB and DeviceProfileV1 runtime contract)
   magicpaper --legacy-takeover    explicitly own display and raw input via libquill
-  magicpaper --oracle-test [PNG]  run one oracle turn against PNG (default
-                              /tmp/magicpaper-page.png) and print the streamed
-                              reply; verifies key + endpoint + model
+  magicpaper --oracle-test [PNG]  run one managed Pi Agent turn against PNG
+                              (default /tmp/magicpaper-page.png) and print the
+                              streamed reply; requires ReMagic app identity
   magicpaper --ocr-test PNG       send one PNG only to the configured PaddleOCR
                               service and print its recognized text
   magicpaper --agent              run the screenless scheduled-task worker
@@ -26,7 +26,8 @@ usage:
                               launch the standalone diary
   magicpaper --version            print the version
 
-standalone configuration lives in /home/root/.config/magicpaper/oracle.env.
+PaddleOCR configuration lives in /home/root/.config/magicpaper/oracle.env.
+Provider credentials are configured in ReMagic, never on the paper screen.
 ";
 
 pub(crate) fn entry() {

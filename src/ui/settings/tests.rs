@@ -81,9 +81,10 @@ fn sliders_map_to_documented_endpoints() {
 }
 
 #[test]
-fn font_and_full_refresh_rows_are_explicit_actions() {
+fn nested_pages_and_full_refresh_rows_are_explicit_actions() {
     let (_bytes, _surface, _fonts, panel) = setup();
     for (setting, expected) in [
+        (Setting::PiAgent, Action::OpenPiAgent),
         (Setting::Fonts, Action::OpenFonts),
         (Setting::RefreshNow, Action::RefreshNow),
     ] {
@@ -120,4 +121,14 @@ fn slider_preview_changes_only_its_draft_until_release() {
     assert!(preview.update(Point::new(control.x1 - 24, (control.y0 + control.y1) / 2)));
     preview.render(&mut surface, &fonts);
     assert_eq!(panel.values.cleanup_padding_px, 16);
+}
+
+#[test]
+fn seven_settings_cards_fit_above_the_move_footer() {
+    let (_bytes, _surface, _fonts, panel) = setup();
+    assert_eq!(panel.rows.len(), 7);
+    assert!(panel
+        .rows
+        .iter()
+        .all(|row| row.card.y1 < screen_h().saturating_sub(102) as i32));
 }

@@ -5,7 +5,11 @@ use crate::fb::BBox;
 use crate::platform::RefreshIntent;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::surface::{PixFmt, Surface, BLACK, WHITE};
+#[cfg(test)]
+use crate::surface::BLACK;
+use crate::surface::{PixFmt, Surface, WHITE};
+
+mod smoothing;
 
 /// Immutable raw page snapshot. Copying the crop is cheap and bounded; luma
 /// conversion, downsampling, and PNG compression can safely run on a worker
@@ -100,16 +104,11 @@ impl Ink {
     /// Pen touched down or moved while down, with brush radius already
     /// resolved by the caller. Returns the dirty rect of what was drawn.
     pub fn pen_point(&mut self, surf: &mut Surface, x: i32, y: i32, r: i32) -> BBox {
-        let mut dirty = BBox::empty();
-        if let Some(&(px, py, pr)) = self.current.last() {
-            surf.brush_line(px, py, x, y, r.min(pr + 1), BLACK);
-            dirty.add(px, py, pr + 2);
-        } else {
-            surf.stamp(x, y, r, BLACK);
-        }
-        dirty.add(x, y, r + 2);
-        self.current.push((x, y, r));
-        self.bbox.add(x, y, r + 2);
+        let radius = smoothing::smoothed_radius(&self.current, r);
+        let point = (x, y, radius);
+        let dirty = smoothing::draw_live_point(surf, &self.current, point);
+        self.current.push(point);
+        self.bbox.add(x, y, radius + 2);
         dirty
     }
 
@@ -161,11 +160,15 @@ impl Ink {
         }
     }
 
-    pub fn pen_up(&mut self) {
+    /// Finish the low-latency preview and overlay anti-aliased edges. Returns
+    /// the only region that needs a quality waveform submission.
+    pub fn pen_up(&mut self, surf: &mut Surface) -> BBox {
+        let dirty = smoothing::settle_stroke(surf, &self.current);
         if !self.current.is_empty() {
             self.strokes.push(std::mem::take(&mut self.current));
         }
         self.last_erase = None;
+        dirty
     }
 
     /// Snapshot the ink crop without doing PNG work on the UI thread.
@@ -275,7 +278,7 @@ mod tests {
         for x in (20..=200).step_by(10) {
             ink.pen_point(&mut s, x, 100, 3);
         }
-        ink.pen_up();
+        ink.pen_up(&mut s);
         assert_eq!(ink.stroke_list().len(), 1);
         let before: usize = ink.stroke_list().iter().map(|s| s.len()).sum();
 
@@ -305,7 +308,7 @@ mod tests {
         let mut ink = Ink::new();
         ink.pen_point(&mut s, 100, 100, 3);
         ink.pen_point(&mut s, 104, 100, 3);
-        ink.pen_up();
+        ink.pen_up(&mut s);
         assert!(!ink.is_empty());
         ink.erase_point(&mut s, 102, 100, 30);
         assert!(ink.stroke_list().is_empty());
@@ -317,7 +320,7 @@ mod tests {
         let (_buf, mut surface) = surf();
         let mut ink = Ink::new();
         ink.pen_point(&mut surface, 100, 100, 3);
-        ink.pen_up();
+        ink.pen_up(&mut surface);
         let capture = ink.capture(&surface).unwrap();
         surface.fill_rect(0, 0, surface.w, surface.h, WHITE);
         let bytes = capture.encode_png(&AtomicBool::new(false)).unwrap();
@@ -329,13 +332,73 @@ mod tests {
         let (_buf, mut surface) = surf();
         let mut ink = Ink::new();
         ink.pen_point(&mut surface, 100, 100, 3);
-        ink.pen_up();
+        ink.pen_up(&mut surface);
         let capture = ink.capture(&surface).unwrap();
         let cancelled = AtomicBool::new(true);
         assert_eq!(
             capture.encode_png(&cancelled).unwrap_err().kind(),
             std::io::ErrorKind::Interrupted
         );
+    }
+
+    #[test]
+    fn pressure_changes_are_filtered_without_changing_saved_point_geometry() {
+        let (_buf, mut surface) = surf();
+        let mut ink = Ink::new();
+        ink.pen_point(&mut surface, 20, 30, 2);
+        ink.pen_point(&mut surface, 40, 35, 8);
+        ink.pen_point(&mut surface, 60, 30, 2);
+        let settled = ink.pen_up(&mut surface);
+        assert_eq!(
+            ink.stroke_list()[0]
+                .iter()
+                .map(|&(x, y, _)| (x, y))
+                .collect::<Vec<_>>(),
+            vec![(20, 30), (40, 35), (60, 30)]
+        );
+        assert_eq!(
+            ink.stroke_list()[0]
+                .iter()
+                .map(|&(_, _, radius)| radius)
+                .collect::<Vec<_>>(),
+            vec![2, 4, 3]
+        );
+        let (x, y, width, height) = settled.rect();
+        assert!(x <= 16 && y <= 26 && width >= 48 && height >= 13);
+    }
+
+    #[test]
+    fn pen_up_quality_overlay_retains_gray_edge_coverage() {
+        let (_buf, mut surface) = surf();
+        let mut ink = Ink::new();
+        ink.pen_point(&mut surface, 20, 100, 2);
+        ink.pen_point(&mut surface, 100, 103, 2);
+        ink.pen_point(&mut surface, 180, 100, 2);
+        ink.pen_up(&mut surface);
+        assert!(surface.luma(100, 102) < 10);
+        assert!((95..=108).any(|y| { (20..=180).any(|x| (1..=254).contains(&surface.luma(x, y))) }));
+        assert_eq!(surface.luma(100, 112), 255);
+    }
+
+    #[test]
+    fn long_stroke_settling_scales_with_the_local_path() {
+        let (_buf, mut surface) = surf();
+        let mut ink = Ink::new();
+        for sample in 0..1_200 {
+            let x = 30 + sample / 4;
+            let y = 200 + ((sample / 24) % 2) * 3;
+            ink.pen_point(&mut surface, x, y, 3);
+        }
+        let started = std::time::Instant::now();
+        let damage = ink.pen_up(&mut surface);
+        let elapsed = started.elapsed();
+        eprintln!(
+            "magic-paper-test: settled_points=1200 elapsed_us={}",
+            elapsed.as_micros()
+        );
+        assert!(!damage.is_empty());
+        assert!(damage.rect().2 < 340, "settling expanded to panel width");
+        assert!(elapsed < std::time::Duration::from_millis(200));
     }
 
     fn terminal_dissolve_is_local_and_quality_monochrome(format: PixFmt) {

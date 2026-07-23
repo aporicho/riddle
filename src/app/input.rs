@@ -10,7 +10,7 @@ use crate::platform::{InputMode, PenFrame, PenPhase, PenTool};
 use crate::qtfb;
 use crate::surface::Surface;
 use crate::ui::pointer::{Gesture, GesturePolicy, HitRect, Point, PointerTool, PreviewBacking};
-use crate::ui::{font_settings, help, paper_list, settings};
+use crate::ui::{font_settings, help, paper_list, pi_settings, settings};
 
 /// A new pressure-bearing event after this silence closes an orphaned qtfb
 /// stroke before opening the next one. Elapsed time alone never releases a
@@ -42,6 +42,7 @@ pub(super) enum ModalPreview {
     Paper(paper_list::Preview),
     Font(font_settings::Preview),
     Settings(settings::Preview),
+    PiSettings(pi_settings::Preview),
     Help(help::HelpPreview),
 }
 
@@ -51,6 +52,7 @@ impl ModalPreview {
             Self::Paper(preview) => preview.rect(),
             Self::Font(preview) => preview.rect(),
             Self::Settings(preview) => preview.rect(),
+            Self::PiSettings(preview) => preview.rect(),
             Self::Help(preview) => preview.rect(),
         }
     }
@@ -60,6 +62,7 @@ impl ModalPreview {
             Self::Paper(preview) => preview.is_visible(),
             Self::Font(preview) => preview.is_visible(),
             Self::Settings(preview) => preview.is_visible(),
+            Self::PiSettings(preview) => preview.is_visible(),
             Self::Help(preview) => preview.is_visible(),
         }
     }
@@ -69,6 +72,7 @@ impl ModalPreview {
             Self::Paper(preview) => preview.update(point),
             Self::Font(preview) => preview.update(point),
             Self::Settings(preview) => preview.update(point),
+            Self::PiSettings(preview) => preview.update(point),
             Self::Help(preview) => preview.update(point),
         }
     }
@@ -78,6 +82,7 @@ impl ModalPreview {
             Self::Paper(preview) => preview.render(surface),
             Self::Font(preview) => preview.render(surface, fonts),
             Self::Settings(preview) => preview.render(surface, fonts),
+            Self::PiSettings(preview) => preview.render(surface),
             Self::Help(preview) => preview.render(surface),
         }
     }
@@ -87,6 +92,7 @@ impl ModalPreview {
             Self::Paper(preview) => preview.release_gesture(end, classified),
             Self::Font(preview) => preview.release_gesture(end),
             Self::Settings(preview) => preview.release_gesture(end),
+            Self::PiSettings(preview) => preview.release_gesture(end),
             Self::Help(preview) => preview.release_gesture(end),
         }
     }

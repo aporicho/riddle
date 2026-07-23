@@ -99,6 +99,25 @@ fn rejects_short_or_incomplete_tasks() {
 }
 
 #[test]
+fn rejects_oversized_task_instructions_from_input_and_disk() {
+    let oversized = "x".repeat(MAX_TASK_INSTRUCTION_BYTES + 1);
+    assert!(parse_command(&format!("任务 每五分钟{oversized}"))
+        .unwrap_err()
+        .contains("exceeds"));
+
+    let mut store = tmp_store("oversized-instruction");
+    std::fs::write(
+        store.index_path(),
+        format!("1\t300\t600\tactive\t{oversized}\n"),
+    )
+    .unwrap();
+    let error = store.load().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(store.entries.is_empty());
+    let _ = std::fs::remove_dir_all(store.dir);
+}
+
+#[test]
 fn persists_due_and_successful_run_state() {
     let mut s = tmp_store("round-trip");
     let task = add(&mut s, "任务 每五分钟讲一个黑暗冷笑话", 1000);

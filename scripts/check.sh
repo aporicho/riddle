@@ -15,8 +15,6 @@ trap 'rm -rf "$test_root"' EXIT
 offline_output=$(
     MAGICPAPER_TEST_MODE=1 \
     MAGICPAPER_DATA_DIR="$test_root/data" \
-    MAGICPAPER_OPENAI_KEY=test-placeholder \
-    MAGICPAPER_OPENAI_BASE=http://127.0.0.1:1 \
     MAGICPAPER_OCR_TOKEN=test-placeholder \
     cargo run --quiet -- --oracle-test /definitely/missing.png 2>&1
 )

@@ -1,5 +1,6 @@
 //! PaddleOCR multipart encoding and lightweight JSONL extraction.
 
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
@@ -32,14 +33,33 @@ pub(super) fn paddle_multipart(png: &[u8], model: &str, boundary: &str) -> Vec<u
 pub(super) fn paddle_http_error(stage: &str, error: ureq::Error) -> String {
     match error {
         ureq::Error::Status(code, response) => {
-            let mut detail = response.into_string().unwrap_or_default();
-            if detail.len() > 600 {
-                detail.truncate(600);
-            }
+            let detail = read_response_limited(response, "error", 600).unwrap_or_default();
             format!("PaddleOCR {stage} http {code}: {}", detail.trim())
         }
         other => format!("PaddleOCR {stage} request failed: {other}"),
     }
+}
+
+/// Read a remote body with a hard byte ceiling. `ureq::Response::into_string`
+/// has no caller-visible size limit and is therefore unsuitable for a
+/// long-lived, root-owned tablet process.
+pub(super) fn read_response_limited(
+    response: ureq::Response,
+    stage: &str,
+    maximum: usize,
+) -> Result<String, String> {
+    let mut bytes = Vec::with_capacity(maximum.min(64 * 1024));
+    response
+        .into_reader()
+        .take(maximum.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("PaddleOCR {stage} response: {error}"))?;
+    if bytes.len() > maximum {
+        return Err(format!(
+            "PaddleOCR {stage} response exceeds {maximum} bytes"
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| format!("PaddleOCR {stage} response: {error}"))
 }
 
 pub(super) fn sleep_cancellable(duration: std::time::Duration, cancelled: &AtomicBool) {

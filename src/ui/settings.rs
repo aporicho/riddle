@@ -14,7 +14,7 @@ use super::pointer::{invert_mono, Gesture, HitRect, Point, PointerTool};
 
 const SIDE: usize = 72;
 const LIST_TOP: usize = 220;
-const ROW_H: usize = 198;
+const ROW_H: usize = 188;
 const SLIDER_X0: i32 = 170;
 const SLIDER_SIDE: usize = 170;
 const SLIDER_Y_OFFSET: usize = 130;
@@ -26,6 +26,7 @@ pub(crate) enum Setting {
     CleanupPadding,
     FullRefreshInterval,
     AnswerDwell,
+    PiAgent,
     Fonts,
     RefreshNow,
 }
@@ -36,6 +37,7 @@ pub enum Action {
     SetCleanupPadding(u8),
     SetFullRefreshInterval(u8),
     SetAnswerDwell(u16),
+    OpenPiAgent,
     OpenFonts,
     RefreshNow,
     Dismiss,
@@ -237,6 +239,7 @@ impl SettingsPanel {
                 Hit::Card(Setting::CleanupStrength) => {
                     Action::SetCleanupStrength(self.values.cleanup_strength.toggled())
                 }
+                Hit::Card(Setting::PiAgent) => Action::OpenPiAgent,
                 Hit::Card(Setting::Fonts) => Action::OpenFonts,
                 Hit::Card(Setting::RefreshNow) => Action::RefreshNow,
                 Hit::Card(_) => Action::Redraw,
@@ -278,12 +281,13 @@ impl SettingsPanel {
     }
 }
 
-const fn settings() -> [Setting; 6] {
+const fn settings() -> [Setting; 7] {
     [
         Setting::CleanupStrength,
         Setting::CleanupPadding,
         Setting::FullRefreshInterval,
         Setting::AnswerDwell,
+        Setting::PiAgent,
         Setting::Fonts,
         Setting::RefreshNow,
     ]
@@ -320,6 +324,7 @@ fn draw_row(
             count => format!("自动全刷 · 每 {count} 次回答"),
         },
         Setting::AnswerDwell => format!("回答停留 · {}%", values.answer_dwell_percent),
+        Setting::PiAgent => "Pi 智能体 · 模型与工具".into(),
         Setting::Fonts => format!("字体与大小 · {}", fonts.selected().display_name()),
         Setting::RefreshNow => "立即全刷".into(),
     };

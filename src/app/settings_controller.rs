@@ -8,6 +8,7 @@ use crate::surface::Surface;
 use crate::ui;
 use crate::ui::pointer::Gesture;
 
+use super::pi_settings_controller;
 use super::refresh_controller::RefreshController;
 use super::state::{FontOrigin, State};
 
@@ -43,6 +44,9 @@ pub(super) fn finish_settings_stroke(
             update_values(state, surface, fonts, display, refresh, |values| {
                 values.answer_dwell_percent = value;
             });
+        }
+        Some(ui::settings::Action::OpenPiAgent) => {
+            pi_settings_controller::open(state, surface, fonts, display)
         }
         Some(ui::settings::Action::OpenFonts) => open_fonts(state, surface, fonts, display),
         Some(ui::settings::Action::RefreshNow) => {

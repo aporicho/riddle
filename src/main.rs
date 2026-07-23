@@ -10,6 +10,7 @@ mod fb;
 mod ink;
 mod oracle;
 mod pen;
+mod pi_preferences;
 mod platform;
 mod power;
 mod preferences;

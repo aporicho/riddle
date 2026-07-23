@@ -33,21 +33,28 @@ pub(super) fn region_all_white(surf: &Surface, region: BBox) -> bool {
 /// What MP writes when the spirit cannot answer: short and actionable. The
 /// raw error still goes to stderr.
 pub(super) fn oracle_excuse(e: &str) -> String {
-    if e.contains("no oracle") {
-        "MagicPaper lies dormant: it found no oracle. \
-         Put an API key in oracle.env, then open me again."
-            .into()
-    } else if e.starts_with("http 401") || e.starts_with("http 403") {
-        "The oracle refused MagicPaper's key. Check MAGICPAPER_OPENAI_KEY in oracle.env.".into()
-    } else if e.starts_with("http ") {
-        let code = e.split(':').next().unwrap_or("an error");
-        format!("The oracle rejected MagicPaper's plea ({code}). Check the model and endpoint in oracle.env.")
-    } else if e.contains("request failed") || e.contains("timed out") {
-        "MagicPaper cannot reach its oracle. Is the tablet connected to Wi-Fi?".into()
+    let lower = e.to_ascii_lowercase();
+    if lower.contains("api key") || lower.contains("credential") || e.contains("密鑰") {
+        "主人，尚未在 ReMagic 中配置模型密鑰。".into()
+    } else if lower.contains("pi agent unavailable")
+        || lower.contains("pi runtime is not installed")
+        || lower.contains("agent-connect")
+    {
+        "主人，ReMagic 的 Pi 智能體尚未就緒。".into()
+    } else if lower.contains("paddleocr is required") {
+        "主人，手寫辨識服務尚未配置。".into()
+    } else if lower.contains("busy") || lower.contains("active turn") {
+        "墨跡仍在思考，請稍候再寫。".into()
+    } else if lower.contains("request failed")
+        || lower.contains("timed out")
+        || lower.contains("network")
+        || lower.contains("connection")
+    {
+        "主人，網路暫時無法連接。".into()
     } else if e.contains("empty reply") {
-        "The spirit read your words but said nothing. Write again.".into()
+        "墨跡讀懂了文字，卻沒有留下回答；請再寫一次。".into()
     } else {
-        "The ink blurred before it could answer. Write again.".into()
+        "墨跡在回答前散去了；請再寫一次。".into()
     }
 }
 
@@ -108,7 +115,10 @@ pub(super) fn conjure(
         let y = (ink_bottom + 130).min(screen_h() as i32 - 400);
         let reply = plan_reply(font, &entry.reply, Some(y));
         for stroke in reply.strokes {
-            let mapped: Vec<(i32, i32, i32)> = stroke.iter().map(|&(x, y)| (x, y, 2)).collect();
+            let mapped: Vec<(i32, i32, i32)> = stroke
+                .iter()
+                .map(|&(x, y)| (x.round() as i32, y.round() as i32, 2))
+                .collect();
             for &(x, y, r) in &mapped {
                 region.add(x, y, r + 2);
             }
@@ -287,9 +297,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        append_overflow_marker, append_reply, plan_reply, plan_streaming_reply_async,
-        poll_reply_layout, recenter_undrawn_reply, start_initial_reply_layout,
-        visible_grapheme_count, MARGIN_X, MARGIN_Y,
+        append_overflow_marker, append_reply, oracle_excuse, plan_reply,
+        plan_streaming_reply_async, poll_reply_layout, recenter_undrawn_reply,
+        start_initial_reply_layout, visible_grapheme_count, MARGIN_X, MARGIN_Y,
     };
     use crate::fonts::{FontBook, FontId};
 
@@ -308,6 +318,15 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(plan.layout.is_none(), "reply layout worker did not finish");
+    }
+
+    #[test]
+    fn paper_errors_are_actionable_without_leaking_credentials() {
+        let missing = oracle_excuse("missing API key sk-do-not-display");
+        assert!(missing.contains("ReMagic"));
+        assert!(!missing.contains("sk-do-not-display"));
+        assert!(oracle_excuse("Pi Agent unavailable: refused").contains("Pi"));
+        assert!(oracle_excuse("request timed out").contains("網路"));
     }
 
     #[test]
@@ -351,8 +370,11 @@ mod tests {
         assert!(!plan.strokes.is_empty());
         assert!(plan.next_y <= crate::fb::screen_h() as i32 - MARGIN_Y + 1);
         for &(x, y) in plan.strokes.iter().flatten() {
-            assert!(x >= MARGIN_X && x < crate::fb::screen_w() as i32 - MARGIN_X);
-            assert!(y >= MARGIN_Y - 3 && y < crate::fb::screen_h() as i32 - MARGIN_Y + 3);
+            assert!(x >= MARGIN_X as f32 && x < (crate::fb::screen_w() as i32 - MARGIN_X) as f32);
+            assert!(
+                y >= (MARGIN_Y - 3) as f32
+                    && y < (crate::fb::screen_h() as i32 - MARGIN_Y + 3) as f32
+            );
         }
     }
 
@@ -421,8 +443,8 @@ mod tests {
         assert_eq!(plan.visible_graphemes, 1);
         assert!(!plan.strokes.is_empty());
         for &(x, y) in plan.strokes.iter().flatten() {
-            assert!(x >= MARGIN_X && x < crate::fb::screen_w() as i32 - MARGIN_X);
-            assert!(y >= MARGIN_Y && y < crate::fb::screen_h() as i32);
+            assert!(x >= MARGIN_X as f32 && x < (crate::fb::screen_w() as i32 - MARGIN_X) as f32);
+            assert!(y >= MARGIN_Y as f32 && y < crate::fb::screen_h() as f32);
         }
     }
 

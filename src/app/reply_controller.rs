@@ -49,6 +49,8 @@ pub(super) struct ReplyCompletion {
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ReplyEffects {
     pub(super) damage: Option<DamageRect>,
+    /// The completed answer block to settle with a quality partial waveform.
+    pub(super) settle: Option<DamageRect>,
     /// Elapsed time when the first visible damage was submitted by the
     /// controller. The runtime logs it only after handing damage to display.
     pub(super) first_damage_latency_ms: Option<u128>,
@@ -107,11 +109,11 @@ impl ReplyController {
             let (x, y) = stroke[plan.point_i];
             if plan.point_i > 0 {
                 let (px, py) = stroke[plan.point_i - 1];
-                surf.brush_line(px, py, x, y, 2, BLACK);
+                surf.brush_line_aa(px, py, x, y, 2.0, BLACK);
             } else {
-                surf.stamp(x, y, 2, BLACK);
+                surf.brush_line_aa(x, y, x, y, 2.0, BLACK);
             }
-            dirty.add(x, y, 4);
+            dirty.add(x.round() as i32, y.round() as i32, 4);
             plan.point_i += 1;
             budget -= 1;
         }
@@ -150,8 +152,20 @@ impl ReplyController {
             *next = now + reply_tick_interval(waiting_for_first_layout);
             None
         };
+        let settle = completion.and_then(|completion| {
+            (!completion.region.is_empty()).then(|| {
+                let (x, y, width, height) = completion.region.rect();
+                DamageRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                }
+            })
+        });
         ReplyEffects {
             damage,
+            settle,
             first_damage_latency_ms,
             completion,
         }
@@ -195,7 +209,7 @@ mod tests {
         WritePlan {
             created_at: Instant::now(),
             first_damage_logged: false,
-            strokes: vec![vec![(10, 10), (14, 10)]],
+            strokes: vec![vec![(10.0, 10.0), (14.0, 10.0)]],
             stroke_i: 0,
             point_i: 0,
             region,
@@ -231,6 +245,7 @@ mod tests {
         let effects =
             ReplyController::tick(&mut plan, &mut next, false, &mut false, &mut surface, now);
         let completion = effects.completion.expect("complete reply");
+        assert_eq!(effects.settle.map(|damage| damage.width), Some(13));
         assert_eq!(completion.visible_graphemes, 2);
         assert!(completion.reply_elapsed_ms < 1_000);
         assert_eq!(completion.region.rect(), plan.region.rect());
@@ -306,7 +321,7 @@ mod tests {
         WritePlan {
             created_at: Instant::now(),
             first_damage_logged: false,
-            strokes: vec![(0..points).map(|x| (x as i32, 1)).collect()],
+            strokes: vec![(0..points).map(|x| (x as f32, 1.0)).collect()],
             stroke_i: 0,
             point_i: 0,
             region,

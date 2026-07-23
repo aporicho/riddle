@@ -12,7 +12,7 @@ use crate::fonts;
 use super::reply::plan_reply;
 
 pub(super) struct LayoutResult {
-    pub(super) strokes: Vec<Vec<(i32, i32)>>,
+    pub(super) strokes: Vec<Vec<(f32, f32)>>,
     pub(super) region: BBox,
     pub(super) next_y: i32,
     pub(super) visible_graphemes: usize,

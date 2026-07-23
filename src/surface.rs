@@ -165,6 +165,98 @@ impl Surface {
         }
     }
 
+    /// Alpha-composite one RGB565 colour over the current pixel.  Keeping the
+    /// blend at the surface boundary gives both framebuffer formats identical
+    /// anti-aliased edges instead of making callers guess their byte layout.
+    #[inline]
+    pub fn blend_px(&mut self, x: i32, y: i32, c: u16, alpha: u8) {
+        if alpha == 0 || x < 0 || y < 0 || x >= self.w as i32 || y >= self.h as i32 {
+            return;
+        }
+        if alpha == u8::MAX {
+            self.put_px(x, y, c);
+            return;
+        }
+        let (sr, sg, sb) = expand565(c);
+        let inverse = u8::MAX - alpha;
+        let blend = |dst: u8, src: u8| -> u8 {
+            ((dst as u16 * inverse as u16 + src as u16 * alpha as u16 + 127) / 255) as u8
+        };
+        let (stride, fmt) = (self.stride, self.fmt);
+        match fmt {
+            PixFmt::Rgb565 => {
+                let i = y as usize * stride + x as usize * 2;
+                let bytes = self.buf();
+                let old = bytes[i] as u16 | (bytes[i + 1] as u16) << 8;
+                let (dr, dg, db) = expand565(old);
+                let (r, g, b) = (blend(dr, sr), blend(dg, sg), blend(db, sb));
+                let packed = ((r as u16 >> 3) << 11) | ((g as u16 >> 2) << 5) | (b as u16 >> 3);
+                bytes[i] = packed as u8;
+                bytes[i + 1] = (packed >> 8) as u8;
+            }
+            PixFmt::Rgb32 => {
+                let i = y as usize * stride + x as usize * 4;
+                let bytes = self.buf();
+                bytes[i] = blend(bytes[i], sb);
+                bytes[i + 1] = blend(bytes[i + 1], sg);
+                bytes[i + 2] = blend(bytes[i + 2], sr);
+                bytes[i + 3] = 0xff;
+            }
+        }
+    }
+
+    /// Apply geometric coverage without accumulating darkness where adjacent
+    /// short segments overlap. For black ink the darkest requested coverage
+    /// wins, which is equivalent to rasterizing the union of all brush shapes
+    /// into one local mask before compositing it onto white paper.
+    #[inline]
+    fn cover_px(&mut self, x: i32, y: i32, c: u16, coverage: u8) {
+        if c != BLACK {
+            self.blend_px(x, y, c, coverage);
+            return;
+        }
+        let target = u8::MAX - coverage;
+        if self.luma(x, y) <= target {
+            return;
+        }
+        let gray =
+            ((target as u16 >> 3) << 11) | ((target as u16 >> 2) << 5) | (target as u16 >> 3);
+        self.put_px(x, y, gray);
+    }
+
+    /// Draw a round-capped, anti-aliased segment with sub-pixel endpoints.
+    /// Work is bounded by the segment's local box, so a pen-up quality pass
+    /// never allocates or scans a full-panel supersampling buffer.
+    pub fn brush_line_aa(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, radius: f32, c: u16) {
+        let radius = radius.max(0.5);
+        let fringe = radius + 0.5;
+        let min_x = (x0.min(x1) - fringe).floor() as i32;
+        let max_x = (x0.max(x1) + fringe).ceil() as i32;
+        let min_y = (y0.min(y1) - fringe).floor() as i32;
+        let max_y = (y0.max(y1) + fringe).ceil() as i32;
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let length_sq = dx * dx + dy * dy;
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let px = x as f32 + 0.5;
+                let py = y as f32 + 0.5;
+                let t = if length_sq <= f32::EPSILON {
+                    0.0
+                } else {
+                    (((px - x0) * dx + (py - y0) * dy) / length_sq).clamp(0.0, 1.0)
+                };
+                let nearest_x = x0 + t * dx;
+                let nearest_y = y0 + t * dy;
+                let distance = ((px - nearest_x).powi(2) + (py - nearest_y).powi(2)).sqrt();
+                let coverage = (fringe - distance).clamp(0.0, 1.0);
+                if coverage > 0.0 {
+                    self.cover_px(x, y, c, (coverage * 255.0).round() as u8);
+                }
+            }
+        }
+    }
+
     pub fn brush_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, r: i32, c: u16) {
         let dx = (x1 - x0).abs();
         let dy = (y1 - y0).abs();
@@ -173,6 +265,37 @@ impl Surface {
             let x = x0 + (x1 - x0) * i / steps;
             let y = y0 + (y1 - y0) * i / steps;
             self.stamp(x, y, r, c);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn antialiased_segment_has_black_core_and_gray_fringe_in_both_formats() {
+        for (format, bpp) in [(PixFmt::Rgb565, 2), (PixFmt::Rgb32, 4)] {
+            let mut bytes = vec![0xff; 24 * 24 * bpp];
+            let mut surface =
+                Surface::new(bytes.as_mut_ptr(), bytes.len(), 24, 24, 24 * bpp, format);
+            surface.brush_line_aa(3.25, 12.25, 20.75, 12.25, 2.25, BLACK);
+            assert!(surface.luma(10, 12) < 10, "core was not opaque");
+            assert!(
+                (1..=254).contains(&surface.luma(10, 14)),
+                "edge did not retain grayscale coverage"
+            );
+            assert_eq!(surface.luma(10, 16), 255, "AA escaped its local fringe");
+
+            let fringe = surface.luma(10, 14);
+            for _ in 0..8 {
+                surface.brush_line_aa(3.25, 12.25, 20.75, 12.25, 2.25, BLACK);
+            }
+            assert_eq!(
+                surface.luma(10, 14),
+                fringe,
+                "overlapping path segments accumulated fringe darkness"
+            );
         }
     }
 }

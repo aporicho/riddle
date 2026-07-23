@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
@@ -32,12 +32,24 @@ pub(super) fn lock_exclusive(dir: &Path) -> io::Result<StoreLock> {
 
 /// Missing means an intentionally empty, not-yet-created store. Every other
 /// read failure is data-safety relevant and must reach the caller.
-pub(super) fn read_optional_utf8(path: &Path) -> io::Result<Option<String>> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
+pub(super) fn read_optional_utf8(path: &Path, maximum: usize) -> io::Result<Option<String>> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let limit = u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1);
+    let mut bytes = Vec::with_capacity(maximum.min(64 * 1024));
+    file.take(limit).read_to_end(&mut bytes)?;
+    if bytes.len() > maximum {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} exceeds its {maximum}-byte limit", path.display()),
+        ));
     }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "store is not valid UTF-8"))
 }
 
 /// Write a complete replacement beside the destination, make its contents

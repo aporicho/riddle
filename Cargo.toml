@@ -1,6 +1,6 @@
 [package]
 name = "magicpaper"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 license = "MIT"
 description = "MagicPaper (MP), living magical paper for reMarkable Paper Pro and Paper Pro Move"
@@ -14,8 +14,8 @@ ab_glyph = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 unicode-segmentation = "1"
-# HTTP + TLS for the OpenAI-compatible oracle backend. Pure Rust (rustls), no
-# OpenSSL/C — keeps the binary self-contained and cross-compiles cleanly.
+# HTTP + TLS for the PaddleOCR client. Provider/model traffic is owned by the
+# ReMagic-hosted Pi Agent and never leaves MagicPaper directly.
 ureq = { version = "2.10", default-features = false, features = ["tls"] }
 
 [features]

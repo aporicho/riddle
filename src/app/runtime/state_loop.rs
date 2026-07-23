@@ -17,6 +17,15 @@ mod reply;
 
 impl Engine<'_> {
     pub(super) fn tick_state(&mut self) {
+        if let Some(status) = self.oracle.poll_agent_control() {
+            super::super::pi_settings_controller::set_status(
+                &mut self.state,
+                &mut self.surf,
+                &self.font,
+                self.disp,
+                status,
+            );
+        }
         let state = std::mem::replace(&mut self.state, State::Listening { last_pen: None });
         let next_state = match state {
             State::Listening { last_pen } => self.tick_listening(last_pen),
@@ -61,6 +70,7 @@ impl Engine<'_> {
             | State::TodoList { .. }
             | State::FontList { .. }
             | State::Settings { .. }
+            | State::PiSettings { .. }
             | State::HistoryList { .. }
             | State::ReaderList { .. }) => stable,
         };
@@ -423,6 +433,7 @@ impl Engine<'_> {
             | State::TodoList { .. }
             | State::FontList { .. }
             | State::Settings { .. }
+            | State::PiSettings { .. }
             | State::HistoryList { .. }
             | State::ReaderList { .. } => Duration::from_millis(25),
             State::Thinking { .. } => Duration::from_millis(4),

@@ -26,6 +26,8 @@ use parser::parse_command;
 
 const MIN_INTERVAL_SECS: u64 = 5 * 60;
 const MAX_TASKS: usize = 9;
+const MAX_TASK_INSTRUCTION_BYTES: usize = 4 * 1024;
+const MAX_TASK_INDEX_BYTES: usize = 128 * 1024;
 
 /// True only when the complete transcription is a valid local task command.
 /// This deliberately does not treat every sentence beginning with `任务` as a
@@ -136,7 +138,7 @@ impl TaskStore {
 
     fn load_unlocked(&mut self) -> io::Result<()> {
         let path = self.index_path();
-        let Some(text) = read_optional_utf8(&path)? else {
+        let Some(text) = read_optional_utf8(&path, MAX_TASK_INDEX_BYTES)? else {
             self.entries.clear();
             return Ok(());
         };
@@ -195,6 +197,13 @@ impl TaskStore {
                     &path,
                     line_number,
                     "task instruction is empty",
+                ));
+            }
+            if instruction.len() > MAX_TASK_INSTRUCTION_BYTES {
+                return Err(invalid_line(
+                    &path,
+                    line_number,
+                    "task instruction exceeds its size limit",
                 ));
             }
             entries.push(Task {

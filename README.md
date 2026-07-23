@@ -2,16 +2,16 @@
 
 MagicPaper（简称 MP）是正式产品名，仓库与发布标识为 `magicpaper`。它是为 reMarkable Paper Pro 与 Paper Pro Move 设计的纸面 AI 应用：用户直接用笔书写，墨迹在停笔后淡出，回答再以手写动画写回纸面。它没有键盘、聊天气泡或网页界面。
 
-本项目由 Maxime Rivest 的 [`riddle`](https://github.com/MaximeRivest/riddle) 演进而来，并保留原项目历史和 MIT 署名。0.7.1 的正式运行方式是作为 ReMagic 托管的驻留应用；AppLoad、镇纸和旧独占脚本都不是其运行依赖。
+本项目由 Maxime Rivest 的 [`riddle`](https://github.com/MaximeRivest/riddle) 演进而来，并保留原项目历史和 MIT 署名。0.8.0 的正式运行方式是作为 ReMagic 托管的驻留应用；AppLoad、镇纸和旧独占脚本都不是其运行依赖。
 
 ## 与上游 riddle 的主要区别
 
-| 方面 | 上游 | MagicPaper 0.7.1 |
+| 方面 | 上游 | MagicPaper 0.8.0 |
 |---|---|---|
 | 设备与运行方式 | Paper Pro、AppLoad/独占模式 | Paper Pro 与 Paper Pro Move，由 ReMagic 自动适配 QTFB、笔/触摸与生命周期 |
 | 定位 | Tom Riddle 日记 | 中文优先的纸面助手，简称 MP |
 | OCR | 回答模型直接看整页 | 可提前 1 秒提交 PP-OCRv6，再由回答模型结合上下文纠错 |
-| 回答 | 基础对话 | 计算直答、问答、长期对话、按需后台检索、纸面化整理，中文默认繁体 |
+| 回答 | 基础对话 | 所有模型回答统一经 ReMagic 托管的 Pi Agent；计算直答、问答、长期对话及纸面化整理，中文默认繁体 |
 | 记忆 | 简短上下文 | 最近 20 轮、最多 400 页本地记忆及可删除历史 |
 | 自动化 | 无 | 最多 9 个周期任务、TODO、智能心跳及后台 agent |
 | 纸面 UI | 单一字体 | 固定方正屏显雅宋 UI；回答使用三种可切换、独立校准的手写体 |
@@ -28,6 +28,7 @@ MagicPaper 只负责页面状态、笔迹解释、AI 请求、回答渲染和自
 - 稳定且唯一的 `QTFB_KEY` surface；
 - 版本化的 `REMAGIC_DEVICE_PROFILE`；
 - v2 双向 lifecycle 通道；
+- 私有 `agent:pi-v1` socket、应用令牌与前后台独立身份；
 - 经过 manifest 限定的 HOME/XDG、字体、证书和网络环境。
 
 缺少任一托管契约时应用会在打开显示或输入前失败，不会退回到偷偷抢占设备的模式。`--legacy-takeover` 仍保留给明确的兼容实验，但不能在 ReMagic 托管进程中启用。
@@ -59,7 +60,7 @@ Paper Pro 使用 `ferrari`、`1620×2160`、QTFB format 3、stride 3240；Paper 
                        停笔 1.0 s ─► 推测 OCR（可取消）  │
                        停笔 2.2/2.6 s ─► 提交当前回合   │
                                                         ▼
-本地命令 ◄── 纠错文字 ◄── PP-OCRv6（可选） ──► 回答模型/记忆/搜索
+本地命令 ◄── 纠错文字 ◄── PP-OCRv6（可选） ──► ReMagic Pi Agent
     │                                                   │
     └──────── 本地页面                                  ▼
                                      离屏排版与字形描边 ─► 25 Hz 合并写回
@@ -95,14 +96,14 @@ Paper Pro 使用 `ferrari`、`1620×2160`、QTFB format 3、stride 3240；Paper 
 3. 完整、高置信输入在约 2.2 秒提交；模糊或未完成输入等待约 2.6 秒。
 4. 14 段吸墨动画保留，每段 50 ms。等待时纸面保持空白，不显示闪烁圆点。
 5. OCR 候选先按对话、任务和中文语境纠错；算式如 `122+456=?` 直接回答 `122+456=578`。
-6. 普通知识问题直接作答；确需时模型可在后台检索，最终只输出整理后的纸面文字，不展示 URL、引用标记或搜索元数据。
+6. 普通知识问题直接作答；Pi Agent 只得到 ReMagic 明确开放的安全工具，绝不继承 shell、任意文件读写或默认编码工具。最终回答由模型整理成纸面文字，不展示 URL、引用标记或搜索元数据。
 7. 模型仍以流式协议接收，但回答文字先在内存中汇合；流结束后一次测量整段宽高，在安全内容区内同时做水平与垂直居中，再按所选字体生成描边，以最多 25 Hz 的节奏写回。这样首笔需要等待完整回答，却不会因后续文字到达而上下漂移或只做到左右居中。
 
 ## 字体、记忆和数据
 
 固定界面文字使用 `FZPingXianYaSong.ttf`（方正屏显雅宋），不受手写字体选择或字号校准影响。回答文字内置辰宇落雁体；部署包另含黄油拾叁体与 851 远星夜行手写体，851 是默认选择。写下 `字体` 可直接进入字体页；写下 `设置` 后也可从总设置页进入。三种回答字体均可在 50%–180% 范围校准视觉大小，字体页只有专门的回答预览样例使用对应手写体。缺字由 `CoverageFallback.ttf` 中性完整字库逐字补齐。
 
-设置页默认采用增强局部清理、16 px 清理边距和每 3 次回答一次全刷。局刷强度、边距、自动全刷间隔以及回答停留比例均即时生效并保存在 `preferences/settings.json`；API 密钥、模型和 URL 仍由外部 `oracle.env` 管理。
+设置页默认采用增强局部清理、16 px 清理边距和每 3 次回答一次全刷。局刷强度、边距、自动全刷间隔以及回答停留比例均即时生效并保存在 `preferences/settings.json`。Pi 智能体页保存供应商、Flash/Pro、思考等级与安全工具开关；默认是 DeepSeek、`deepseek-v4-flash`、关闭思考、开启安全工具。密钥不在设备屏幕上输入，由 ReMagic 单独保管。“新建会话”会同时重置驻留 Agent 并写入持久的本地对话边界；旧页面仍留在历史与召回目录中，但 ReMagic 日后重启 Pi 时不会再把它们自动灌入新上下文。
 
 默认持久数据位于：
 
@@ -111,33 +112,23 @@ Paper Pro 使用 `ferrari`、`1620×2160`、QTFB format 3、stride 3240；Paper 
 ├── memories/       对话、转写和原始笔迹
 ├── tasks/          周期任务
 ├── todos/          TODO
-├── preferences/    刷新、回答停留、字体及每字体字号
+├── preferences/    刷新、回答停留、字体、每字体字号及 Pi 非敏感偏好
 └── agent/          前后台回答交接队列
 ```
 
-配置默认位于 `/home/root/.config/magicpaper/oracle.env`。安装、升级和自动化测试不得覆盖真实记忆、任务、TODO、字体配置或 API 配置。
+PaddleOCR 配置默认位于 `/home/root/.config/magicpaper/oracle.env`；模型供应商密钥位于 ReMagic 的独立密钥目录，不进入 MagicPaper 数据区。安装、升级和自动化测试不得覆盖真实记忆、任务、TODO、字体配置、OCR 配置或供应商密钥。
 
-## OCR 与回答后端
+## OCR 与 Pi Agent
 
-复制示例配置并只在设备上填写密钥：
+MagicPaper 不再包含直连 OpenAI-compatible HTTP 或自行拉起 Pi 的生产后端。所有模型回合（包括心跳回答）都经过 ReMagic 的常驻 Pi RPC 进程；切换供应商、模型或思考等级会让 ReMagic 原子重载该应用的 Agent profile。交互回合优先于推测 OCR 和定时任务，断开连接也会取消其拥有的远端回合。
+
+`oracle.env` 只保留 PaddleOCR 等 MagicPaper 输入侧配置：
 
 ```sh
 install -m 600 oracle.env.example /home/root/.config/magicpaper/oracle.env
 ```
 
-OpenAI-compatible HTTP 后端的核心变量：
-
-```sh
-MAGICPAPER_OPENAI_KEY=...
-MAGICPAPER_OPENAI_BASE=https://example.com/v1
-MAGICPAPER_OPENAI_MODEL=your-model
-MAGICPAPER_OPENAI_API=responses          # 或 chat_completions
-MAGICPAPER_OPENAI_REASONING=low
-MAGICPAPER_WEB_SEARCH=auto
-MAGICPAPER_OPENAI_MAX_TOKENS=2000
-```
-
-可选 PaddleOCR：
+PaddleOCR 变量：
 
 ```sh
 MAGICPAPER_OCR_TOKEN=...
@@ -147,7 +138,7 @@ MAGICPAPER_OCR_POLL_MS=250
 MAGICPAPER_OCR_TIMEOUT_SECONDS=60
 ```
 
-`MAGICPAPER_OCR_SPECULATIVE=off` 可关闭一秒预请求，避免停顿后继续书写造成已计费但弃用的远端任务。没有 HTTP 密钥时也可使用常驻 `pi --mode rpc` 后端；完整变量和注释见 `oracle.env.example`。
+`MAGICPAPER_OCR_SPECULATIVE=off` 可关闭一秒预请求，避免停顿后继续书写造成已计费但弃用的远端任务。完整变量和注释见 `oracle.env.example`。DeepSeek/OpenAI 等模型密钥使用 ReMagic 的电脑端配置命令写入权限为 `0600` 的供应商文件，不写进 `oracle.env`，也不会被传给 MagicPaper 进程。
 
 密钥不得提交到 Git。若密钥曾出现在终端日志、聊天或仓库历史中，应立即在提供商控制台撤销并重建。
 
@@ -160,10 +151,9 @@ magicpaper --oracle-test handwriting.png
 
 ## 确定性测试模式
 
-设置精确值 `MAGICPAPER_TEST_MODE=1` 后，MagicPaper 使用确定性离线回答，并拒绝 HTTP、PaddleOCR、pi 和外部阅读器调用。`MAGICPAPER_DATA_DIR` 可把所有持久状态重定向到临时目录；也可按组件覆盖：
+设置精确值 `MAGICPAPER_TEST_MODE=1` 后，MagicPaper 使用确定性离线回答，并拒绝 Pi Agent、PaddleOCR 和外部阅读器调用。`MAGICPAPER_DATA_DIR` 可把所有持久状态重定向到临时目录；也可按组件覆盖：
 
 - `MAGICPAPER_AGENT_QUEUE_DIR`
-- `MAGICPAPER_PI_DATA_DIR`、`MAGICPAPER_PI_HOME`
 - `MAGICPAPER_MEMORY_DIR`
 - `MAGICPAPER_TASKS_DIR`
 - `MAGICPAPER_TODOS_DIR`
@@ -197,7 +187,7 @@ magicpaper --oracle-test handwriting.png
 ```text
 src/app/          回合编排、生命周期、输入优先级、列表与回答控制
 src/device_profile.rs  ReMagic 注入的双设备显示契约与 fail-closed 校验
-src/oracle/       HTTP/pi/Paddle、流解析、本地路由、提示词和确定性后端
+src/oracle/       ReMagic Pi Agent、PaddleOCR、流解析、本地路由、提示词与确定性后端
 src/storage/      记忆、任务与 TODO 领域模型
 src/appearance/   字体、标定与手写描边
 src/ui/           纸面列表、帮助和字体设置

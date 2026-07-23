@@ -1,6 +1,6 @@
 //! Parsing handwritten recurring-task commands.
 
-use super::{TaskCommand, MIN_INTERVAL_SECS};
+use super::{TaskCommand, MAX_TASK_INSTRUCTION_BYTES, MIN_INTERVAL_SECS};
 
 pub(super) fn parse_command(text: &str) -> Result<Option<TaskCommand>, String> {
     let text = text.trim();
@@ -122,6 +122,11 @@ fn parse_schedule(rest: &str) -> Result<(u64, String), String> {
     let instruction = trim_separators(after_unit).trim().to_string();
     if instruction.is_empty() {
         return Err("task has no instruction".into());
+    }
+    if instruction.len() > MAX_TASK_INSTRUCTION_BYTES {
+        return Err(format!(
+            "task instruction exceeds {MAX_TASK_INSTRUCTION_BYTES} bytes"
+        ));
     }
     Ok((interval_secs, instruction))
 }

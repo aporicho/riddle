@@ -204,7 +204,13 @@ impl Engine<'_> {
             return true;
         }
         if was_down && matches!(self.state, State::Listening { .. }) {
-            self.user_ink.pen_up();
+            let settled = self.user_ink.pen_up(&mut self.surf);
+            if !settled.is_empty() {
+                add_damage(&mut self.ink_dirty, settled);
+                let (x, y, width, height) = settled.rect();
+                self.disp
+                    .present_region(x, y, width, height, RefreshIntent::MonoQuality);
+            }
             if let State::Listening { last_pen } = &mut self.state {
                 *last_pen = Some(Instant::now());
             }
@@ -399,6 +405,7 @@ fn is_list(state: &State) -> bool {
             | State::HistoryList { .. }
             | State::FontList { .. }
             | State::Settings { .. }
+            | State::PiSettings { .. }
             | State::ReaderList { .. }
     )
 }

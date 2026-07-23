@@ -98,6 +98,15 @@ impl Engine<'_> {
                 eprintln!("magic-paper: event=reply-first-display-submit latency_ms={latency_ms}");
             }
         }
+        if let Some(settle) = effects.settle {
+            self.disp.present_region(
+                settle.x,
+                settle.y,
+                settle.width,
+                settle.height,
+                RefreshIntent::MonoQuality,
+            );
+        }
         if let Some(completion) = effects.completion {
             self.complete_reply(completion, page_full)
         } else {

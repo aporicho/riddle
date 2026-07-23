@@ -86,6 +86,12 @@ pub(super) enum State {
     Settings {
         panel: ui::settings::SettingsPanel,
     },
+    /// Non-secret Pi provider/model/tool preferences. The parent settings page
+    /// remains alive so blank-paper dismissal can restore it exactly.
+    PiSettings {
+        panel: ui::pi_settings::PiSettingsPanel,
+        settings: ui::settings::SettingsPanel,
+    },
     /// The newest local dialogue pages; striking a row forgets both its text
     /// and replay strokes.
     HistoryList {
@@ -124,7 +130,7 @@ pub(super) struct WritePlan {
     /// first paper-safe text event reaches the UI, before background layout.
     pub(super) created_at: Instant,
     pub(super) first_damage_logged: bool,
-    pub(super) strokes: Vec<Vec<(i32, i32)>>,
+    pub(super) strokes: Vec<Vec<(f32, f32)>>,
     pub(super) stroke_i: usize,
     pub(super) point_i: usize,
     pub(super) region: BBox,

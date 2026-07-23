@@ -2,7 +2,7 @@
 
 use super::{is_list, Engine};
 use crate::app::input::{ModalContact, ModalPreview};
-use crate::app::lists::{finish_paper_list_stroke, PaperListContext};
+use crate::app::lists::{finish_paper_list_stroke, PaperListContext, PaperListOutcome};
 use crate::app::state::State;
 use crate::platform::{PenFrame, PenPhase, PenTool, RefreshIntent};
 use crate::ui;
@@ -10,7 +10,7 @@ use crate::ui::pointer::{Gesture, HitRect, Point, PointerTool};
 
 impl Engine<'_> {
     fn finish_list_gesture(&mut self, gesture: Gesture) -> bool {
-        let path = finish_paper_list_stroke(
+        let outcome = finish_paper_list_stroke(
             &mut self.state,
             PaperListContext {
                 memory_store: &mut self.store,
@@ -24,11 +24,68 @@ impl Engine<'_> {
             },
             gesture,
         );
-        if let Some(path) = path {
-            self.reader_target = Some(path);
-            true
-        } else {
-            false
+        match outcome {
+            PaperListOutcome::OpenReader(path) => {
+                self.reader_target = Some(path);
+                true
+            }
+            PaperListOutcome::PiAction(action) => {
+                use crate::app::pi_settings_controller::PiAgentAction;
+                use crate::oracle::AgentControlCommand;
+                let command = match action {
+                    PiAgentAction::ReloadProfile => {
+                        self.oracle.apply_pi_preferences(
+                            crate::pi_preferences::PiPreferences::open().values(),
+                        );
+                        AgentControlCommand::ReloadProfile
+                    }
+                    // Supplying the current profile lets ReMagic verify the
+                    // selected provider's credential as well as the runtime.
+                    // A bare status request cannot know a never-used app's
+                    // intended provider and would report a false missing key.
+                    PiAgentAction::TestConnection => {
+                        self.oracle.apply_pi_preferences(
+                            crate::pi_preferences::PiPreferences::open().values(),
+                        );
+                        AgentControlCommand::ReloadProfile
+                    }
+                    PiAgentAction::RestartAgent => AgentControlCommand::Restart,
+                    PiAgentAction::NewSession => {
+                        if let Some(store) = self.store.as_mut() {
+                            match store.begin_dialogue_session() {
+                                Ok(floor) => eprintln!(
+                                    "magic-paper: event=dialogue-boundary-created floor={floor}"
+                                ),
+                                Err(error) => {
+                                    eprintln!(
+                                        "magic-paper: could not create dialogue boundary: {error}"
+                                    );
+                                    crate::app::pi_settings_controller::set_status(
+                                        &mut self.state,
+                                        &mut self.surf,
+                                        &self.font,
+                                        self.disp,
+                                        crate::oracle::AgentControlStatus::StorageError,
+                                    );
+                                    return false;
+                                }
+                            }
+                        }
+                        AgentControlCommand::NewSession
+                    }
+                };
+                crate::app::pi_settings_controller::set_status(
+                    &mut self.state,
+                    &mut self.surf,
+                    &self.font,
+                    self.disp,
+                    crate::oracle::AgentControlStatus::Starting,
+                );
+                self.oracle.start_agent_control(command);
+                eprintln!("magic-paper: event=pi-settings-action action={action:?}");
+                false
+            }
+            PaperListOutcome::None => false,
         }
     }
 
@@ -63,6 +120,9 @@ impl Engine<'_> {
             State::Settings { panel } => {
                 panel.begin_preview(tool, point).map(ModalPreview::Settings)
             }
+            State::PiSettings { panel, .. } => panel
+                .begin_preview(tool, point)
+                .map(ModalPreview::PiSettings),
             State::Help {
                 panel: Some(panel), ..
             } => panel.begin_preview(tool, point).map(ModalPreview::Help),

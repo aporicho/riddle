@@ -1,7 +1,5 @@
-//! MagicPaper's device runtime and central interaction loop.
-//!
-//! The root owns setup/teardown and durable runtime state. Lifecycle, input,
-//! power, and page-state transitions live in focused sibling modules.
+//! MagicPaper device runtime and central interaction loop. The root owns
+//! setup/teardown; focused sibling modules own individual transitions.
 
 use crate::{
     display, fb, fonts, ink, memory, pen, power, runtime_control, runtime_env, tasks, todos, touch,
@@ -359,6 +357,7 @@ pub(super) fn input_mode_for_state(state: &State) -> InputMode {
         | State::TodoList { .. }
         | State::FontList { .. }
         | State::Settings { .. }
+        | State::PiSettings { .. }
         | State::HistoryList { .. }
         | State::ReaderList { .. } => InputMode::Modal,
         State::Drinking { .. }
@@ -489,6 +488,7 @@ pub(super) fn suspend_visible_state(
         | State::TodoList { .. }
         | State::FontList { .. }
         | State::Settings { .. }
+        | State::PiSettings { .. }
         | State::HistoryList { .. }
         | State::ReaderList { .. }) => stable,
     };

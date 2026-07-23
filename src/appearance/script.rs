@@ -7,6 +7,12 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::fonts::{FontBook, FontId};
 
+mod handwriting;
+
+pub use handwriting::trace_handwriting;
+#[cfg(test)]
+use handwriting::{resample_path, simplify_path};
+
 pub struct Line {
     pub width: usize,
     pub height: usize,

@@ -8,6 +8,7 @@ use crate::surface::Surface;
 use crate::ui::pointer::Gesture;
 use crate::{display, fonts, memory, reader, tasks, todos, ui};
 
+use super::pi_settings_controller::{self, PiAgentAction};
 use super::state::{State, TurnKind};
 use super::timing::{heartbeat_deadline, unix_now};
 use super::{refresh_controller::RefreshController, settings_controller};
@@ -25,11 +26,17 @@ pub(super) struct PaperListContext<'a> {
     pub refresh: &'a mut RefreshController,
 }
 
+pub(super) enum PaperListOutcome {
+    None,
+    OpenReader(PathBuf),
+    PiAction(PiAgentAction),
+}
+
 pub(super) fn finish_paper_list_stroke(
     state: &mut State,
     context: PaperListContext<'_>,
     gesture: Gesture,
-) -> Option<PathBuf> {
+) -> PaperListOutcome {
     let PaperListContext {
         memory_store,
         task_store,
@@ -42,14 +49,23 @@ pub(super) fn finish_paper_list_stroke(
     } = context;
     if matches!(state, State::Settings { .. }) {
         settings_controller::finish_settings_stroke(state, surf, font, disp, refresh, gesture);
-        return None;
+        return if matches!(state, State::PiSettings { .. }) {
+            PaperListOutcome::PiAction(PiAgentAction::TestConnection)
+        } else {
+            PaperListOutcome::None
+        };
+    }
+    if matches!(state, State::PiSettings { .. }) {
+        return pi_settings_controller::finish_stroke(state, surf, font, disp, gesture)
+            .map_or(PaperListOutcome::None, PaperListOutcome::PiAction);
     }
     if matches!(state, State::FontList { .. }) {
         finish_font_stroke(state, surf, font, disp, refresh, gesture);
-        return None;
+        return PaperListOutcome::None;
     }
     if matches!(state, State::ReaderList { .. }) {
-        return finish_reader_stroke(state, surf, font, disp, gesture);
+        return finish_reader_stroke(state, surf, font, disp, gesture)
+            .map_or(PaperListOutcome::None, PaperListOutcome::OpenReader);
     }
     let mut stores = ListStores {
         memory: memory_store,
@@ -57,8 +73,11 @@ pub(super) fn finish_paper_list_stroke(
         todos: todo_store,
         next_heartbeat,
     };
-    finish_stored_list_stroke(state, &mut stores, surf, font, disp, refresh, gesture);
-    None
+    if finish_stored_list_stroke(state, &mut stores, surf, font, disp, refresh, gesture) {
+        PaperListOutcome::PiAction(PiAgentAction::RestartAgent)
+    } else {
+        PaperListOutcome::None
+    }
 }
 
 struct ListStores<'a> {
@@ -185,18 +204,19 @@ fn finish_stored_list_stroke(
     disp: &display::Display,
     refresh: &RefreshController,
     gesture: Gesture,
-) {
+) -> bool {
     let action = match state {
         State::TaskList { panel } | State::TodoList { panel } | State::HistoryList { panel } => {
             panel.interact(gesture)
         }
         _ => None,
     };
-    let Some(action) = action else { return };
+    let Some(action) = action else { return false };
     match action {
         ui::paper_list::Action::Delete(number) => {
-            delete_stored_row(state, stores, number);
+            let history_changed = delete_stored_row(state, stores, number);
             redraw_stored_list(state, stores, surf, font, disp, refresh, true);
+            return history_changed;
         }
         ui::paper_list::Action::Toggle(number) => {
             toggle_task(stores, number);
@@ -218,9 +238,13 @@ fn finish_stored_list_stroke(
         }
         ui::paper_list::Action::Select(_) => {}
     }
+    false
 }
 
-fn delete_stored_row(state: &State, stores: &mut ListStores<'_>, number: usize) {
+/// Returns true only when durable dialogue history changed. The caller uses
+/// this to reset Pi's in-memory conversation so a struck-out page is actually
+/// forgotten rather than merely hidden from the next prompt catalog.
+fn delete_stored_row(state: &State, stores: &mut ListStores<'_>, number: usize) -> bool {
     match state {
         State::TaskList { .. } => match stores.tasks.as_mut() {
             Some(store) => match store.delete_number(number) {
@@ -247,16 +271,20 @@ fn delete_stored_row(state: &State, stores: &mut ListStores<'_>, number: usize) 
         },
         State::HistoryList { .. } => match stores.memory.as_mut() {
             Some(store) => match store.delete_number(number, HISTORY_VISIBLE) {
-                Ok(entry) => eprintln!(
-                    "magic-paper: history {number} deleted — {}",
-                    entry.transcript
-                ),
+                Ok(entry) => {
+                    eprintln!(
+                        "magic-paper: history {number} deleted — {}",
+                        entry.transcript
+                    );
+                    return true;
+                }
                 Err(error) => eprintln!("magic-paper: could not delete history {number}: {error}"),
             },
             None => eprintln!("magic-paper: memory storage is disabled"),
         },
         _ => {}
     }
+    false
 }
 
 fn toggle_task(stores: &mut ListStores<'_>, number: usize) {

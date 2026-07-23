@@ -1,19 +1,9 @@
-//! Backend-agnostic façade for the spirit inside MagicPaper.
-//! replies. Two interchangeable backends, picked at startup:
+//! MagicPaper's model boundary.
 //!
-//!  1. **HTTP** (`HttpOracle`) — OpenAI Responses (vision + optional hosted
-//!     web search) or a compatible `/chat/completions` endpoint. Zero setup
-//!     beyond a base URL + API key in the environment. Self-contained:
-//!     pure-Rust HTTPS via ureq/rustls.
-//!  2. **pi** (`PiOracle`) — a resident `pi --mode rpc` process (Node +
-//!     subscription auth loaded once). The power path if you already run pi.
-//!
-//! Both expose the same `ask(png_path, tx)`: the reply is STREAMED as
-//! sentence-sized chunks on the channel, and the channel disconnecting marks
-//! end-of-reply, so the quill starts writing seconds before the model finishes.
-//!
-//! Selection: set `MAGICPAPER_OPENAI_KEY` (and optionally `MAGICPAPER_OPENAI_BASE` /
-//! `MAGICPAPER_OPENAI_MODEL`) to use HTTP; otherwise magicpaper falls back to pi.
+//! Production model turns always cross the private ReMagic Pi Agent socket.
+//! MagicPaper keeps handwriting capture, PaddleOCR, local commands, memory and
+//! paper rendering; ReMagic owns provider credentials and the resident Pi RPC
+//! process. Deterministic mode is available only to isolated acceptance tests.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
@@ -54,7 +44,9 @@ pub(super) fn log_llm_terminal(
     true
 }
 
+#[allow(dead_code)] // Legacy direct-Pi migration backend only.
 const DATA_DIR: &str = "/home/root/.local/share/magicpaper";
+#[allow(dead_code)] // Legacy direct-Pi migration backend only.
 const NODE_BIN: &str = "/home/root/node/bin";
 
 /// What a turn carries besides the page image: the diary's memory.
@@ -114,7 +106,7 @@ pub struct RequestCancel {
 }
 
 impl RequestCancel {
-    fn http(
+    fn agent(
         request_id: u64,
         domain: &'static str,
         cancelled: Arc<AtomicBool>,
@@ -140,19 +132,9 @@ impl RequestCancel {
         }
     }
 
-    fn pi(request_id: u64, domain: &'static str, cancelled: Arc<AtomicBool>) -> Self {
-        Self {
-            request_id,
-            domain,
-            cancelled: Some(cancelled),
-            terminal: Some(Arc::new(AtomicBool::new(false))),
-            ocr_result: None,
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn testing(request_id: u64, cancelled: Arc<AtomicBool>) -> Self {
-        Self::http(
+        Self::agent(
             request_id,
             "test",
             cancelled,
@@ -199,37 +181,21 @@ impl RequestCancel {
     }
 }
 
-mod codec;
 mod deterministic;
 mod prompts;
 mod stream;
 
-use codec::{
-    base64, extract_assistant_text, json_quote, json_str_field, responses_delta_content,
-    sse_delta_content,
-};
-
-use prompts::{external_ocr_turn_text, system_prompt, turn_text, EXTERNAL_OCR_PROTOCOL};
+use prompts::{external_ocr_turn_text, system_prompt, turn_text};
 
 use deterministic::DeterministicOracle;
 use stream::StreamParser;
 #[cfg(test)]
 use stream::{clean, strip_directives};
 
-/// The diary's spirit. A backend-agnostic front over the two oracle kinds.
-pub enum Oracle {
-    Http(Box<HttpOracle>),
-    Pi(PiOracle),
+/// The diary's spirit: hosted Agent in production, deterministic in tests.
+pub(crate) enum Oracle {
+    Agent(Box<AgentOracle>),
     Deterministic(DeterministicOracle),
-}
-
-pub(super) fn nonempty_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().and_then(trim_nonempty)
-}
-
-fn trim_nonempty(value: String) -> Option<String> {
-    let value = value.trim();
-    (!value.is_empty()).then(|| value.to_owned())
 }
 
 pub fn paddle_ocr_test(png_path: &str) -> Result<String, String> {
@@ -242,11 +208,32 @@ pub fn paddle_ocr_test(png_path: &str) -> Result<String, String> {
 }
 
 impl Oracle {
-    /// Pick a backend from the environment and start it. HTTP if
-    /// `MAGICPAPER_OPENAI_KEY` is set (the zero-setup path), otherwise pi.
-    /// `remember` teaches the model the memory protocol (catalog + ⁂).
+    /// Start the ReMagic-hosted Pi Agent. HTTP credentials no longer alter
+    /// backend selection; they are migrated into the Agent provider store.
     pub fn spawn(remember: bool) -> std::io::Result<Self> {
         Self::spawn_for_mode(remember, crate::runtime_env::test_mode())
+    }
+
+    pub(crate) fn apply_pi_preferences(
+        &mut self,
+        values: crate::pi_preferences::PiPreferenceValues,
+    ) {
+        if let Oracle::Agent(oracle) = self {
+            oracle.apply_preferences(values);
+        }
+    }
+
+    pub(crate) fn start_agent_control(
+        &self,
+        command: AgentControlCommand,
+        tx: Sender<AgentControlStatus>,
+    ) -> bool {
+        if let Oracle::Agent(oracle) = self {
+            oracle.start_control(command, tx);
+            true
+        } else {
+            false
+        }
     }
 
     fn spawn_for_mode(remember: bool, test_mode: bool) -> std::io::Result<Self> {
@@ -254,13 +241,7 @@ impl Oracle {
             eprintln!("magic-paper: oracle = deterministic offline test backend");
             return Ok(Oracle::Deterministic(DeterministicOracle));
         }
-        if nonempty_env("MAGICPAPER_OPENAI_KEY").is_some() {
-            eprintln!("magicpaper: oracle = OpenAI-compatible HTTP");
-            Ok(Oracle::Http(Box::new(HttpOracle::new(remember)?)))
-        } else {
-            eprintln!("magicpaper: oracle = pi (set MAGICPAPER_OPENAI_KEY for the HTTP backend)");
-            Ok(Oracle::Pi(PiOracle::spawn(remember)?))
-        }
+        Ok(Oracle::Agent(Box::new(AgentOracle::new(remember)?)))
     }
 
     /// Send a handwriting turn; reply events stream on `tx`, which is dropped
@@ -273,14 +254,7 @@ impl Oracle {
     ) -> RequestCancel {
         let request_id = next_request_id();
         match self {
-            Oracle::Http(o) => o.ask(request_id, "handwriting", png_path, ctx, tx),
-            Oracle::Pi(o) => {
-                eprintln!("magic-paper: event=llm-start request={request_id} backend=pi");
-                match o.ask(png_path, ctx, tx) {
-                    Some(cancelled) => RequestCancel::pi(request_id, "handwriting", cancelled),
-                    None => RequestCancel::inactive(request_id, "handwriting"),
-                }
-            }
+            Oracle::Agent(oracle) => oracle.ask(request_id, "handwriting", png_path, ctx, tx),
             Oracle::Deterministic(_) => {
                 DeterministicOracle::handwriting(tx);
                 RequestCancel::inactive(request_id, "handwriting-test")
@@ -298,13 +272,8 @@ impl Oracle {
     ) -> RequestCancel {
         let request_id = next_request_id();
         match self {
-            Oracle::Http(oracle) => oracle.ask_capture(request_id, "handwriting", capture, ctx, tx),
-            Oracle::Pi(oracle) => {
-                eprintln!("magic-paper: event=llm-start request={request_id} backend=pi");
-                match oracle.ask_capture(capture, ctx, tx) {
-                    Some(cancelled) => RequestCancel::pi(request_id, "handwriting", cancelled),
-                    None => RequestCancel::inactive(request_id, "handwriting"),
-                }
+            Oracle::Agent(oracle) => {
+                oracle.ask_capture(request_id, "handwriting", capture, ctx, tx)
             }
             Oracle::Deterministic(_) => {
                 DeterministicOracle::handwriting(tx);
@@ -314,9 +283,8 @@ impl Oracle {
     }
 
     /// Start the one-second pre-request in a lane isolated from committed
-    /// handwriting. If an older cancelled pre-request is still blocked inside
-    /// the HTTP transport, skip this optimization and let commit use its own
-    /// foreground lane instead of manufacturing a `worker-busy` turn.
+    /// handwriting. ReMagic may cancel this speculative lane immediately when
+    /// a real pen interaction arrives.
     pub fn ask_speculative_capture(
         &self,
         capture: crate::ink::PageCapture,
@@ -325,23 +293,16 @@ impl Oracle {
     ) -> Option<RequestCancel> {
         let request_id = next_request_id();
         match self {
-            Oracle::Http(oracle) => {
+            Oracle::Agent(oracle) => {
                 oracle.ask_speculative_capture(request_id, "handwriting", capture, ctx, tx)
             }
-            Oracle::Pi(_) | Oracle::Deterministic(_) => None,
+            Oracle::Deterministic(_) => None,
         }
     }
 
-    /// Speculative turns need independent, cancellable workers. The resident
-    /// pi RPC backend and legacy chat mode remain single-turn-at-a-time.
+    /// Speculative turns are supported only when external OCR is enabled.
     pub fn supports_speculative(&self) -> bool {
-        matches!(
-            self,
-            Oracle::Http(o) if o
-                .ocr
-                .as_ref()
-                .map_or(o.api == HttpApi::Responses, |ocr| ocr.speculative)
-        )
+        matches!(self, Oracle::Agent(oracle) if oracle.supports_speculative())
     }
 
     /// Send an internal text-only turn, used by MagicPaper's heartbeat.
@@ -353,14 +314,7 @@ impl Oracle {
     ) -> RequestCancel {
         let request_id = next_request_id();
         match self {
-            Oracle::Http(o) => o.ask_text(request_id, "scheduled", prompt, ctx, tx),
-            Oracle::Pi(o) => {
-                eprintln!("magic-paper: event=llm-start request={request_id} backend=pi");
-                match o.ask_text(prompt, ctx, tx) {
-                    Some(cancelled) => RequestCancel::pi(request_id, "scheduled", cancelled),
-                    None => RequestCancel::inactive(request_id, "scheduled"),
-                }
-            }
+            Oracle::Agent(oracle) => oracle.ask_text(request_id, "scheduled", prompt, ctx, tx),
             Oracle::Deterministic(_) => {
                 DeterministicOracle::scheduled(tx);
                 RequestCancel::inactive(request_id, "scheduled-test")
@@ -374,24 +328,13 @@ impl Oracle {
     }
 }
 
-/// The per-turn user text: memory catalog (when remembering) + instruction.
-mod pi;
-
-use pi::PiOracle;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HttpApi {
-    ChatCompletions,
-    Responses,
-}
+mod agent;
+use agent::AgentOracle;
+pub(crate) use agent::{AgentControlCommand, AgentControlStatus};
 
 mod paddle;
 
 use paddle::{OcrResult, PaddleOcr};
-
-mod http;
-
-use http::HttpOracle;
 
 mod paddle_wire;
 
@@ -406,9 +349,5 @@ mod local;
 use local::{emit_local_route, local_route};
 #[cfg(test)]
 use local::{evaluate_arithmetic, LocalRoute};
-mod paper;
-
-use paper::{paper_answer_needs_rewrite, paper_safe_fallback, rewrite_paper_tail};
-
 #[cfg(test)]
 mod tests;

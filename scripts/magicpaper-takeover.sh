@@ -75,13 +75,11 @@ trap 'exit 143' TERM
 # awake so resume cannot start a second display engine over this one.
 echo "$WAKELOCK" > /sys/power/wake_lock 2>/dev/null || true
 
-# Oracle config: standalone installs keep secrets outside the app directory:
+# Input config: standalone installs keep the PaddleOCR token outside the app:
 #   /home/root/.config/magicpaper/oracle.env
 # A legacy oracle.env next to the binary remains supported as a fallback.
-#   MAGICPAPER_OPENAI_KEY=sk-...
-#   MAGICPAPER_OPENAI_BASE=https://api.openai.com/v1     # optional
-#   MAGICPAPER_OPENAI_MODEL=gpt-4o-mini                  # optional
-# Without it, magicpaper falls back to the pi backend (if pi is installed).
+# Model credentials and Pi always belong to ReMagic; legacy takeover can answer
+# only when launched with a valid ReMagic Agent identity and private socket.
 CONFIG=${MAGICPAPER_CONFIG:-/home/root/.config/magicpaper/oracle.env}
 if [ "${MAGICPAPER_TEST_MODE:-}" = 1 ]; then
     # Device automation must not even parse the owner's credential file. The

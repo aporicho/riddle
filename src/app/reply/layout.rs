@@ -60,22 +60,20 @@ pub(in crate::app) fn plan_reply(
     };
 
     for (index, line_text) in layout.lines.iter().enumerate() {
-        let mut raster = script::rasterize_line(font, line_text, layout.px);
-        script::thin(&mut raster);
-        let line_strokes = script::trace(&raster);
+        let traced = script::trace_handwriting(font, line_text, layout.px);
         let x0 = if layout.overflow_only {
-            (screen_w() as i32 - MARGIN_X - raster.width as i32).max(MARGIN_X)
+            (screen_w() as i32 - MARGIN_X - traced.width as i32).max(MARGIN_X)
         } else {
-            ((screen_w() as i32 - raster.width as i32) / 2).max(MARGIN_X)
+            ((screen_w() as i32 - traced.width as i32) / 2).max(MARGIN_X)
         };
         let wobble = jitter();
-        for stroke in line_strokes {
-            let mapped: Vec<(i32, i32)> = stroke
+        for stroke in traced.strokes {
+            let mapped: Vec<(f32, f32)> = stroke
                 .iter()
-                .map(|&(sx, sy)| (x0 + sx, y + sy + wobble))
+                .map(|&(sx, sy)| (x0 as f32 + sx, (y + wobble) as f32 + sy))
                 .collect();
             for &(x, line_y) in &mapped {
-                region.add(x, line_y, 5);
+                region.add(x.round() as i32, line_y.round() as i32, 5);
             }
             strokes.push(mapped);
         }
@@ -89,7 +87,12 @@ pub(in crate::app) fn plan_reply(
             for &(x, line_y) in &mapped {
                 region.add(x, line_y, 5);
             }
-            strokes.push(mapped);
+            strokes.push(
+                mapped
+                    .into_iter()
+                    .map(|(x, y)| (x as f32, y as f32))
+                    .collect(),
+            );
         }
     }
 
@@ -229,25 +232,37 @@ pub(in crate::app) fn append_overflow_marker(font: &fonts::FontBook, plan: &mut 
     }
     let max_w = (screen_w() as i32 - 2 * MARGIN_X) as f32 - RASTER_SAFETY;
     let marker = overflow_marker_text(font, MIN_REPLY_PX, max_w);
-    let mut raster = script::rasterize_line(font, &marker, MIN_REPLY_PX);
-    script::thin(&mut raster);
-    let marker_strokes = script::trace(&raster);
-    let x0 = (screen_w() as i32 - MARGIN_X - raster.width as i32).max(MARGIN_X);
-    let y0 = (screen_h() as i32 - MARGIN_Y + (MARGIN_Y - raster.height as i32) / 2).clamp(
+    let traced = script::trace_handwriting(font, &marker, MIN_REPLY_PX);
+    let x0 = (screen_w() as i32 - MARGIN_X - traced.width as i32).max(MARGIN_X);
+    let y0 = (screen_h() as i32 - MARGIN_Y + (MARGIN_Y - traced.height as i32) / 2).clamp(
         MARGIN_Y,
-        screen_h() as i32 - raster.height as i32 - WOBBLE_SAFETY,
+        screen_h() as i32 - traced.height as i32 - WOBBLE_SAFETY,
     );
-    let mapped_strokes = if marker_strokes.is_empty() {
+    let mapped_strokes: Vec<Vec<(f32, f32)>> = if traced.strokes.is_empty() {
         manual_overflow_marker(true)
-    } else {
-        marker_strokes
             .into_iter()
-            .map(|stroke| stroke.into_iter().map(|(x, y)| (x0 + x, y0 + y)).collect())
+            .map(|stroke| {
+                stroke
+                    .into_iter()
+                    .map(|(x, y)| (x as f32, y as f32))
+                    .collect()
+            })
+            .collect()
+    } else {
+        traced
+            .strokes
+            .into_iter()
+            .map(|stroke| {
+                stroke
+                    .into_iter()
+                    .map(|(x, y)| (x0 as f32 + x, y0 as f32 + y))
+                    .collect()
+            })
             .collect()
     };
     for mapped in mapped_strokes {
         for &(x, y) in &mapped {
-            plan.region.add(x, y, 5);
+            plan.region.add(x.round() as i32, y.round() as i32, 5);
         }
         plan.strokes.push(mapped);
     }

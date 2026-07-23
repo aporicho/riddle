@@ -8,6 +8,8 @@ use std::io;
 use std::path::PathBuf;
 
 const MAX_TODOS: usize = 20;
+const MAX_TODO_TEXT_BYTES: usize = 4 * 1024;
+const MAX_TODO_INDEX_BYTES: usize = 256 * 1024;
 
 /// True only for the complete `TODO <text>` add grammar.  In particular,
 /// product names such as `todoist` and questions beginning with `todo` are not
@@ -73,7 +75,7 @@ impl TodoStore {
 
     fn load_unlocked(&mut self) -> io::Result<()> {
         let path = self.index_path();
-        let Some(contents) = read_optional_utf8(&path)? else {
+        let Some(contents) = read_optional_utf8(&path, MAX_TODO_INDEX_BYTES)? else {
             self.entries.clear();
             return Ok(());
         };
@@ -102,6 +104,13 @@ impl TodoStore {
                 .map_err(|error| invalid_line(&path, line_number, &error.to_string()))?;
             if text.trim().is_empty() {
                 return Err(invalid_line(&path, line_number, "TODO text is empty"));
+            }
+            if text.len() > MAX_TODO_TEXT_BYTES {
+                return Err(invalid_line(
+                    &path,
+                    line_number,
+                    "TODO text exceeds its size limit",
+                ));
             }
             entries.push(Todo { id, text });
             if entries.len() > MAX_TODOS {
@@ -140,6 +149,9 @@ impl TodoStore {
         let Some(text) = parse_add(transcript) else {
             return Ok(None);
         };
+        if text.len() > MAX_TODO_TEXT_BYTES {
+            return Err(format!("TODO text exceeds {MAX_TODO_TEXT_BYTES} bytes"));
+        }
         let _lock = self
             .lock_exclusive()
             .map_err(|error| format!("lock TODO store: {error}"))?;
@@ -279,6 +291,23 @@ mod tests {
         assert_eq!(reopened.entries, store.entries);
         assert_eq!(reopened.panel_lines(), vec!["1  給媽媽打電話"]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_oversized_todo_text_from_input_and_disk() {
+        let oversized = "x".repeat(MAX_TODO_TEXT_BYTES + 1);
+        let mut store = tmp_store("oversized-text");
+        assert!(store
+            .add_from_transcript(&format!("TODO {oversized}"), 100)
+            .unwrap_err()
+            .contains("exceeds"));
+        assert!(!store.index_path().exists());
+
+        std::fs::write(store.index_path(), format!("1\t{oversized}\n")).unwrap();
+        let error = store.load().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(store.entries.is_empty());
+        let _ = std::fs::remove_dir_all(store.dir);
     }
 
     #[test]

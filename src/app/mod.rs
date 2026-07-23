@@ -7,6 +7,7 @@ mod layout_controller;
 mod lifecycle;
 mod lists;
 mod oracle_controller;
+mod pi_settings_controller;
 mod refresh_controller;
 mod reply;
 mod reply_controller;

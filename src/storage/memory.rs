@@ -22,6 +22,9 @@ use std::path::PathBuf;
 
 /// Newest memories the diary keeps. Older pages are forgotten (pruned).
 const MAX_MEMORIES: usize = 400;
+const MAX_MEMORY_FIELD_BYTES: usize = 64 * 1024;
+const MAX_MEMORY_INDEX_BYTES: usize = 128 * 1024 * 1024;
+const MAX_STROKES_BYTES: usize = 16 * 1024 * 1024;
 /// Decimation: drop replay points closer than this (px) to the last kept one.
 /// Handwriting stays faithful; files shrink several-fold.
 const MIN_POINT_DIST2: i64 = 9;
@@ -116,7 +119,7 @@ impl MemoryStore {
 
     fn load_unlocked(&mut self) -> io::Result<()> {
         let path = self.index_path();
-        let Some(contents) = read_optional_utf8(&path)? else {
+        let Some(contents) = read_optional_utf8(&path, MAX_MEMORY_INDEX_BYTES)? else {
             self.entries.clear();
             return Ok(());
         };
@@ -145,6 +148,13 @@ impl MemoryStore {
                 .map_err(|error| invalid_line(&path, line_number, &error.to_string()))?;
             let reply = unescape_field(columns[2])
                 .map_err(|error| invalid_line(&path, line_number, &error.to_string()))?;
+            if transcript.len() > MAX_MEMORY_FIELD_BYTES || reply.len() > MAX_MEMORY_FIELD_BYTES {
+                return Err(invalid_line(
+                    &path,
+                    line_number,
+                    "memory text field exceeds its size limit",
+                ));
+            }
             entries.push(Entry {
                 id,
                 transcript,
@@ -176,6 +186,12 @@ impl MemoryStore {
         reply: &str,
         strokes: &Strokes,
     ) -> io::Result<u64> {
+        if transcript.len() > MAX_MEMORY_FIELD_BYTES || reply.len() > MAX_MEMORY_FIELD_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "memory text field exceeds its size limit",
+            ));
+        }
         let _lock = self.lock_exclusive()?;
         self.load_unlocked()?;
         let id = match self.entries.iter().map(|entry| entry.id).max() {
@@ -241,7 +257,9 @@ impl MemoryStore {
 
     /// Load the pen strokes of one remembered page.
     pub fn strokes(&self, id: u64) -> Option<Strokes> {
-        let text = std::fs::read_to_string(self.strokes_path(id)).ok()?;
+        let text = read_optional_utf8(&self.strokes_path(id), MAX_STROKES_BYTES)
+            .ok()
+            .flatten()?;
         let mut strokes = Vec::new();
         for line in text.lines() {
             let mut stroke = Vec::new();
@@ -263,21 +281,6 @@ impl MemoryStore {
 
     pub fn get(&self, id: u64) -> Option<&Entry> {
         self.entries.iter().find(|e| e.id == id)
-    }
-
-    /// The last `n` turns as (transcript, reply) pairs, oldest first — the
-    /// conversational memory that rides along with each request.
-    pub fn recent_dialogue(&self, n: usize) -> Vec<(String, String)> {
-        self.entries
-            .iter()
-            .rev()
-            .take(n)
-            .filter(|e| !e.transcript.is_empty())
-            .map(|e| (e.transcript.clone(), e.reply.clone()))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect()
     }
 
     /// The catalog shown to the oracle so it can pick a page to conjure:
@@ -456,3 +459,7 @@ fn civil(secs: i64) -> (i64, i64, i64, i64) {
 
 #[cfg(test)]
 mod tests;
+
+mod dialogue;
+#[cfg(test)]
+use dialogue::MAX_DIALOGUE_FIELD_BYTES;

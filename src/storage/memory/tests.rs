@@ -72,6 +72,79 @@ fn catalog_is_numbered_newest_first() {
 }
 
 #[test]
+fn new_dialogue_session_survives_reopen_without_deleting_recallable_history() {
+    let mut store = tmp_store("dialogue-boundary");
+    store.append(100, "旧问题", "旧回答", &Vec::new());
+    assert_eq!(store.recent_dialogue(20).len(), 1);
+    assert_eq!(store.begin_dialogue_session().unwrap(), 100);
+    assert!(store.recent_dialogue(20).is_empty());
+    assert_eq!(store.catalog(20).1, vec![100]);
+    assert_eq!(store.panel_lines(20).len(), 1);
+
+    store.append(101, "新问题", "新回答", &Vec::new());
+    let mut reopened = MemoryStore {
+        dir: store.dir.clone(),
+        entries: Vec::new(),
+    };
+    reopened.load().unwrap();
+    assert_eq!(
+        reopened.recent_dialogue(20),
+        vec![("新问题".into(), "新回答".into())]
+    );
+    assert_eq!(reopened.catalog(20).1, vec![101, 100]);
+    let _ = std::fs::remove_dir_all(&store.dir);
+}
+
+#[test]
+fn corrupt_dialogue_boundary_fails_closed_instead_of_restoring_old_context() {
+    let mut store = tmp_store("corrupt-dialogue-boundary");
+    store.append(100, "不应泄露", "旧回答", &Vec::new());
+    std::fs::write(store.dialogue_floor_path(), "not-a-number\n").unwrap();
+    assert!(store.recent_dialogue(20).is_empty());
+    assert_eq!(store.catalog(20).1, vec![100]);
+    let _ = std::fs::remove_dir_all(&store.dir);
+}
+
+#[test]
+fn recent_dialogue_is_bounded_without_splitting_utf8_or_dropping_short_turns() {
+    let mut store = tmp_store("bounded-dialogue");
+    for id in 1..=20 {
+        store.append(id, "短问题", "短回答", &Vec::new());
+    }
+    assert_eq!(store.recent_dialogue(20).len(), 20);
+
+    store.append(21, &"问".repeat(20_000), &"答".repeat(20_000), &Vec::new());
+    let recent = store.recent_dialogue(1);
+    assert_eq!(recent.len(), 1);
+    assert!(recent[0].0.len() <= MAX_DIALOGUE_FIELD_BYTES);
+    assert!(recent[0].1.len() <= MAX_DIALOGUE_FIELD_BYTES);
+    assert!(recent[0].0.is_char_boundary(recent[0].0.len()));
+    assert!(recent[0].1.is_char_boundary(recent[0].1.len()));
+    let _ = std::fs::remove_dir_all(&store.dir);
+}
+
+#[test]
+fn rejects_oversized_memory_fields_and_stroke_files() {
+    let mut store = tmp_store("oversized-fields");
+    let oversized = "x".repeat(MAX_MEMORY_FIELD_BYTES + 1);
+    let error = store
+        .try_append(100, &oversized, "回答", &Vec::new())
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(!store.index_path().exists());
+
+    std::fs::write(store.index_path(), format!("100\t{oversized}\t回答\n")).unwrap();
+    assert_eq!(
+        store.load().unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+
+    std::fs::write(store.strokes_path(100), vec![b'x'; MAX_STROKES_BYTES + 1]).unwrap();
+    assert!(store.strokes(100).is_none());
+    let _ = std::fs::remove_dir_all(store.dir);
+}
+
+#[test]
 fn history_panel_deletes_newest_visible_entry_and_strokes() {
     let mut store = tmp_store("history-delete");
     store.append(101, "第一问", "第一答", &vec![vec![(1, 1, 1)]]);

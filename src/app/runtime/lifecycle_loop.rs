@@ -154,7 +154,7 @@ impl Engine<'_> {
         self.input_priority.enter_background();
         self.oracle.invalidate_active_turn();
         cancel_speculative(&mut self.speculative, "application entered background");
-        self.user_ink.pen_up();
+        self.user_ink.pen_up(&mut self.surf);
         self.cancel_modal_contact();
         suspend_visible_state(&mut self.state, &mut self.surf, &mut self.user_ink);
         self.pen_down = false;

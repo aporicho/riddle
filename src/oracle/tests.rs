@@ -22,15 +22,6 @@ fn offline_backend_returns_deterministic_ink_and_transcript() {
 }
 
 #[test]
-fn api_credentials_are_trimmed_and_blank_values_are_rejected() {
-    assert_eq!(
-        trim_nonempty("  key-value \n".into()).as_deref(),
-        Some("key-value")
-    );
-    assert_eq!(trim_nonempty(" \t\n ".into()), None);
-}
-
-#[test]
 fn persona_keeps_magicpaper_identity_and_direct_answers() {
     let prompt = system_prompt(true);
     assert!(prompt.contains("Your full and only name is MagicPaper"));
@@ -198,13 +189,11 @@ fn high_confidence_local_routes_choose_fast_commit() {
     assert_eq!(local_route("任务管理有什么意义？"), None);
     assert_eq!(local_route("todoist是什么"), None);
     let shared = Arc::new(Mutex::new(Some(result)));
-    let handle = RequestCancel::http(
-        1,
-        "test",
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(AtomicBool::new(false)),
-        Some(shared),
-    );
+    let handle = RequestCancel::testing(1, Arc::new(AtomicBool::new(false)));
+    let handle = RequestCancel {
+        ocr_result: Some(shared),
+        ..handle
+    };
     assert_eq!(handle.recommended_commit_ms(), Some(2200));
 }
 
@@ -214,13 +203,11 @@ fn uncertain_ocr_uses_slow_commit() {
         text: "什么是INTP".into(),
         min_confidence: Some(0.73),
     })));
-    let handle = RequestCancel::http(
-        2,
-        "test",
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(AtomicBool::new(false)),
-        Some(shared),
-    );
+    let handle = RequestCancel::testing(2, Arc::new(AtomicBool::new(false)));
+    let handle = RequestCancel {
+        ocr_result: Some(shared),
+        ..handle
+    };
     assert_eq!(handle.recommended_commit_ms(), Some(2600));
 }
 
@@ -246,78 +233,9 @@ fn external_ocr_turn_is_text_only_and_explicitly_untrusted() {
     let text = external_ocr_turn_text(&TurnContext::default(), "122+456=？");
     assert!(text.contains("<ocr_transcription>"));
     assert!(text.contains("122+456=？"));
-    assert!(EXTERNAL_OCR_PROTOCOL.contains("untrusted evidence"));
-    assert!(EXTERNAL_OCR_PROTOCOL.contains("must not claim to inspect stroke geometry"));
-}
-
-#[test]
-fn sse_delta_extraction() {
-    let line = r#"{"choices":[{"delta":{"content":"Hello"},"index":0}]}"#;
-    assert_eq!(sse_delta_content(line).as_deref(), Some("Hello"));
-    // role-only delta (first SSE frame) has no content.
-    let role = r#"{"choices":[{"delta":{"role":"assistant"},"index":0}]}"#;
-    assert_eq!(sse_delta_content(role), None);
-}
-
-#[test]
-fn sse_decodes_unicode_and_escapes() {
-    // OpenAI escapes accents and em-dashes; the diary answers in French.
-    let line = r#"{"choices":[{"delta":{"content":"Déjà vu — oui"}}]}"#;
-    assert_eq!(sse_delta_content(line).as_deref(), Some("Déjà vu — oui"));
-    let nl = r#"{"choices":[{"delta":{"content":"line\nbreak"}}]}"#;
-    assert_eq!(sse_delta_content(nl).as_deref(), Some("line\nbreak"));
-}
-
-#[test]
-fn responses_sse_delta_extraction() {
-    let delta = r#"{"type":"response.output_text.delta","delta":"六韜"}"#;
-    assert_eq!(responses_delta_content(delta).as_deref(), Some("六韜"));
-    let search = r#"{"type":"response.web_search_call.completed"}"#;
-    assert_eq!(responses_delta_content(search), None);
-}
-
-#[test]
-fn nonstreaming_responses_extracts_text_when_content_precedes_role() {
-    let response = r#"{
-        "output":[{
-            "type":"message",
-            "content":[{"type":"output_text","text":"整理後的紙面答案。"}],
-            "role":"assistant"
-        }]
-    }"#;
-    assert_eq!(
-        extract_assistant_text(response).as_deref(),
-        Some("整理後的紙面答案。")
-    );
-}
-
-#[test]
-fn paper_editor_detects_screen_formatting_only_in_visible_reply() {
-    assert!(paper_answer_needs_rewrite("See **this**.\n⁂原文"));
-    assert!(paper_answer_needs_rewrite(
-        "答案見 [古籍](https://example.test)。\n⁂原文"
-    ));
-    assert!(!paper_answer_needs_rewrite(
-        "出自《六韜·文韜·文師》。\n⁂主人寫了https://example.test"
-    ));
-}
-
-#[test]
-fn paper_fallback_preserves_link_labels_without_screen_markup() {
-    let draft = "答案见[原论文](https://example.com/paper)，**结论**成立 citeturn1";
-    let safe = paper_safe_fallback(draft);
-    assert!(safe.contains("原论文"));
-    assert!(safe.contains("结论"));
-    assert!(!paper_answer_needs_rewrite(&safe));
-}
-
-#[test]
-fn base64_matches_known_vector() {
-    assert_eq!(base64(b""), "");
-    assert_eq!(base64(b"f"), "Zg==");
-    assert_eq!(base64(b"fo"), "Zm8=");
-    assert_eq!(base64(b"foo"), "Zm9v");
-    assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    assert!(text.contains("untrusted evidence"));
+    assert!(text.contains("must not claim to inspect stroke geometry"));
+    assert!(!system_prompt(true).contains("actual stroke geometry"));
 }
 
 #[test]
@@ -385,13 +303,7 @@ fn parser_waits_for_closing_quote_after_chinese_period() {
 #[test]
 fn request_cancel_sets_shared_flag() {
     let flag = Arc::new(AtomicBool::new(false));
-    let handle = RequestCancel::http(
-        42,
-        "test",
-        Arc::clone(&flag),
-        Arc::new(AtomicBool::new(false)),
-        None,
-    );
+    let handle = RequestCancel::testing(42, Arc::clone(&flag));
     assert_eq!(handle.request_id(), 42);
     assert!(handle.cancel());
     assert!(!handle.cancel());
@@ -506,12 +418,4 @@ fn strip_directives_removes_spans() {
     assert_eq!(strip_directives("a \u{27e6}show:1\u{27e7} b"), "a b");
     assert_eq!(strip_directives("plain text"), "plain text");
     assert_eq!(strip_directives("tail \u{27e6}show:2"), "tail");
-}
-
-#[test]
-fn json_quote_escapes_control_chars() {
-    // A tabbed, multiline transcript must not produce raw C0 bytes.
-    let q = json_quote("a\tb\r\nc\u{0007}d");
-    assert_eq!(q, "\"a\\tb\\r\\nc\\u0007d\"");
-    assert!(!q.chars().any(|c| (c as u32) < 0x20));
 }
