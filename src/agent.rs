@@ -30,12 +30,14 @@ fn queue_path() -> PathBuf {
 pub fn run() -> io::Result<()> {
     let _scheduler_lease = tasks::acquire_scheduler_lease()?;
     eprintln!("magic-paper-agent: sole scheduled-task owner ready");
+    let mut retry = Duration::from_secs(30);
     let oracle = loop {
         match oracle::Oracle::spawn(true) {
             Ok(oracle) => break oracle,
             Err(error) => {
                 eprintln!("magic-paper-agent: oracle unavailable: {error}");
-                std::thread::sleep(Duration::from_secs(30));
+                std::thread::sleep(retry);
+                retry = (retry * 2).min(Duration::from_secs(30 * 60));
             }
         }
     };
