@@ -179,7 +179,6 @@ fn cancellation_after_acceptance_names_the_owned_remote_turn() {
     let socket = temp_socket("cancel-after-accepted");
     let _ = std::fs::remove_file(&socket);
     let listener = UnixListener::bind(&socket).unwrap();
-    let (accepted_tx, accepted_rx) = mpsc::channel();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let request = read_frame(&mut stream, &AtomicBool::new(false))
@@ -197,7 +196,18 @@ fn cancellation_after_acceptance_names_the_owned_remote_turn() {
             }),
         )
         .unwrap();
-        accepted_tx.send(()).unwrap();
+        write_frame(
+            &mut stream,
+            &json!({
+                "protocol": 1,
+                "type": "text_delta",
+                "request_id": request_id,
+                "app_id": "magicpaper",
+                "turn_id": "remote-turn-7",
+                "text": "已接收。继续"
+            }),
+        )
+        .unwrap();
         let cancel = read_frame(&mut stream, &AtomicBool::new(false))
             .unwrap()
             .unwrap();
@@ -209,8 +219,9 @@ fn cancellation_after_acceptance_names_the_owned_remote_turn() {
     let oracle = test_oracle(socket.clone());
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel_signal = Arc::clone(&cancelled);
+    let (tx, rx) = mpsc::channel();
     let canceller = thread::spawn(move || {
-        accepted_rx.recv().unwrap();
+        assert_eq!(rx.recv().unwrap(), Ok(Event::Ink("已接收。".into())));
         cancel_signal.store(true, Ordering::Release);
     });
     let permit = oracle.workers.acquire(Lane::Interactive).unwrap();
@@ -220,7 +231,7 @@ fn cancellation_after_acceptance_names_the_owned_remote_turn() {
         lane: Lane::Interactive,
         input: "取消这个回合".into(),
         ctx: TurnContext::default(),
-        tx: mpsc::channel().0,
+        tx,
         cancelled,
         terminal: Arc::new(AtomicBool::new(false)),
         _permit: permit,
