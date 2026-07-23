@@ -1,0 +1,92 @@
+name: Release MagicPaper
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  SDK_URL: https://storage.googleapis.com/remarkable-codex-toolchain/3.27.0.97/chiappa/remarkable-production-image-5.7.119-chiappa-public-x86_64-toolchain.sh
+  SDK_SHA256: f22794bc6bb6729e648a7404a561e870d537818bd62a2f9950522f0cf15b4130
+  SDK_DIR: /home/runner/remagic-sdk-chiappa-3.27
+  FONT_SEED_SHA256: cd04388f2ec16f23049b222973a32e796528e7f6d19e0b7340dc658252c0ee51
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-unknown-linux-gnu
+      - name: Restore reMarkable SDK
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SDK_DIR }}
+          key: remarkable-sdk-chiappa-3.27.0.97-${{ env.SDK_SHA256 }}
+      - name: Install verified reMarkable SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          curl --fail --location --retry 5 --output "$RUNNER_TEMP/remarkable-sdk.sh" "$SDK_URL"
+          echo "$SDK_SHA256  $RUNNER_TEMP/remarkable-sdk.sh" | sha256sum -c -
+          chmod 0755 "$RUNNER_TEMP/remarkable-sdk.sh"
+          "$RUNNER_TEMP/remarkable-sdk.sh" -y -d "$SDK_DIR"
+      - name: Restore pinned font assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/font-seed" "$RUNNER_TEMP/magicpaper-fonts"
+          gh release download v0.8.0 --repo aporicho/magicpaper \
+            --pattern magicpaper-0.8.0-universal_aarch64.tar.gz \
+            --dir "$RUNNER_TEMP/font-seed"
+          seed="$RUNNER_TEMP/font-seed/magicpaper-0.8.0-universal_aarch64.tar.gz"
+          echo "$FONT_SEED_SHA256  $seed" | sha256sum -c -
+          tar -xzf "$seed" -C "$RUNNER_TEMP/magicpaper-fonts" --strip-components=3 \
+            payload/share/fonts/FZPingXianYaSong.ttf \
+            payload/share/fonts/851LakeusNightWriting.ttf \
+            payload/share/fonts/ButterShiSan.ttf \
+            payload/share/fonts/CoverageFallback.ttf
+          cd "$RUNNER_TEMP/magicpaper-fonts"
+          sha256sum -c <<'EOF'
+          dbbdf59d7035d980abecf4f820e615b72107865a00f6eb41a1bbb9d9d1492fd1  FZPingXianYaSong.ttf
+          73cf4b062e3af3711b3b33d230401e215ec6ace00498d8dc645e80f69f000ba9  851LakeusNightWriting.ttf
+          eb9762a7139a84c96c33e06bccae4af9da3bc5e15b9a20d967d0ca87b684f5b6  ButterShiSan.ttf
+          1652500938055a232cfbfa321de6ebaadfc5635dd9f75e369bc991d14a6512dd  CoverageFallback.ttf
+          EOF
+      - name: Check and build package
+        env:
+          RM_SDK: ${{ env.SDK_DIR }}
+          MAGICPAPER_UI_FONT: ${{ runner.temp }}/magicpaper-fonts/FZPingXianYaSong.ttf
+          MAGICPAPER_851_FONT: ${{ runner.temp }}/magicpaper-fonts/851LakeusNightWriting.ttf
+          MAGICPAPER_BUTTER_FONT: ${{ runner.temp }}/magicpaper-fonts/ButterShiSan.ttf
+          MAGICPAPER_COVERAGE_FONT: ${{ runner.temp }}/magicpaper-fonts/CoverageFallback.ttf
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          test "$GITHUB_REF_NAME" = "v$version"
+          scripts/check.sh
+          scripts/build-remagic.sh
+          scripts/make-remagic-package.sh
+      - name: Publish package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          asset="dist/remagic-store/magicpaper-$version-universal_aarch64.tar.gz"
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
+              --title "MagicPaper $version" --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$asset" --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
