@@ -324,7 +324,7 @@ fn qtfb_refresh_mode(intent: RefreshIntent, managed: bool) -> i32 {
     }
     match intent {
         RefreshIntent::Ink => crate::qtfb::REFRESH_MODE_UFAST,
-        RefreshIntent::CleanPartial => crate::qtfb::REFRESH_MODE_CONTENT,
+        RefreshIntent::CleanPartial => crate::qtfb::REFRESH_MODE_FAST,
         // MagicPaper is deliberately monochrome. Stable paper, menus and
         // erased regions use the quality mono waveform; the color/content
         // waveform adds latency and visible flashing without useful output.
@@ -339,7 +339,7 @@ fn qtfb_refresh_mode(intent: RefreshIntent, managed: bool) -> i32 {
 fn vendor_refresh(intent: RefreshIntent) -> (i32, i32) {
     match intent {
         RefreshIntent::Ink => (0, 0),
-        RefreshIntent::CleanPartial => (4, 0),
+        RefreshIntent::CleanPartial => (3, 0),
         RefreshIntent::MonoQuality | RefreshIntent::Ui | RefreshIntent::Content => (3, 0),
         RefreshIntent::Full => (4, 1),
     }
@@ -353,7 +353,7 @@ mod tests {
     fn semantic_intents_are_mapped_only_at_the_vendor_boundary() {
         assert_eq!(vendor_refresh(RefreshIntent::Ink), (0, 0));
         assert_eq!(vendor_refresh(RefreshIntent::MonoQuality), (3, 0));
-        assert_eq!(vendor_refresh(RefreshIntent::CleanPartial), (4, 0));
+        assert_eq!(vendor_refresh(RefreshIntent::CleanPartial), (3, 0));
         assert_eq!(vendor_refresh(RefreshIntent::Ui), (3, 0));
         assert_eq!(vendor_refresh(RefreshIntent::Content), (3, 0));
         assert_eq!(vendor_refresh(RefreshIntent::Full), (4, 1));
@@ -371,7 +371,7 @@ mod tests {
         );
         assert_eq!(
             qtfb_refresh_mode(RefreshIntent::CleanPartial, true),
-            crate::qtfb::REFRESH_MODE_CONTENT
+            crate::qtfb::REFRESH_MODE_FAST
         );
         assert_eq!(
             qtfb_refresh_mode(RefreshIntent::Ui, true),

@@ -93,7 +93,7 @@ mod tests {
         let values = PreferenceValues::default();
         assert_eq!(values.cleanup_strength, CleanupStrength::Enhanced);
         assert_eq!(values.cleanup_padding_px, 16);
-        assert_eq!(values.full_refresh_every_replies, 3);
+        assert_eq!(values.full_refresh_every_replies, 0);
     }
 
     #[test]
@@ -127,7 +127,10 @@ mod tests {
     #[test]
     fn any_full_refresh_resets_accumulated_reply_debt() {
         let mut controller = RefreshController {
-            preferences: UserPreferences::for_test(PreferenceValues::default()),
+            preferences: UserPreferences::for_test(PreferenceValues {
+                full_refresh_every_replies: 3,
+                ..PreferenceValues::default()
+            }),
             replies_since_full: 2,
         };
         controller.reset_debt();

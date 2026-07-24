@@ -1,6 +1,6 @@
 [package]
 name = "magicpaper"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2021"
 license = "MIT"
 description = "MagicPaper (MP), living magical paper for reMarkable Paper Pro and Paper Pro Move"

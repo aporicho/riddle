@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_PREF_DIR: &str = "/home/root/.local/share/magicpaper/preferences";
 const SETTINGS_FILE: &str = "settings.json";
-const SETTINGS_SCHEMA: u32 = 1;
+const SETTINGS_SCHEMA: u32 = 2;
+const LEGACY_SETTINGS_SCHEMA: u32 = 1;
 
 pub(crate) const MIN_CLEANUP_PADDING_PX: u8 = 0;
 pub(crate) const MAX_CLEANUP_PADDING_PX: u8 = 32;
@@ -56,7 +57,7 @@ impl Default for PreferenceValues {
         Self {
             cleanup_strength: CleanupStrength::Enhanced,
             cleanup_padding_px: 16,
-            full_refresh_every_replies: 3,
+            full_refresh_every_replies: 0,
             answer_dwell_percent: 100,
         }
     }
@@ -114,34 +115,47 @@ impl UserPreferences {
 
     fn open_in(dir: &Path) -> Self {
         let path = dir.join(SETTINGS_FILE);
-        let values = match std::fs::read(&path) {
+        let (values, migrated) = match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<StoredPreferences>(&bytes) {
-                Ok(stored) if stored.schema == SETTINGS_SCHEMA => stored.values.normalized(),
+                Ok(stored) if stored.schema == SETTINGS_SCHEMA => {
+                    (stored.values.normalized(), false)
+                }
+                Ok(stored) if stored.schema == LEGACY_SETTINGS_SCHEMA => {
+                    (migrate_legacy_values(stored.values), true)
+                }
                 Ok(stored) => {
                     eprintln!(
                         "magic-paper: unsupported settings schema {}; using defaults",
                         stored.schema
                     );
-                    PreferenceValues::default()
+                    (PreferenceValues::default(), false)
                 }
                 Err(error) => {
                     eprintln!(
                         "magic-paper: could not parse settings at {}: {error}; using defaults",
                         path.display()
                     );
-                    PreferenceValues::default()
+                    (PreferenceValues::default(), false)
                 }
             },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => PreferenceValues::default(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                (PreferenceValues::default(), false)
+            }
             Err(error) => {
                 eprintln!(
                     "magic-paper: could not read settings at {}: {error}; using defaults",
                     path.display()
                 );
-                PreferenceValues::default()
+                (PreferenceValues::default(), false)
             }
         };
-        Self { path, values }
+        let preferences = Self { path, values };
+        if migrated {
+            if let Err(error) = preferences.persist() {
+                eprintln!("magic-paper: could not persist migrated settings: {error}");
+            }
+        }
+        preferences
     }
 
     pub(crate) const fn values(&self) -> PreferenceValues {
@@ -176,6 +190,15 @@ impl UserPreferences {
             values: values.normalized(),
         }
     }
+}
+
+fn migrate_legacy_values(mut values: PreferenceValues) -> PreferenceValues {
+    // Three was the old implicit default. Turn only that value off so an
+    // explicitly chosen interval continues to mean what the user selected.
+    if values.full_refresh_every_replies == 3 {
+        values.full_refresh_every_replies = 0;
+    }
+    values.normalized()
 }
 
 fn quantize_u8(value: u8, step: u8) -> u8 {
@@ -231,6 +254,42 @@ mod tests {
         let reopened = UserPreferences::open_in(&dir);
         assert_eq!(reopened.values(), preferences.values());
         assert!(!dir.join("settings.json.new").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_default_disables_automatic_full_refresh_without_losing_explicit_choices() {
+        let dir = temp_dir("legacy-refresh");
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = |interval| StoredPreferences {
+            schema: LEGACY_SETTINGS_SCHEMA,
+            values: PreferenceValues {
+                full_refresh_every_replies: interval,
+                ..PreferenceValues::default()
+            },
+        };
+        std::fs::write(
+            dir.join(SETTINGS_FILE),
+            serde_json::to_vec(&legacy(3)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            UserPreferences::open_in(&dir)
+                .values()
+                .full_refresh_every_replies,
+            0
+        );
+        std::fs::write(
+            dir.join(SETTINGS_FILE),
+            serde_json::to_vec(&legacy(5)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            UserPreferences::open_in(&dir)
+                .values()
+                .full_refresh_every_replies,
+            5
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

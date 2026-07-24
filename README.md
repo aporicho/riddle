@@ -2,11 +2,11 @@
 
 MagicPaper（简称 MP）是正式产品名，仓库与发布标识为 `magicpaper`。它是为 reMarkable Paper Pro 与 Paper Pro Move 设计的纸面 AI 应用：用户直接用笔书写，墨迹在停笔后淡出，回答再以手写动画写回纸面。它没有键盘、聊天气泡或网页界面。
 
-本项目由 Maxime Rivest 的 [`riddle`](https://github.com/MaximeRivest/riddle) 演进而来，并保留原项目历史和 MIT 署名。0.8.1 的正式运行方式是作为 ReMagic 托管的驻留应用；AppLoad、镇纸和旧独占脚本都不是其运行依赖。
+本项目由 Maxime Rivest 的 [`riddle`](https://github.com/MaximeRivest/riddle) 演进而来，并保留原项目历史和 MIT 署名。0.8.2 的正式运行方式是作为 ReMagic 托管的驻留应用；AppLoad、镇纸和旧独占脚本都不是其运行依赖。
 
 ## 与上游 riddle 的主要区别
 
-| 方面 | 上游 | MagicPaper 0.8.1 |
+| 方面 | 上游 | MagicPaper 0.8.2 |
 |---|---|---|
 | 设备与运行方式 | Paper Pro、AppLoad/独占模式 | Paper Pro 与 Paper Pro Move，由 ReMagic 自动适配 QTFB、笔/触摸与生命周期 |
 | 定位 | Tom Riddle 日记 | 中文优先的纸面助手，简称 MP |
@@ -103,7 +103,7 @@ Paper Pro 使用 `ferrari`、`1620×2160`、QTFB format 3、stride 3240；Paper 
 
 固定界面文字使用 `FZPingXianYaSong.ttf`（方正屏显雅宋），不受手写字体选择或字号校准影响。回答文字内置辰宇落雁体；部署包另含黄油拾叁体与 851 远星夜行手写体，851 是默认选择。写下 `字体` 可直接进入字体页；写下 `设置` 后也可从总设置页进入。三种回答字体均可在 50%–180% 范围校准视觉大小，字体页只有专门的回答预览样例使用对应手写体。缺字由 `CoverageFallback.ttf` 中性完整字库逐字补齐。
 
-设置页默认采用增强局部清理、16 px 清理边距和每 3 次回答一次全刷。局刷强度、边距、自动全刷间隔以及回答停留比例均即时生效并保存在 `preferences/settings.json`。Pi 智能体页保存供应商、Flash/Pro、思考等级与安全工具开关；默认是 DeepSeek、`deepseek-v4-flash`、关闭思考、开启安全工具。密钥不在设备屏幕上输入，由 ReMagic 单独保管。“新建会话”会同时重置驻留 Agent 并写入持久的本地对话边界；旧页面仍留在历史与召回目录中，但 ReMagic 日后重启 Pi 时不会再把它们自动灌入新上下文。
+设置页默认采用黑白增强局部清理、16 px 清理边距并关闭按回答次数自动全刷；手写“刷新”或点击“立即全刷”仍可主动清除残影。局刷强度、边距、自动全刷间隔以及回答停留比例均即时生效并保存在 `preferences/settings.json`。Pi 智能体页保存供应商、Flash/Pro、思考等级与安全工具开关；默认是 DeepSeek、`deepseek-v4-flash`、关闭思考、开启安全工具。密钥不在设备屏幕上输入，由 ReMagic 单独保管。“新建会话”会同时重置驻留 Agent 并写入持久的本地对话边界；旧页面仍留在历史与召回目录中，但 ReMagic 日后重启 Pi 时不会再把它们自动灌入新上下文。
 
 默认持久数据位于：
 
