@@ -49,8 +49,6 @@ pub(super) struct ReplyCompletion {
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ReplyEffects {
     pub(super) damage: Option<DamageRect>,
-    /// The completed answer block to settle with a quality partial waveform.
-    pub(super) settle: Option<DamageRect>,
     /// Elapsed time when the first visible damage was submitted by the
     /// controller. The runtime logs it only after handing damage to display.
     pub(super) first_damage_latency_ms: Option<u128>,
@@ -152,20 +150,8 @@ impl ReplyController {
             *next = now + reply_tick_interval(waiting_for_first_layout);
             None
         };
-        let settle = completion.and_then(|completion| {
-            (!completion.region.is_empty()).then(|| {
-                let (x, y, width, height) = completion.region.rect();
-                DamageRect {
-                    x,
-                    y,
-                    width,
-                    height,
-                }
-            })
-        });
         ReplyEffects {
             damage,
-            settle,
             first_damage_latency_ms,
             completion,
         }
@@ -245,7 +231,10 @@ mod tests {
         let effects =
             ReplyController::tick(&mut plan, &mut next, false, &mut false, &mut surface, now);
         let completion = effects.completion.expect("complete reply");
-        assert_eq!(effects.settle.map(|damage| damage.width), Some(13));
+        assert!(
+            effects.damage.is_some(),
+            "final stroke must be the final Ink submission"
+        );
         assert_eq!(completion.visible_graphemes, 2);
         assert!(completion.reply_elapsed_ms < 1_000);
         assert_eq!(completion.region.rect(), plan.region.rect());

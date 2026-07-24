@@ -219,10 +219,10 @@ pub(super) fn gate_pen_frame(
         return PenGate::Apply;
     }
     let fresh_pen_down = frame.tool == PenTool::Pen && frame.phase == PenPhase::Down;
-    if heartbeat_in_flight && fresh_pen_down {
-        PenGate::CancelHeartbeat
-    } else if answer_visible && fresh_pen_down {
+    if answer_visible && fresh_pen_down {
         PenGate::FadeAnswer
+    } else if heartbeat_in_flight && fresh_pen_down {
+        PenGate::CancelHeartbeat
     } else {
         PenGate::Ignore
     }

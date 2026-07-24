@@ -26,7 +26,7 @@ impl Engine<'_> {
         );
         match outcome {
             PaperListOutcome::OpenReader(path) => {
-                self.reader_target = Some(path);
+                self.reader_target = Some(crate::app::state::ReaderTarget::Path(path));
                 true
             }
             PaperListOutcome::PiAction(action) => {

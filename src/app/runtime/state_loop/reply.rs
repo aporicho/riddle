@@ -8,10 +8,9 @@ use super::super::super::reply_controller::{
 };
 use super::super::super::state::{State, TurnKind, WritePlan};
 use super::super::super::timing::{heartbeat_deadline, unix_now};
-use super::super::Engine;
+use super::super::{clear_region, Engine};
 use crate::oracle::Event;
 use crate::platform::RefreshIntent;
-use crate::{reader, runtime_control};
 
 const MAX_READY_STREAM_EVENTS_PER_TICK: usize = 32;
 
@@ -62,6 +61,15 @@ impl Engine<'_> {
         };
         if drain == DrainOutcome::Boundary {
             rx = None;
+            if self.reader_target.is_some() {
+                clear_region(&mut self.surf, plan.region);
+                return State::Replying {
+                    plan,
+                    next,
+                    rx,
+                    page_full,
+                };
+            }
             if recenter_undrawn_reply(&self.font, &mut plan, &self.turn_reply) {
                 // A provisional top-safe fit may have rejected a tail that the
                 // complete centered fit can retain at one uniform smaller size.
@@ -97,15 +105,6 @@ impl Engine<'_> {
             if let Some(latency_ms) = effects.first_damage_latency_ms {
                 eprintln!("magic-paper: event=reply-first-display-submit latency_ms={latency_ms}");
             }
-        }
-        if let Some(settle) = effects.settle {
-            self.disp.present_region(
-                settle.x,
-                settle.y,
-                settle.width,
-                settle.height,
-                RefreshIntent::MonoQuality,
-            );
         }
         if let Some(completion) = effects.completion {
             self.complete_reply(completion, page_full)
@@ -180,7 +179,7 @@ impl Engine<'_> {
                     append_overflow_marker(&self.font, plan);
                 }
             }
-            Event::Reader(query) => self.open_delayed_reader(query.as_deref()),
+            Event::Reader(query) => return self.queue_delayed_reader(query.as_deref()),
             Event::FullRefresh => self
                 .refresh
                 .request_full(self.disp, self.surf.w, self.surf.h),
@@ -208,18 +207,11 @@ impl Engine<'_> {
         false
     }
 
-    fn open_delayed_reader(&self, query: Option<&str>) {
-        match reader::Catalog::open().map(|catalog| catalog.lookup(query)) {
-            Ok(reader::Lookup::Open(path)) => {
-                let _ = runtime_control::open_reader(&path).map_err(|error| {
-                    eprintln!("magic-paper: delayed KOReader request failed: {error}")
-                });
-            }
-            Ok(reader::Lookup::Choose(_) | reader::Lookup::Missing) => {
-                eprintln!("magic-paper: delayed reader directive was ambiguous");
-            }
-            Err(error) => eprintln!("magic-paper: delayed reader catalog failed: {error}"),
-        }
+    fn queue_delayed_reader(&mut self, query: Option<&str>) -> bool {
+        self.reader_target = Some(super::super::super::state::ReaderTarget::Query(
+            query.map(ToOwned::to_owned),
+        ));
+        true
     }
 
     fn complete_reply(&mut self, completion: ReplyCompletion, page_full: bool) -> State {

@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::platform::RefreshIntent;
+use crate::platform::{AppToken, RefreshIntent};
 use crate::surface::Surface;
 use crate::{display, fonts, memory, oracle::Event, reader, runtime_control, tasks, todos, ui};
 
@@ -32,6 +32,7 @@ pub(super) struct FirstEventContext<'a> {
     pub(super) turn_reply: &'a mut String,
     pub(super) turn_failed: &'a mut bool,
     pub(super) turn_kind: TurnKind,
+    pub(super) app_token: Option<&'a AppToken>,
 }
 
 pub(super) fn consume_first_event(
@@ -52,7 +53,7 @@ pub(super) fn consume_first_event(
         Event::Settings => open_settings(&mut ctx),
         Event::HistoryList => open_history_list(&mut ctx),
         Event::Help => open_help(&mut ctx),
-        Event::Reader(query) => open_reader(query, &mut ctx),
+        Event::Reader(query) => request_reader_query(query, &mut ctx),
         Event::FullRefresh => {
             ctx.refresh
                 .request_full(ctx.display, ctx.surface.w, ctx.surface.h);
@@ -194,7 +195,10 @@ fn open_help(ctx: &mut FirstEventContext<'_>) -> State {
     }
 }
 
-fn open_reader(query: Option<String>, ctx: &mut FirstEventContext<'_>) -> State {
+pub(super) fn request_reader_query(
+    query: Option<String>,
+    ctx: &mut FirstEventContext<'_>,
+) -> State {
     let catalog = match reader::Catalog::open() {
         Ok(catalog) => catalog,
         Err(error) => {
@@ -203,7 +207,7 @@ fn open_reader(query: Option<String>, ctx: &mut FirstEventContext<'_>) -> State 
         }
     };
     match catalog.lookup(query.as_deref()) {
-        reader::Lookup::Open(path) => request_reader(ctx.font, &path),
+        reader::Lookup::Open(path) => request_reader(ctx.font, &path, ctx.app_token),
         reader::Lookup::Choose(books) => show_reader_choices(books, ctx),
         reader::Lookup::Missing => {
             let text = match query {
@@ -240,7 +244,11 @@ fn apply_command(command: String, ctx: &mut FirstEventContext<'_>) -> State {
     replying(ctx.font, &reply, None)
 }
 
-pub(super) fn request_reader(font: &fonts::FontBook, path: &Path) -> State {
+pub(super) fn request_reader(
+    font: &fonts::FontBook,
+    path: &Path,
+    token: Option<&AppToken>,
+) -> State {
     let target = match reader::validated_target(path) {
         Ok(target) => target,
         Err(error) => {
@@ -248,33 +256,42 @@ pub(super) fn request_reader(font: &fonts::FontBook, path: &Path) -> State {
             return replying(font, "無法開啟：書籍路徑不在可用書庫中。", None);
         }
     };
-    match runtime_control::open_reader(&target) {
-        Ok(()) => {
+    let Some(token) = token else {
+        eprintln!("magic-paper: KOReader request has no active foreground token");
+        return replying(
+            font,
+            "無法開啟閱讀器：MagicPaper 沒有有效的前臺憑證。請返回管理器後重試。",
+            None,
+        );
+    };
+    match runtime_control::open_reader(&target, token) {
+        Ok(request) => {
             eprintln!(
-                "magic-paper: runtime accepted KOReader request — {}",
+                "magic-paper: waiting for KOReader runtime acknowledgement — {}",
                 target.display()
             );
-            State::Listening { last_pen: None }
+            State::AwaitingHandoffAck { request }
         }
-        Err(error) => {
-            eprintln!("magic-paper: KOReader runtime request failed: {error}");
-            let reason = match error.kind() {
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
-                    "應用管理器控制服務尚未運行"
-                }
-                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
-                    "應用管理器響應超時"
-                }
-                std::io::ErrorKind::PermissionDenied => "應用管理器控制通道權限錯誤",
-                _ => "應用管理器拒絕了啟動請求",
-            };
-            replying(
-                font,
-                &format!("無法開啟閱讀器：{reason}。請返回管理器後重試。"),
-                None,
-            )
-        }
+        Err(error) => reader_request_failed(font, error),
     }
+}
+
+pub(super) fn reader_request_failed(font: &fonts::FontBook, error: std::io::Error) -> State {
+    eprintln!("magic-paper: KOReader runtime request failed: {error}");
+    let reason = match error.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+            "應用管理器控制服務尚未運行"
+        }
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => "應用管理器響應超時",
+        std::io::ErrorKind::PermissionDenied => "應用管理器控制通道權限錯誤",
+        std::io::ErrorKind::InvalidInput => "書籍路徑或前臺憑證無效",
+        _ => "應用管理器拒絕了啟動請求",
+    };
+    replying(
+        font,
+        &format!("無法開啟閱讀器：{reason}。請返回管理器後重試。"),
+        None,
+    )
 }
 
 fn replying(font: &fonts::FontBook, text: &str, rx: Option<OracleTurn>) -> State {

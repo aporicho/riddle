@@ -1,14 +1,46 @@
 //! Runtime state-machine data, kept separate from transition logic.
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::fb::BBox;
 use crate::fonts;
+use crate::platform::{AppToken, InputMode};
 use crate::reader;
+use crate::runtime_control;
 use crate::ui;
 
 use super::layout_controller::LayoutJob;
 use super::oracle_controller::OracleTurn;
+
+pub(super) enum ReaderTarget {
+    Query(Option<String>),
+    Path(PathBuf),
+}
+
+pub(crate) fn input_mode_for_state(state: &State) -> InputMode {
+    match state {
+        State::Listening { .. } => InputMode::Writing,
+        State::Help { .. }
+        | State::Conjuring { .. }
+        | State::MemoryShown { .. }
+        | State::TaskList { .. }
+        | State::TodoList { .. }
+        | State::FontList { .. }
+        | State::Settings { .. }
+        | State::PiSettings { .. }
+        | State::HistoryList { .. }
+        | State::ReaderList { .. } => InputMode::Modal,
+        State::Drinking { .. }
+        | State::Thinking { .. }
+        | State::Replying { .. }
+        | State::AnswerVisible { .. }
+        | State::FadingReply { .. }
+        | State::AwaitingPenUp
+        | State::AwaitingHandoffAck { .. }
+        | State::HandoffPending { .. } => InputMode::AnimationLocked,
+    }
+}
 
 pub(super) enum State {
     Listening {
@@ -102,6 +134,19 @@ pub(super) enum State {
     ReaderList {
         panel: ui::paper_list::PaperList,
         books: Vec<reader::Book>,
+    },
+    /// Runtime App v2 is waiting for the manager's short queue ACK. Socket I/O
+    /// is on a worker so lifecycle polling remains uninterrupted.
+    AwaitingHandoffAck {
+        request: runtime_control::OpenReaderRequest,
+    },
+    /// ReMagic accepted a Runtime App v2 handoff and will shortly revoke this
+    /// foreground lease. Keep the reactor alive and input locked until the
+    /// lifecycle background command arrives; never issue another request with
+    /// the token that was just handed off.
+    HandoffPending {
+        token: AppToken,
+        until: Instant,
     },
 }
 

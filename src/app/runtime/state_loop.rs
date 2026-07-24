@@ -12,8 +12,10 @@ use crate::platform::RefreshIntent;
 use crate::{agent, tasks, ui};
 
 mod cleanup;
+mod handoff;
 mod memory;
 mod reply;
+pub(super) use handoff::input_mode_request_for_state;
 
 impl Engine<'_> {
     pub(super) fn tick_state(&mut self) {
@@ -66,6 +68,8 @@ impl Engine<'_> {
                 region,
             } => self.tick_fading(stage, next, region),
             State::AwaitingPenUp => State::AwaitingPenUp,
+            State::AwaitingHandoffAck { request } => self.tick_handoff_ack(request),
+            State::HandoffPending { token, until } => self.tick_handoff_pending(token, until),
             stable @ (State::TaskList { .. }
             | State::TodoList { .. }
             | State::FontList { .. }
@@ -75,7 +79,16 @@ impl Engine<'_> {
             | State::ReaderList { .. }) => stable,
         };
         let mode = input_mode_for_state(&next_state);
-        let mode_ready = !self.input_mode_failed() && self.set_input_mode(mode);
+        // An accepted OpenApp request transfers authority to the manager. Its
+        // token may be stale immediately, so do not race the queued handoff
+        // with a post-ACK SetInputMode request.
+        let mode_ready = if let Some(requested_mode) = input_mode_request_for_state(&next_state) {
+            !self.input_mode_failed() && self.set_input_mode(requested_mode)
+        } else {
+            self.input_mode = crate::platform::InputMode::AnimationLocked;
+            self.input_mode_synced = false;
+            true
+        };
         self.state = if mode == crate::platform::InputMode::Writing && !mode_ready {
             State::AwaitingPenUp
         } else {
@@ -355,26 +368,34 @@ impl Engine<'_> {
         since: Instant,
     ) -> State {
         match rx.poll_first(since) {
-            FirstTurnPoll::Event(result) => consume_first_event(
-                result,
-                rx,
-                since,
-                FirstEventContext {
-                    font: &self.font,
-                    memory_store: &self.store,
-                    task_store: &mut self.task_store,
-                    todo_store: &mut self.todo_store,
-                    next_heartbeat: &mut self.next_heartbeat,
-                    surface: &mut self.surf,
-                    display: self.disp,
-                    refresh: &mut self.refresh,
-                    takeover: self.takeover,
-                    turn_transcript: &mut self.turn_transcript,
-                    turn_reply: &mut self.turn_reply,
-                    turn_failed: &mut self.turn_failed,
-                    turn_kind: self.turn_kind,
-                },
-            ),
+            FirstTurnPoll::Event(result) => {
+                let app_token = self
+                    .lifecycle
+                    .active_token()
+                    .cloned()
+                    .or_else(crate::runtime_env::launch_token);
+                consume_first_event(
+                    result,
+                    rx,
+                    since,
+                    FirstEventContext {
+                        font: &self.font,
+                        memory_store: &self.store,
+                        task_store: &mut self.task_store,
+                        todo_store: &mut self.todo_store,
+                        next_heartbeat: &mut self.next_heartbeat,
+                        surface: &mut self.surf,
+                        display: self.disp,
+                        refresh: &mut self.refresh,
+                        takeover: self.takeover,
+                        turn_transcript: &mut self.turn_transcript,
+                        turn_reply: &mut self.turn_reply,
+                        turn_failed: &mut self.turn_failed,
+                        turn_kind: self.turn_kind,
+                        app_token: app_token.as_ref(),
+                    },
+                )
+            }
             FirstTurnPoll::Pending => State::Thinking { rx, since },
             FirstTurnPoll::TimedOut { request_id } => {
                 eprintln!(
@@ -435,7 +456,9 @@ impl Engine<'_> {
             | State::Settings { .. }
             | State::PiSettings { .. }
             | State::HistoryList { .. }
-            | State::ReaderList { .. } => Duration::from_millis(25),
+            | State::ReaderList { .. }
+            | State::HandoffPending { .. } => Duration::from_millis(25),
+            State::AwaitingHandoffAck { .. } => Duration::from_millis(4),
             State::Thinking { .. } => Duration::from_millis(4),
             _ => Duration::from_millis(2),
         };

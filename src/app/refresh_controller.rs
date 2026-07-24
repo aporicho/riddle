@@ -10,6 +10,8 @@ pub(super) struct RefreshController {
     replies_since_full: u8,
 }
 
+pub(super) const REPLY_FADE_STAGES: u32 = 10;
+
 impl RefreshController {
     pub(super) fn open() -> Self {
         Self {
@@ -46,8 +48,9 @@ impl RefreshController {
         display.present_region(x, y, width, height, self.cleanup_intent());
     }
 
-    /// Settle one completed reply. Returns true when this completion used a
-    /// full-panel refresh instead of a partial cleanup.
+    /// Finish one dissolved reply with exactly one monochrome quality partial
+    /// update, unless the user explicitly opted into the periodic full-panel
+    /// cleanup. Returns true when that opt-in full refresh was used.
     pub(super) fn present_reply_cleanup(
         &mut self,
         display: &Display,
@@ -55,12 +58,21 @@ impl RefreshController {
         surface_height: usize,
         region: BBox,
     ) -> bool {
-        if self.reply_cleanup_is_full() {
-            self.request_full(display, surface_width, surface_height);
-            return true;
+        match self.next_reply_cleanup_intent() {
+            RefreshIntent::Full => {
+                self.request_full(display, surface_width, surface_height);
+                true
+            }
+            RefreshIntent::MonoQuality => {
+                if !region.is_empty() {
+                    let region = region.expanded(self.values().cleanup_padding_px as i32);
+                    let (x, y, width, height) = region.rect();
+                    display.present_region(x, y, width, height, RefreshIntent::MonoQuality);
+                }
+                false
+            }
+            _ => unreachable!("reply cleanup has only monochrome or full intent"),
         }
-        self.present_cleanup(display, region);
-        false
     }
 
     pub(super) const fn cleanup_intent(&self) -> RefreshIntent {
@@ -77,6 +89,15 @@ impl RefreshController {
         }
         self.replies_since_full = self.replies_since_full.saturating_add(1);
         self.replies_since_full >= interval
+    }
+
+    fn next_reply_cleanup_intent(&mut self) -> RefreshIntent {
+        if self.reply_cleanup_is_full() {
+            self.reset_debt();
+            RefreshIntent::Full
+        } else {
+            RefreshIntent::MonoQuality
+        }
     }
 
     fn reset_debt(&mut self) {
@@ -136,5 +157,27 @@ mod tests {
         controller.reset_debt();
         assert!(!controller.reply_cleanup_is_full());
         assert_eq!(controller.replies_since_full, 1);
+    }
+
+    #[test]
+    fn fade_submission_sequence_is_nine_ink_then_one_configured_cleanup() {
+        for (interval, expected_terminal) in
+            [(0, RefreshIntent::MonoQuality), (1, RefreshIntent::Full)]
+        {
+            let mut controller = RefreshController {
+                preferences: UserPreferences::for_test(PreferenceValues {
+                    full_refresh_every_replies: interval,
+                    ..PreferenceValues::default()
+                }),
+                replies_since_full: 0,
+            };
+            let mut submitted = vec![RefreshIntent::Ink; (REPLY_FADE_STAGES - 1) as usize];
+            submitted.push(controller.next_reply_cleanup_intent());
+            assert_eq!(submitted.len(), REPLY_FADE_STAGES as usize);
+            assert!(submitted[..9]
+                .iter()
+                .all(|intent| *intent == RefreshIntent::Ink));
+            assert_eq!(submitted[9], expected_terminal);
+        }
     }
 }

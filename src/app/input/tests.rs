@@ -112,8 +112,17 @@ fn only_fresh_pen_down_fades_an_answer_or_preempts_a_heartbeat() {
     );
     assert_eq!(
         gate_pen_frame(InputMode::AnimationLocked, down, true, true),
-        PenGate::CancelHeartbeat
+        PenGate::FadeAnswer
     );
+    assert_eq!(
+        gate_pen_frame(InputMode::AnimationLocked, down, false, false),
+        PenGate::Ignore
+    );
+}
+
+#[test]
+fn fading_reply_contacts_are_always_ignored_even_for_a_heartbeat_turn() {
+    let down = frame(PenPhase::Down, PenTool::Pen);
     assert_eq!(
         gate_pen_frame(InputMode::AnimationLocked, down, false, false),
         PenGate::Ignore

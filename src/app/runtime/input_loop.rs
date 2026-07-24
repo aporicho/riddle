@@ -73,13 +73,7 @@ impl Engine<'_> {
             frame,
             matches!(self.state, State::AnswerVisible { .. }),
             self.turn_kind == TurnKind::Heartbeat
-                && matches!(
-                    self.state,
-                    State::Thinking { .. }
-                        | State::Replying { .. }
-                        | State::AnswerVisible { .. }
-                        | State::FadingReply { .. }
-                ),
+                && matches!(self.state, State::Thinking { .. } | State::Replying { .. }),
         );
         match action {
             PenGate::Apply => {
@@ -343,9 +337,46 @@ impl Engine<'_> {
     }
 
     pub(super) fn open_reader_target(&mut self) {
-        if let Some(path) = self.reader_target.take() {
-            self.state = super::super::turn_controller::request_reader(&self.font, &path);
+        let Some(target) = self.reader_target.take() else {
+            return;
+        };
+        let old = std::mem::replace(&mut self.state, State::Listening { last_pen: None });
+        if let State::ReaderList { panel, .. } = old {
+            // Restore the list's save-under in memory without adding a panel
+            // update while the ownership transition is being queued.
+            panel.dismiss(&mut self.surf);
         }
+        let token = self
+            .lifecycle
+            .active_token()
+            .cloned()
+            .or_else(crate::runtime_env::launch_token);
+        self.state = match target {
+            super::super::state::ReaderTarget::Path(path) => {
+                super::super::turn_controller::request_reader(&self.font, &path, token.as_ref())
+            }
+            super::super::state::ReaderTarget::Query(query) => {
+                super::super::turn_controller::request_reader_query(
+                    query,
+                    &mut super::super::turn_controller::FirstEventContext {
+                        font: &self.font,
+                        memory_store: &self.store,
+                        task_store: &mut self.task_store,
+                        todo_store: &mut self.todo_store,
+                        next_heartbeat: &mut self.next_heartbeat,
+                        surface: &mut self.surf,
+                        display: self.disp,
+                        refresh: &mut self.refresh,
+                        takeover: self.takeover,
+                        turn_transcript: &mut self.turn_transcript,
+                        turn_reply: &mut self.turn_reply,
+                        turn_failed: &mut self.turn_failed,
+                        turn_kind: self.turn_kind,
+                        app_token: token.as_ref(),
+                    },
+                )
+            }
+        };
     }
 
     pub(super) fn flush_live_ink(&mut self) -> bool {

@@ -4,7 +4,6 @@
 use crate::{
     display, fb, fonts, ink, memory, pen, power, runtime_control, runtime_env, tasks, todos, touch,
 };
-use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,7 +12,8 @@ use super::input::{InputPriority, ModalContact, PenSequence, PenTrace, QtfbPenSt
 use super::lifecycle::{LifecycleClient, LifecycleStage};
 use super::oracle_controller::{OracleController, SpeculativeRequest};
 use super::refresh_controller::RefreshController;
-use super::state::{State, TurnKind};
+pub(super) use super::state::input_mode_for_state;
+use super::state::{ReaderTarget, State, TurnKind};
 use super::timing::heartbeat_deadline;
 use crate::fb::{screen_h, screen_w, BBox};
 use crate::platform::{InputMode, RefreshIntent};
@@ -107,7 +107,7 @@ pub(super) struct Engine<'a> {
     ink_dirty: BBox,
     ink_flush_urgent: bool,
     last_flush: Instant,
-    reader_target: Option<PathBuf>,
+    reader_target: Option<ReaderTarget>,
     primary_touch: Option<i32>,
     modal_contact: Option<ModalContact>,
     flush_every: Duration,
@@ -347,28 +347,6 @@ fn input_mode_needs_request(synced: bool, current: InputMode, requested: InputMo
     !synced || current != requested
 }
 
-pub(super) fn input_mode_for_state(state: &State) -> InputMode {
-    match state {
-        State::Listening { .. } => InputMode::Writing,
-        State::Help { .. }
-        | State::Conjuring { .. }
-        | State::MemoryShown { .. }
-        | State::TaskList { .. }
-        | State::TodoList { .. }
-        | State::FontList { .. }
-        | State::Settings { .. }
-        | State::PiSettings { .. }
-        | State::HistoryList { .. }
-        | State::ReaderList { .. } => InputMode::Modal,
-        State::Drinking { .. }
-        | State::Thinking { .. }
-        | State::Replying { .. }
-        | State::AnswerVisible { .. }
-        | State::FadingReply { .. }
-        | State::AwaitingPenUp => InputMode::AnimationLocked,
-    }
-}
-
 fn open_devices(takeover: bool, hosted: bool) -> Devices {
     if !takeover {
         eprintln!("magicpaper: hosted QTFB input enabled; raw input devices left ungrabbed");
@@ -469,7 +447,9 @@ pub(super) fn suspend_visible_state(
             clear_region(surf, region);
             State::Listening { last_pen: None }
         }
-        State::AwaitingPenUp => State::Listening { last_pen: None },
+        State::AwaitingPenUp | State::AwaitingHandoffAck { .. } | State::HandoffPending { .. } => {
+            State::Listening { last_pen: None }
+        }
         State::Conjuring { saved, .. } => {
             surf.paste_rect(0, 0, screen_w(), screen_h(), &saved);
             State::Listening { last_pen: None }

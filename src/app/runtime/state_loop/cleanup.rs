@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use super::super::super::oracle_controller::OracleTurn;
 use super::super::super::state::State;
 use super::super::{Engine, DRINK_STAGES, DRINK_STAGE_DELAY};
+use crate::app::refresh_controller::REPLY_FADE_STAGES;
 use crate::fb::BBox;
 use crate::ink;
 
@@ -47,7 +48,6 @@ impl Engine<'_> {
     }
 
     pub(super) fn tick_fading(&mut self, stage: u32, next: Instant, region: BBox) -> State {
-        const STAGES: u32 = 10;
         if Instant::now() < next {
             return State::FadingReply {
                 stage,
@@ -55,8 +55,8 @@ impl Engine<'_> {
                 region,
             };
         }
-        let intent = ink::dissolve_frame(&mut self.surf, region, stage, STAGES);
-        let terminal = stage + 1 >= STAGES;
+        let intent = ink::dissolve_frame(&mut self.surf, region, stage, REPLY_FADE_STAGES);
+        let terminal = stage + 1 >= REPLY_FADE_STAGES;
         if terminal {
             let full =
                 self.refresh
