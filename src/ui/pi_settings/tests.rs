@@ -43,12 +43,12 @@ fn preference_cards_cycle_all_paper_visible_options() {
     let (_bytes, _surface, _fonts, panel) = setup();
     assert_eq!(
         tap(&panel, Setting::Provider),
-        Some(Action::SetProvider(PiProvider::OpenAi))
+        Some(Action::SetProvider(PiProvider::DeepSeek))
     );
     assert_eq!(tap(&panel, Setting::Model), Some(Action::ToggleModel));
     assert_eq!(
         tap(&panel, Setting::Thinking),
-        Some(Action::SetThinking(PiThinking::High))
+        Some(Action::SetThinking(PiThinking::ExtraHigh))
     );
     assert_eq!(tap(&panel, Setting::Tools), Some(Action::SetTools(false)));
 }

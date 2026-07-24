@@ -2,11 +2,11 @@
 
 MagicPaper（简称 MP）是正式产品名，仓库与发布标识为 `magicpaper`。它是为 reMarkable Paper Pro 与 Paper Pro Move 设计的纸面 AI 应用：用户直接用笔书写，墨迹在停笔后淡出，回答再以手写动画写回纸面。它没有键盘、聊天气泡或网页界面。
 
-本项目由 Maxime Rivest 的 [`riddle`](https://github.com/MaximeRivest/riddle) 演进而来，并保留原项目历史和 MIT 署名。0.8.2 的正式运行方式是作为 ReMagic 托管的驻留应用；AppLoad、镇纸和旧独占脚本都不是其运行依赖。
+本项目由 Maxime Rivest 的 [`riddle`](https://github.com/MaximeRivest/riddle) 演进而来，并保留原项目历史和 MIT 署名。0.8.3 的正式运行方式是作为 ReMagic 托管的驻留应用；AppLoad、镇纸和旧独占脚本都不是其运行依赖。
 
 ## 与上游 riddle 的主要区别
 
-| 方面 | 上游 | MagicPaper 0.8.2 |
+| 方面 | 上游 | MagicPaper 0.8.3 |
 |---|---|---|
 | 设备与运行方式 | Paper Pro、AppLoad/独占模式 | Paper Pro 与 Paper Pro Move，由 ReMagic 自动适配 QTFB、笔/触摸与生命周期 |
 | 定位 | Tom Riddle 日记 | 中文优先的纸面助手，简称 MP |
@@ -139,6 +139,8 @@ MAGICPAPER_OCR_TIMEOUT_SECONDS=60
 ```
 
 `MAGICPAPER_OCR_SPECULATIVE=off` 可关闭一秒预请求，避免停顿后继续书写造成已计费但弃用的远端任务。完整变量和注释见 `oracle.env.example`。DeepSeek/OpenAI 等模型密钥使用 ReMagic 的电脑端配置命令写入权限为 `0600` 的供应商文件，不写进 `oracle.env`，也不会被传给 MagicPaper 进程。
+
+首次启动默认使用 OpenAI 的 `gpt-5.6-terra`；DeepSeek 作为可选供应商，配置密钥后可在“设置 → Pi”中切换。已保存的供应商选择不会被应用升级覆盖。
 
 密钥不得提交到 Git。若密钥曾出现在终端日志、聊天或仓库历史中，应立即在提供商控制台撤销并重建。
 

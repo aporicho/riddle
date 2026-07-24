@@ -40,10 +40,10 @@ fn agent_frames_are_big_endian_and_bounded() {
 }
 
 #[test]
-fn profile_defaults_to_deepseek_flash_without_system_tools() {
+fn profile_defaults_to_openai_terra_without_system_tools() {
     let profile = AgentProfile::from_preferences(PiPreferenceValues::default());
-    assert_eq!(profile.provider, "deepseek");
-    assert_eq!(profile.model, "deepseek-v4-flash");
+    assert_eq!(profile.provider, "openai");
+    assert_eq!(profile.model, "gpt-5.6-terra");
     assert_eq!(profile.thinking, "off");
     assert!(profile.tools);
     assert_eq!(safe_tool_specs(true), Value::Array(Vec::new()));

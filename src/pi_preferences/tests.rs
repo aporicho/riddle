@@ -14,13 +14,13 @@ fn missing_corrupt_and_future_settings_use_agent_defaults() {
     let dir = temp_dir("defaults");
     let preferences = PiPreferences::open_in(&dir);
     assert_eq!(preferences.values(), PiPreferenceValues::default());
-    assert_eq!(preferences.values().provider, PiProvider::DeepSeek);
+    assert_eq!(preferences.values().provider, PiProvider::OpenAi);
     assert_eq!(
         preferences
             .values()
             .model
             .model_id(preferences.values().provider),
-        "deepseek-v4-flash"
+        "gpt-5.6-terra"
     );
     assert_eq!(preferences.values().thinking, PiThinking::Off);
     assert!(preferences.values().tools_enabled);

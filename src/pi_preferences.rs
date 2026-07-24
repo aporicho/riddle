@@ -14,8 +14,8 @@ const MAX_PI_SETTINGS_BYTES: usize = 64 * 1024;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PiProvider {
-    #[default]
     DeepSeek,
+    #[default]
     #[serde(rename = "openai", alias = "open_ai_codex")]
     OpenAi,
 }
@@ -148,7 +148,7 @@ pub(crate) struct PiPreferenceValues {
 impl Default for PiPreferenceValues {
     fn default() -> Self {
         Self {
-            provider: PiProvider::DeepSeek,
+            provider: PiProvider::OpenAi,
             model: PiModel::DeepSeekV4Flash,
             thinking: PiThinking::Off,
             tools_enabled: true,
