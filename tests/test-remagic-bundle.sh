@@ -29,7 +29,7 @@ expected_payload_sha=$(
 expected_content_id=$(
     {
         printf 'remagic-bundle-content-v1\0'
-        printf '%s\0%s\0%s\0' magicpaper magicpaper 0.8.0
+        printf '%s\0%s\0%s\0' magicpaper magicpaper 0.8.1
         printf '%s\0%s\0%s\0%s\n' \
             manifest.toml 644 "$manifest_size" "$manifest_sha"
         printf '%s\0%s\0%s\0%s\n' \
@@ -37,7 +37,7 @@ expected_content_id=$(
     } | sha256sum | awk '{print $1}'
 )
 python3 "$ROOT/scripts/remagic-bundle.py" create "$CANONICAL" \
-    --app-id magicpaper --package magicpaper --version 0.8.0
+    --app-id magicpaper --package magicpaper --version 0.8.1
 python3 - "$CANONICAL/bundle.json" "$expected_payload_sha" "$expected_content_id" <<'PY'
 import json
 import sys
@@ -60,7 +60,7 @@ build_bundle() {
 }
 
 (umask 077; build_bundle)
-ARCHIVE=$OUT/magicpaper-0.8.0-universal_aarch64.tar.gz
+ARCHIVE=$OUT/magicpaper-0.8.1-universal_aarch64.tar.gz
 [ -s "$ARCHIVE" ]
 first_sha=$(sha256sum "$ARCHIVE" | awk '{print $1}')
 (umask 022; build_bundle)
@@ -69,7 +69,7 @@ first_sha=$(sha256sum "$ARCHIVE" | awk '{print $1}')
 mkdir -p "$TMP/extracted"
 tar -xzf "$ARCHIVE" -C "$TMP/extracted"
 python3 "$ROOT/scripts/remagic-bundle.py" verify "$TMP/extracted" \
-    --app-id magicpaper --package magicpaper --version 0.8.0
+    --app-id magicpaper --package magicpaper --version 0.8.1
 
 python3 - "$TMP/extracted/bundle.json" <<'PY'
 import json
@@ -136,7 +136,7 @@ MAGICPAPER_TEST_MODE=1 \
 # A changed payload invalidates both the file list and content-addressed ID.
 printf 'tampered\n' >> "$TMP/extracted/payload/bin/magicpaper"
 if python3 "$ROOT/scripts/remagic-bundle.py" verify "$TMP/extracted" \
-    --app-id magicpaper --package magicpaper --version 0.8.0 >/dev/null 2>&1; then
+    --app-id magicpaper --package magicpaper --version 0.8.1 >/dev/null 2>&1; then
     echo "bundle verifier accepted modified payload" >&2
     exit 1
 fi
@@ -145,7 +145,7 @@ fi
 cp "$ROOT/manifests/magicpaper.toml" "$TMP/extracted/manifest.toml"
 ln -s magicpaper "$TMP/extracted/payload/bin/unsafe-link"
 if python3 "$ROOT/scripts/remagic-bundle.py" create "$TMP/extracted" \
-    --app-id magicpaper --package magicpaper --version 0.8.0 >/dev/null 2>&1; then
+    --app-id magicpaper --package magicpaper --version 0.8.1 >/dev/null 2>&1; then
     echo "bundle generator accepted a symlink" >&2
     exit 1
 fi

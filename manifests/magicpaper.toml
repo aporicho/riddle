@@ -3,7 +3,7 @@ id = "magicpaper"
 name = "MagicPaper"
 kind = "user"
 description = "手写 AI 魔法纸"
-version = "0.8.0"
+version = "0.8.1"
 package = "magicpaper"
 supported_devices = ["paper_pro", "paper_pro_move"]
 supported_os = []
@@ -58,6 +58,7 @@ migration_timeout_ms = 120000
 
 [runtime]
 profile = "qtfb_compat"
+background_execution = "freeze"
 required_libraries = []
 
 [runtime.directories]

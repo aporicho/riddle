@@ -6,9 +6,11 @@
 //! Master's page is idle; it never issues a competing heartbeat request.
 
 use crate::{memory, oracle, tasks, todos};
+use std::ffi::CString;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,21 +32,9 @@ fn queue_path() -> PathBuf {
 pub fn run() -> io::Result<()> {
     let _scheduler_lease = tasks::acquire_scheduler_lease()?;
     eprintln!("magic-paper-agent: sole scheduled-task owner ready");
-    let mut retry = Duration::from_secs(30);
-    let oracle = loop {
-        match oracle::Oracle::spawn(true) {
-            Ok(oracle) => break oracle,
-            Err(error) => {
-                eprintln!("magic-paper-agent: oracle unavailable: {error}");
-                std::thread::sleep(retry);
-                retry = (retry * 2).min(Duration::from_secs(30 * 60));
-            }
-        }
-    };
-
     loop {
         let Some(mut task_store) = tasks::TaskStore::open() else {
-            std::thread::sleep(Duration::from_secs(30));
+            wait_for_task_change(Some(Duration::from_secs(5 * 60)));
             continue;
         };
         let now = unix_now();
@@ -52,11 +42,28 @@ pub fn run() -> io::Result<()> {
         if due.is_empty() {
             let wait = task_store
                 .next_due()
-                .map(|due| due.saturating_sub(now).clamp(1, 30))
-                .unwrap_or(30);
-            std::thread::sleep(Duration::from_secs(wait));
+                .map(|due| Duration::from_secs(due.saturating_sub(now).max(1)));
+            wait_for_task_change(wait);
             continue;
         }
+
+        let _work_lease = match WorkLease::begin("scheduled MagicPaper task", 180_000) {
+            Ok(lease) => lease,
+            Err(error) => {
+                eprintln!("magic-paper-agent: power lease unavailable: {error}");
+                wait_for_task_change(Some(Duration::from_secs(5 * 60)));
+                continue;
+            }
+        };
+
+        let oracle = match oracle::Oracle::spawn(true) {
+            Ok(oracle) => oracle,
+            Err(error) => {
+                eprintln!("magic-paper-agent: oracle unavailable: {error}");
+                wait_for_task_change(Some(Duration::from_secs(5 * 60)));
+                continue;
+            }
+        };
 
         let context = build_context(&task_store);
         let prompt = tasks::heartbeat_prompt(&due);
@@ -86,7 +93,7 @@ pub fn run() -> io::Result<()> {
             }
         }
         if failed || reply.trim().is_empty() {
-            std::thread::sleep(Duration::from_secs(30));
+            wait_for_task_change(Some(Duration::from_secs(5 * 60)));
             continue;
         }
         if !task_store.complete_due_if_unchanged(&due, unix_now())? {
@@ -101,6 +108,116 @@ pub fn run() -> io::Result<()> {
             due.len()
         );
     }
+}
+
+struct WorkLease {
+    id: u64,
+}
+
+impl WorkLease {
+    fn begin(reason: &str, requested_ms: u64) -> io::Result<Self> {
+        let response = runtime_request(serde_json::json!({
+            "version": 2,
+            "request_id": format!("agent-work-{}", std::process::id()),
+            "command": "begin_work",
+            "class": "agent_turn",
+            "reason": reason,
+            "requested_ms": requested_ms,
+        }))?;
+        let id = response
+            .get("lease")
+            .and_then(|lease| lease.get("id"))
+            .and_then(serde_json::Value::as_u64)
+            .filter(|id| *id != 0)
+            .ok_or_else(|| io::Error::other("manager did not return a work lease"))?;
+        Ok(Self { id })
+    }
+}
+
+impl Drop for WorkLease {
+    fn drop(&mut self) {
+        let _ = runtime_request(serde_json::json!({
+            "version": 2,
+            "request_id": format!("agent-finish-{}", std::process::id()),
+            "command": "finish_work",
+            "lease_id": self.id,
+            "visible_result": false,
+        }));
+    }
+}
+
+fn runtime_request(request: serde_json::Value) -> io::Result<serde_json::Value> {
+    let socket = std::env::var("REMAGIC_RUNTIME_SOCKET")
+        .unwrap_or_else(|_| "/run/remagic/runtime-app.sock".into());
+    let mut stream = UnixStream::connect(socket)?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    serde_json::to_writer(&mut stream, &request).map_err(io::Error::other)?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .take(64 * 1024)
+        .read_line(&mut response)?;
+    let value: serde_json::Value = serde_json::from_str(&response).map_err(io::Error::other)?;
+    if value.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        Ok(value)
+    } else {
+        Err(io::Error::other(
+            value
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("manager rejected work lease"),
+        ))
+    }
+}
+
+/// Wait on the task directory because task persistence uses atomic rename.
+/// With no active task this blocks forever and therefore produces zero timer
+/// wakeups; the exact next due time is the only timeout for active tasks.
+fn wait_for_task_change(timeout: Option<Duration>) {
+    let directory = tasks::watch_dir();
+    if fs::create_dir_all(&directory).is_err() {
+        std::thread::sleep(timeout.unwrap_or(Duration::from_secs(60 * 60)));
+        return;
+    }
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
+    if fd < 0 {
+        std::thread::sleep(timeout.unwrap_or(Duration::from_secs(60 * 60)));
+        return;
+    }
+    let path = match CString::new(directory.as_os_str().as_encoded_bytes()) {
+        Ok(path) => path,
+        Err(_) => {
+            unsafe { libc::close(fd) };
+            return;
+        }
+    };
+    let mask = libc::IN_CLOSE_WRITE
+        | libc::IN_MOVED_TO
+        | libc::IN_CREATE
+        | libc::IN_DELETE
+        | libc::IN_ATTRIB;
+    if unsafe { libc::inotify_add_watch(fd, path.as_ptr(), mask) } < 0 {
+        unsafe { libc::close(fd) };
+        std::thread::sleep(timeout.unwrap_or(Duration::from_secs(60 * 60)));
+        return;
+    }
+    let timeout_ms = timeout.map_or(-1, |duration| {
+        duration.as_millis().clamp(1, i32::MAX as u128) as i32
+    });
+    let mut descriptor = libc::pollfd {
+        fd,
+        events: libc::POLLIN | libc::POLLERR | libc::POLLHUP,
+        revents: 0,
+    };
+    loop {
+        let result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+        if result >= 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            break;
+        }
+    }
+    unsafe { libc::close(fd) };
 }
 
 fn build_context(task_store: &tasks::TaskStore) -> oracle::TurnContext {

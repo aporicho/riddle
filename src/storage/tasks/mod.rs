@@ -96,6 +96,10 @@ fn task_dir() -> PathBuf {
     )
 }
 
+pub(crate) fn watch_dir() -> PathBuf {
+    task_dir()
+}
+
 impl TaskStore {
     pub fn open() -> Option<Self> {
         match std::env::var("MAGICPAPER_TASKS").as_deref() {
