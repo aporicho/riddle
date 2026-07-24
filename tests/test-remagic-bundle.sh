@@ -2,6 +2,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+APP_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT/Cargo.toml" | head -n 1)
 TMP=$(mktemp -d /tmp/magicpaper-bundle-test.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 FIXTURE=$TMP/fixture
@@ -60,8 +61,11 @@ build_bundle() {
 }
 
 (umask 077; build_bundle)
-ARCHIVE=$OUT/magicpaper-0.8.1-universal_aarch64.tar.gz
-[ -s "$ARCHIVE" ]
+ARCHIVE=$OUT/magicpaper-$APP_VERSION-universal_aarch64.tar.gz
+if [ ! -s "$ARCHIVE" ]; then
+    echo "missing current-version bundle: $ARCHIVE" >&2
+    exit 1
+fi
 first_sha=$(sha256sum "$ARCHIVE" | awk '{print $1}')
 (umask 022; build_bundle)
 [ "$first_sha" = "$(sha256sum "$ARCHIVE" | awk '{print $1}')" ]
@@ -69,7 +73,7 @@ first_sha=$(sha256sum "$ARCHIVE" | awk '{print $1}')
 mkdir -p "$TMP/extracted"
 tar -xzf "$ARCHIVE" -C "$TMP/extracted"
 python3 "$ROOT/scripts/remagic-bundle.py" verify "$TMP/extracted" \
-    --app-id magicpaper --package magicpaper --version 0.8.1
+    --app-id magicpaper --package magicpaper --version "$APP_VERSION"
 
 python3 - "$TMP/extracted/bundle.json" <<'PY'
 import json
@@ -136,7 +140,7 @@ MAGICPAPER_TEST_MODE=1 \
 # A changed payload invalidates both the file list and content-addressed ID.
 printf 'tampered\n' >> "$TMP/extracted/payload/bin/magicpaper"
 if python3 "$ROOT/scripts/remagic-bundle.py" verify "$TMP/extracted" \
-    --app-id magicpaper --package magicpaper --version 0.8.1 >/dev/null 2>&1; then
+    --app-id magicpaper --package magicpaper --version "$APP_VERSION" >/dev/null 2>&1; then
     echo "bundle verifier accepted modified payload" >&2
     exit 1
 fi
@@ -145,7 +149,7 @@ fi
 cp "$ROOT/manifests/magicpaper.toml" "$TMP/extracted/manifest.toml"
 ln -s magicpaper "$TMP/extracted/payload/bin/unsafe-link"
 if python3 "$ROOT/scripts/remagic-bundle.py" create "$TMP/extracted" \
-    --app-id magicpaper --package magicpaper --version 0.8.1 >/dev/null 2>&1; then
+    --app-id magicpaper --package magicpaper --version "$APP_VERSION" >/dev/null 2>&1; then
     echo "bundle generator accepted a symlink" >&2
     exit 1
 fi
