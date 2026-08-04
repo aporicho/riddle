@@ -63,7 +63,7 @@ impl Preview {
     pub const fn rect(self) -> HitRect {
         match self {
             Self::Press { rect, .. } => rect,
-            Self::Strike { text, .. } => text,
+            Self::Strike { card, .. } => card,
         }
     }
 
@@ -117,11 +117,11 @@ impl Preview {
                 ..
             } => invert_mono(surface, rect),
             Self::Strike {
-                text,
+                card,
                 start,
                 line_to: Some(to),
                 ..
-            } => draw_clipped_line(surface, start, to, text, 3),
+            } => draw_clipped_line(surface, start, to, card, 3),
             _ => {}
         }
     }

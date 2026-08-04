@@ -155,6 +155,7 @@ fn preview_inverts_controls_but_only_pen_text_can_preview_a_strike() {
         .begin_preview(PointerTool::Pen, Point::new(300, 550))
         .unwrap();
     assert!(!strike.is_visible(), "down must not paint a dot");
+    assert_eq!(strike.rect(), panel.rows[1].card);
     assert!(!strike.update(Point::new(320, 552)));
     assert!(!strike.is_visible());
     assert!(strike.update(Point::new(390, 552)));
@@ -166,6 +167,44 @@ fn preview_inverts_controls_but_only_pen_text_can_preview_a_strike() {
     assert!(!from_margin.is_visible());
     assert!(from_margin.update(Point::new(400, 550)));
     assert!(from_margin.is_visible());
+}
+
+#[test]
+fn strike_preview_draws_a_single_row_line_instead_of_a_text_box() {
+    let panel = panel_with_rows();
+    let row = panel.rows[1];
+    let mut pixels = vec![0xFF; 1600 * 800 * 4];
+    let mut surf = Surface::new(
+        pixels.as_mut_ptr(),
+        pixels.len(),
+        1600,
+        800,
+        1600 * 4,
+        crate::surface::PixFmt::Rgb32,
+    );
+
+    let mut preview = panel
+        .begin_preview(PointerTool::Pen, Point::new(120, 550))
+        .unwrap();
+    assert_eq!(preview.rect(), row.card);
+    assert!(preview.update(Point::new(1000, 550)));
+    preview.render(&mut surf);
+
+    assert!(
+        surf.luma(130, 550) < 128,
+        "left row margin should show the same strike line"
+    );
+    assert!(
+        surf.luma(250, 550) < 128,
+        "text area should show the strike line"
+    );
+    assert!(
+        surf.luma(950, 550) < 128,
+        "right side after the text should not be clipped away"
+    );
+    assert_eq!(surf.luma(row.card.x0 - 1, 550), 255);
+    assert_eq!(surf.luma(250, row.card.y0 - 1), 255);
+    assert_eq!(surf.luma(250, row.card.y1), 255);
 }
 
 #[test]
