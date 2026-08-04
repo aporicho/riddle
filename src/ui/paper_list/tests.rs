@@ -10,7 +10,6 @@ fn test_font() -> FontBook {
 
 fn panel_with_rows() -> PaperList {
     PaperList {
-        saved: Vec::new(),
         rows: vec![
             Row {
                 number: 1,

@@ -32,6 +32,79 @@ pub const BLACK: u16 = 0x0000;
 /// Old ink: how the diary writes its memories (a readable e-ink gray).
 pub const FADED: u16 = 0x7BCF;
 
+pub struct OwnedSurface {
+    bytes: Vec<u8>,
+    w: usize,
+    h: usize,
+    stride: usize,
+    fmt: PixFmt,
+}
+
+impl OwnedSurface {
+    pub fn new_like(template: &Surface, fill: u16) -> Self {
+        let mut surface = Self {
+            bytes: vec![0; template.stride * template.h],
+            w: template.w,
+            h: template.h,
+            stride: template.stride,
+            fmt: template.fmt,
+        };
+        surface
+            .as_surface()
+            .fill_rect(0, 0, template.w, template.h, fill);
+        surface
+    }
+
+    pub fn as_surface(&mut self) -> Surface {
+        Surface::new(
+            self.bytes.as_mut_ptr(),
+            self.bytes.len(),
+            self.w,
+            self.h,
+            self.stride,
+            self.fmt,
+        )
+    }
+
+    pub fn copy_from_surface(&mut self, source: &Surface, rect: crate::ui::pointer::HitRect) {
+        let Some(rect) = rect.clipped_to(self.w, self.h) else {
+            return;
+        };
+        let pixels = source.copy_rect(
+            rect.x0 as usize,
+            rect.y0 as usize,
+            rect.width() as usize,
+            rect.height() as usize,
+        );
+        self.as_surface().paste_rect(
+            rect.x0 as usize,
+            rect.y0 as usize,
+            rect.width() as usize,
+            rect.height() as usize,
+            &pixels,
+        );
+    }
+
+    pub fn copy_to_surface(&mut self, target: &mut Surface, rect: crate::ui::pointer::HitRect) {
+        let Some(rect) = rect.clipped_to(self.w, self.h) else {
+            return;
+        };
+        let pixels = self.as_surface().copy_rect(
+            rect.x0 as usize,
+            rect.y0 as usize,
+            rect.width() as usize,
+            rect.height() as usize,
+        );
+        target.paste_rect(
+            rect.x0 as usize,
+            rect.y0 as usize,
+            rect.width() as usize,
+            rect.height() as usize,
+            &pixels,
+        );
+    }
+}
+
 #[inline]
 fn expand565(c: u16) -> (u8, u8, u8) {
     let r = ((c >> 11) & 0x1f) as u32;

@@ -12,6 +12,7 @@ use crate::ui;
 use crate::ui::pi_settings::PiAgentStatus;
 use crate::ui::pointer::Gesture;
 
+use super::layers::ModalLayers;
 use super::state::State;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,25 +23,35 @@ pub(super) enum PiAgentAction {
     NewSession,
 }
 
-pub(super) fn open(state: &mut State, surface: &mut Surface, fonts: &FontBook, display: &Display) {
+pub(super) fn open(
+    state: &mut State,
+    modal_layers: &mut ModalLayers,
+    surface: &mut Surface,
+    fonts: &FontBook,
+    display: &Display,
+) {
     let old = std::mem::replace(state, State::Listening { last_pen: None });
     let State::Settings { panel: settings } = old else {
         *state = old;
         return;
     };
-    let panel = ui::pi_settings::PiSettingsPanel::show(
-        surface,
-        fonts,
-        PiPreferences::open().values(),
-        PiAgentStatus::Waiting,
-    );
+    let panel = modal_layers.replace_ui(surface, |ui| {
+        ui::pi_settings::PiSettingsPanel::show(
+            ui,
+            fonts,
+            PiPreferences::open().values(),
+            PiAgentStatus::Waiting,
+        )
+    });
     *state = State::PiSettings { panel, settings };
+    modal_layers.compose_all(surface);
     display.present_all(surface.w, surface.h, RefreshIntent::Content);
     eprintln!("magic-paper: Pi settings opened from settings");
 }
 
 pub(super) fn finish_stroke(
     state: &mut State,
+    modal_layers: &mut ModalLayers,
     surface: &mut Surface,
     fonts: &FontBook,
     display: &Display,
@@ -52,26 +63,26 @@ pub(super) fn finish_stroke(
     };
     match action {
         Some(ui::pi_settings::Action::SetProvider(provider)) => {
-            update(state, surface, fonts, display, |values| {
+            update(state, modal_layers, surface, fonts, display, |values| {
                 values.provider = provider;
                 values.thinking = values.thinking.normalized(provider);
             });
             return Some(PiAgentAction::ReloadProfile);
         }
         Some(ui::pi_settings::Action::ToggleModel) => {
-            update(state, surface, fonts, display, |values| {
+            update(state, modal_layers, surface, fonts, display, |values| {
                 values.model = values.model.toggled();
             });
             return Some(PiAgentAction::ReloadProfile);
         }
         Some(ui::pi_settings::Action::SetThinking(thinking)) => {
-            update(state, surface, fonts, display, |values| {
+            update(state, modal_layers, surface, fonts, display, |values| {
                 values.thinking = thinking;
             });
             return Some(PiAgentAction::ReloadProfile);
         }
         Some(ui::pi_settings::Action::SetTools(enabled)) => {
-            update(state, surface, fonts, display, |values| {
+            update(state, modal_layers, surface, fonts, display, |values| {
                 values.tools_enabled = enabled;
             });
             return Some(PiAgentAction::ReloadProfile);
@@ -85,9 +96,12 @@ pub(super) fn finish_stroke(
         Some(ui::pi_settings::Action::NewSession) => {
             return Some(PiAgentAction::NewSession);
         }
-        Some(ui::pi_settings::Action::Dismiss) => dismiss(state, surface, display),
+        Some(ui::pi_settings::Action::Dismiss) => {
+            dismiss(state, modal_layers, surface, fonts, display)
+        }
         Some(ui::pi_settings::Action::Redraw) => redraw(
             state,
+            modal_layers,
             surface,
             fonts,
             display,
@@ -101,6 +115,7 @@ pub(super) fn finish_stroke(
 
 pub(super) fn set_status(
     state: &mut State,
+    modal_layers: &mut ModalLayers,
     surface: &mut Surface,
     fonts: &FontBook,
     display: &Display,
@@ -117,7 +132,10 @@ pub(super) fn set_status(
         crate::oracle::AgentControlStatus::StorageError => PiAgentStatus::StorageError,
         crate::oracle::AgentControlStatus::NetworkError => PiAgentStatus::NetworkError,
     };
-    let region = panel.set_status(surface, fonts, status);
+    let Some(region) = modal_layers.with_ui(|ui| panel.set_status(ui, fonts, status)) else {
+        return;
+    };
+    modal_layers.compose_rect(surface, region);
     display.present_region(
         region.x0,
         region.y0,
@@ -129,6 +147,7 @@ pub(super) fn set_status(
 
 fn update(
     state: &mut State,
+    modal_layers: &mut ModalLayers,
     surface: &mut Surface,
     fonts: &FontBook,
     display: &Display,
@@ -142,6 +161,7 @@ fn update(
     }
     redraw(
         state,
+        modal_layers,
         surface,
         fonts,
         display,
@@ -152,6 +172,7 @@ fn update(
 
 fn redraw(
     state: &mut State,
+    modal_layers: &mut ModalLayers,
     surface: &mut Surface,
     fonts: &FontBook,
     display: &Display,
@@ -159,19 +180,35 @@ fn redraw(
     status: PiAgentStatus,
 ) {
     if let State::PiSettings { panel, .. } = state {
-        panel.redraw(surface, fonts, values, status);
+        let _ = modal_layers.with_ui(|ui| panel.redraw(ui, fonts, values, status));
     }
+    modal_layers.compose_all(surface);
     display.present_all(surface.w, surface.h, RefreshIntent::Content);
 }
 
-fn dismiss(state: &mut State, surface: &mut Surface, display: &Display) {
+fn dismiss(
+    state: &mut State,
+    modal_layers: &mut ModalLayers,
+    surface: &mut Surface,
+    fonts: &FontBook,
+    display: &Display,
+) {
     let old = std::mem::replace(state, State::Listening { last_pen: None });
     if let State::PiSettings { panel, settings } = old {
-        panel.dismiss(surface);
+        let _ = panel;
+        let mut settings = settings;
+        let _ = modal_layers.with_ui(|ui| {
+            settings.redraw(
+                ui,
+                fonts,
+                crate::preferences::UserPreferences::open().values(),
+            );
+        });
         *state = State::Settings { panel: settings };
     } else {
         *state = old;
     }
+    modal_layers.compose_all(surface);
     display.present_all(surface.w, surface.h, RefreshIntent::Content);
     eprintln!("magic-paper: Pi settings returned to settings");
 }

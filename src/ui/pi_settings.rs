@@ -131,7 +131,6 @@ impl Preview {
 }
 
 pub(crate) struct PiSettingsPanel {
-    saved: Vec<u8>,
     cards: Vec<Card>,
     status_rect: HitRect,
     values: PiPreferenceValues,
@@ -146,7 +145,6 @@ impl PiSettingsPanel {
         status: PiAgentStatus,
     ) -> Self {
         let mut panel = Self {
-            saved: surface.copy_rect(0, 0, screen_w(), screen_h()),
             cards: Vec::new(),
             status_rect: HitRect::from_xywh(0, 0, 1, 1),
             values,
@@ -271,10 +269,6 @@ impl PiSettingsPanel {
             }),
             Gesture::Swipe { .. } | Gesture::Strike { .. } => Some(Action::Redraw),
         }
-    }
-
-    pub(crate) fn dismiss(self, surface: &mut Surface) {
-        surface.paste_rect(0, 0, screen_w(), screen_h(), &self.saved);
     }
 }
 

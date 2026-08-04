@@ -153,16 +153,12 @@ struct Row {
 }
 
 pub struct FontPanel {
-    saved: Vec<u8>,
     rows: Vec<Row>,
 }
 
 impl FontPanel {
     pub fn show(surf: &mut Surface, fonts: &FontBook) -> Self {
-        let mut panel = Self {
-            saved: surf.copy_rect(0, 0, screen_w(), screen_h()),
-            rows: Vec::new(),
-        };
+        let mut panel = Self { rows: Vec::new() };
         panel.redraw(surf, fonts);
         panel
     }
@@ -258,10 +254,6 @@ impl FontPanel {
                 }))
             }
         }
-    }
-
-    pub fn dismiss(self, surf: &mut Surface) {
-        surf.paste_rect(0, 0, screen_w(), screen_h(), &self.saved);
     }
 }
 

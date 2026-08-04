@@ -3,6 +3,7 @@
 mod cli;
 mod context;
 mod input;
+mod layers;
 mod layout_controller;
 mod lifecycle;
 mod lists;

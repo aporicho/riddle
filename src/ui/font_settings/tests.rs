@@ -11,7 +11,6 @@ fn test_font() -> FontBook {
 
 fn panel() -> FontPanel {
     FontPanel {
-        saved: Vec::new(),
         rows: vec![
             Row {
                 id: FontId::ChenYuluoyan,

@@ -68,7 +68,7 @@ fn rejects_non_question_marks() {
 }
 
 #[test]
-fn modal_renders_and_restores() {
+fn modal_renders_and_routes_contacts() {
     crate::fb::test_init_screen();
     let (w, h) = (screen_w(), screen_h());
     let mut buf = vec![0xFFu8; w * h * 4];
@@ -80,12 +80,16 @@ fn modal_renders_and_restores() {
         None,
     );
 
-    // Scribble something under the panel area so restore is observable.
+    // Add background ink so the modal is exercised over a non-empty page.
     surf.fill_rect(700, 1000, 200, 200, BLACK);
-    let before = surf.copy_rect(0, 0, w, h);
-
     let panel = show(&mut surf, &font, true);
-    let (px, py, pw, ph) = panel.region.rect();
+    let panel_rect = panel.panel_rect();
+    let (px, py, pw, ph) = (
+        panel_rect.x0,
+        panel_rect.y0,
+        panel_rect.width(),
+        panel_rect.height(),
+    );
     assert!(pw > 400 && ph > 400, "panel too small: {pw}x{ph}");
     let close = panel.close_rect();
     let close_point = Point::new((close.x0 + close.x1) / 2, (close.y0 + close.y1) / 2);
@@ -145,10 +149,6 @@ fn modal_renders_and_restores() {
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header().unwrap().write_image_data(&gray).unwrap();
     eprintln!("modal snapshot: {}", out.display());
-
-    // Dismissing must restore the page byte-for-byte.
-    panel.dismiss(&mut surf);
-    assert_eq!(before, surf.copy_rect(0, 0, w, h), "restore is not exact");
 }
 
 fn ordinary_point_outside(rect: HitRect) -> Point {

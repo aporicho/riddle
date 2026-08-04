@@ -192,7 +192,6 @@ struct Row {
 }
 
 pub struct PaperList {
-    saved: Vec<u8>,
     rows: Vec<Row>,
     selectable: bool,
     page: usize,
@@ -253,9 +252,7 @@ impl PaperList {
         content: Content<'_>,
         selectable: bool,
     ) -> Self {
-        let saved = surf.copy_rect(0, 0, screen_w(), screen_h());
         let mut panel = Self {
-            saved,
             rows: Vec::new(),
             selectable,
             page: 0,
@@ -440,10 +437,6 @@ impl PaperList {
             }
             _ => Some(Action::Redraw),
         }
-    }
-
-    pub fn dismiss(self, surf: &mut Surface) {
-        surf.paste_rect(0, 0, screen_w(), screen_h(), &self.saved);
     }
 
     pub fn refresh_region(&self) -> crate::fb::BBox {

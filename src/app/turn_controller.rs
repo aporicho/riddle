@@ -11,6 +11,7 @@ use crate::platform::{AppToken, RefreshIntent};
 use crate::surface::Surface;
 use crate::{display, fonts, memory, oracle::Event, reader, runtime_control, tasks, todos, ui};
 
+use super::layers::ModalLayers;
 use super::lists::{accept_transcript, apply_local_command, HISTORY_VISIBLE};
 use super::oracle_controller::OracleTurn;
 use super::refresh_controller::RefreshController;
@@ -24,6 +25,7 @@ pub(super) struct FirstEventContext<'a> {
     pub(super) task_store: &'a mut Option<tasks::TaskStore>,
     pub(super) todo_store: &'a mut Option<todos::TodoStore>,
     pub(super) next_heartbeat: &'a mut Option<Instant>,
+    pub(super) modal_layers: &'a mut ModalLayers,
     pub(super) surface: &'a mut Surface,
     pub(super) display: &'a display::Display,
     pub(super) refresh: &'a mut RefreshController,
@@ -112,15 +114,17 @@ fn open_task_list(ctx: &mut FirstEventContext<'_>) -> State {
         .as_ref()
         .map(|store| store.panel_enabled())
         .unwrap_or_default();
-    let panel = ui::paper_list::PaperList::show(
-        ctx.surface,
-        ctx.font,
-        "任务列表",
-        "尚无任务",
-        "横划可删除 · 点右侧方框启用或停用 · 点空白退出",
-        &lines,
-        Some(&enabled),
-    );
+    let panel = ctx.modal_layers.replace_ui(ctx.surface, |surface| {
+        ui::paper_list::PaperList::show(
+            surface,
+            ctx.font,
+            "任务列表",
+            "尚无任务",
+            "横划可删除 · 点右侧方框启用或停用 · 点空白退出",
+            &lines,
+            Some(&enabled),
+        )
+    });
     present_panel(ctx, "recurring-task");
     State::TaskList { panel }
 }
@@ -131,21 +135,25 @@ fn open_todo_list(ctx: &mut FirstEventContext<'_>) -> State {
         .as_ref()
         .map(|store| store.panel_lines())
         .unwrap_or_default();
-    let panel = ui::paper_list::PaperList::show(
-        ctx.surface,
-        ctx.font,
-        "TODO 列表",
-        "尚无 TODO",
-        "横划 TODO 可删除 · 点击空白处退出",
-        &lines,
-        None,
-    );
+    let panel = ctx.modal_layers.replace_ui(ctx.surface, |surface| {
+        ui::paper_list::PaperList::show(
+            surface,
+            ctx.font,
+            "TODO 列表",
+            "尚无 TODO",
+            "横划 TODO 可删除 · 点击空白处退出",
+            &lines,
+            None,
+        )
+    });
     present_panel(ctx, "TODO");
     State::TodoList { panel }
 }
 
 fn open_font_list(ctx: &mut FirstEventContext<'_>) -> State {
-    let panel = ui::font_settings::FontPanel::show(ctx.surface, ctx.font);
+    let panel = ctx.modal_layers.replace_ui(ctx.surface, |surface| {
+        ui::font_settings::FontPanel::show(surface, ctx.font)
+    });
     present_panel(ctx, "font");
     State::FontList {
         panel,
@@ -154,7 +162,10 @@ fn open_font_list(ctx: &mut FirstEventContext<'_>) -> State {
 }
 
 fn open_settings(ctx: &mut FirstEventContext<'_>) -> State {
-    let panel = ui::settings::SettingsPanel::show(ctx.surface, ctx.font, ctx.refresh.values());
+    let values = ctx.refresh.values();
+    let panel = ctx.modal_layers.replace_ui(ctx.surface, |surface| {
+        ui::settings::SettingsPanel::show(surface, ctx.font, values)
+    });
     present_panel(ctx, "settings");
     State::Settings { panel }
 }
@@ -165,30 +176,35 @@ fn open_history_list(ctx: &mut FirstEventContext<'_>) -> State {
         .as_ref()
         .map(|store| store.panel_lines(HISTORY_VISIBLE))
         .unwrap_or_default();
-    let panel = ui::paper_list::PaperList::show(
-        ctx.surface,
-        ctx.font,
-        "对话历史",
-        "尚无历史",
-        "横划一段历史可删除 · 点击空白处退出",
-        &lines,
-        None,
-    );
+    let panel = ctx.modal_layers.replace_ui(ctx.surface, |surface| {
+        ui::paper_list::PaperList::show(
+            surface,
+            ctx.font,
+            "对话历史",
+            "尚无历史",
+            "横划一段历史可删除 · 点击空白处退出",
+            &lines,
+            None,
+        )
+    });
     present_panel(ctx, "history");
     State::HistoryList { panel }
 }
 
-fn present_panel(ctx: &FirstEventContext<'_>, name: &str) {
+fn present_panel(ctx: &mut FirstEventContext<'_>, name: &str) {
+    ctx.modal_layers.compose_all(ctx.surface);
     ctx.display
         .present_all(ctx.surface.w, ctx.surface.h, RefreshIntent::Content);
     eprintln!("magic-paper: {name} list opened");
 }
 
 fn open_help(ctx: &mut FirstEventContext<'_>) -> State {
-    let panel = ui::help::show(ctx.surface, ctx.font, ctx.takeover);
-    let (x, y, width, height) = panel.region.rect();
+    let panel = ctx.modal_layers.replace_ui(ctx.surface, |surface| {
+        ui::help::show(surface, ctx.font, ctx.takeover)
+    });
+    ctx.modal_layers.compose_all(ctx.surface);
     ctx.display
-        .present_region(x, y, width, height, RefreshIntent::Ui);
+        .present_all(ctx.surface.w, ctx.surface.h, RefreshIntent::Content);
     State::Help {
         panel: Some(panel),
         until: Instant::now() + Duration::from_secs(180),
@@ -221,14 +237,17 @@ pub(super) fn request_reader_query(
 
 fn show_reader_choices(books: Vec<reader::Book>, ctx: &mut FirstEventContext<'_>) -> State {
     let lines: Vec<String> = books.iter().map(reader::Book::panel_label).collect();
-    let panel = ui::paper_list::PaperList::show_selectable(
-        ctx.surface,
-        ctx.font,
-        "选择要阅读的书",
-        "没有相符书籍",
-        "用笔点书名打开 · 点空白退出",
-        &lines,
-    );
+    let panel = ctx.modal_layers.replace_ui(ctx.surface, |surface| {
+        ui::paper_list::PaperList::show_selectable(
+            surface,
+            ctx.font,
+            "选择要阅读的书",
+            "没有相符书籍",
+            "用笔点书名打开 · 点空白退出",
+            &lines,
+        )
+    });
+    ctx.modal_layers.compose_all(ctx.surface);
     ctx.display
         .present_all(ctx.surface.w, ctx.surface.h, RefreshIntent::Content);
     State::ReaderList { panel, books }

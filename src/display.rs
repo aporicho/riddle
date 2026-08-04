@@ -278,6 +278,7 @@ impl<'a> LegacyLiveInkAdapter<'a> {
         self.display.commit(&self.frame)
     }
 
+    #[allow(dead_code)]
     fn point_damage(frame: PenFrame) -> DamageRect {
         const PAD: i32 = 8;
         DamageRect {

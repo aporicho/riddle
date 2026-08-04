@@ -150,7 +150,6 @@ impl Preview {
 }
 
 pub struct SettingsPanel {
-    saved: Vec<u8>,
     rows: Vec<Row>,
     values: PreferenceValues,
 }
@@ -158,7 +157,6 @@ pub struct SettingsPanel {
 impl SettingsPanel {
     pub fn show(surf: &mut Surface, fonts: &FontBook, values: PreferenceValues) -> Self {
         let mut panel = Self {
-            saved: surf.copy_rect(0, 0, screen_w(), screen_h()),
             rows: Vec::new(),
             values,
         };
@@ -274,10 +272,6 @@ impl SettingsPanel {
             Setting::AnswerDwell => Action::SetAnswerDwell(values.answer_dwell_percent),
             _ => Action::Redraw,
         }
-    }
-
-    pub fn dismiss(self, surf: &mut Surface) {
-        surf.paste_rect(0, 0, screen_w(), screen_h(), &self.saved);
     }
 }
 

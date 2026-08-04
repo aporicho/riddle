@@ -342,9 +342,8 @@ impl Engine<'_> {
         };
         let old = std::mem::replace(&mut self.state, State::Listening { last_pen: None });
         if let State::ReaderList { panel, .. } = old {
-            // Restore the list's save-under in memory without adding a panel
-            // update while the ownership transition is being queued.
-            panel.dismiss(&mut self.surf);
+            let _ = panel;
+            self.modal_layers.dismiss(&mut self.surf);
         }
         let token = self
             .lifecycle
@@ -364,6 +363,7 @@ impl Engine<'_> {
                         task_store: &mut self.task_store,
                         todo_store: &mut self.todo_store,
                         next_heartbeat: &mut self.next_heartbeat,
+                        modal_layers: &mut self.modal_layers,
                         surface: &mut self.surf,
                         display: self.disp,
                         refresh: &mut self.refresh,

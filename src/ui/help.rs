@@ -2,7 +2,7 @@
 //! the diary's gestures; touching the pen to the page dismisses it. Detection
 //! is local geometry — no oracle — so the guide works even with no network.
 
-use crate::fb::{screen_h, screen_w, BBox};
+use crate::fb::{screen_h, screen_w};
 use crate::fonts::FontBook;
 use crate::script;
 use crate::surface::{Surface, BLACK, WHITE};
@@ -163,12 +163,10 @@ fn fitted_base_sizes(body_lines: usize, page_h: usize) -> (f32, f32, f32) {
     (TITLE_PX * fit, BODY_PX * fit, FOOTER_PX * fit)
 }
 
-/// The open guide panel: remembers the pixels it covered.
+/// The open guide panel. Runtime layers own the covered page pixels.
 pub struct Help {
-    pub region: BBox,
     panel_rect: HitRect,
     close_rect: HitRect,
-    saved: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -258,7 +256,6 @@ pub fn show(surf: &mut Surface, font: &FontBook, takeover: bool) -> Help {
     let px = (screen_w() - pw) / 2;
     let py = (screen_h().saturating_sub(ph)) / 2;
 
-    let saved = surf.copy_rect(px, py, pw, ph);
     surf.fill_rect(px, py, pw, ph, WHITE);
     frame(surf, px, py, pw, ph, 4);
     frame(surf, px + 14, py + 14, pw - 28, ph - 28, 1);
@@ -286,14 +283,9 @@ pub fn show(surf: &mut Surface, font: &FontBook, takeover: bool) -> Help {
     draw_hit_frame(surf, close_rect, 2);
     blit_centered(surf, font, FOOTER, footer_base_px, close_x, close_w, y);
 
-    let mut region = BBox::empty();
-    region.add(px as i32, py as i32, 2);
-    region.add((px + pw) as i32, (py + ph) as i32, 2);
     Help {
-        region,
         panel_rect: HitRect::from_xywh(px as i32, py as i32, pw as i32, ph as i32),
         close_rect,
-        saved,
     }
 }
 
@@ -339,19 +331,6 @@ impl Help {
             HelpHit::Panel => HelpAction::Consume,
             HelpHit::Outside => HelpAction::Outside,
         })
-    }
-
-    /// Put back what the panel covered; returns the region to refresh.
-    pub fn dismiss(self, surf: &mut Surface) -> BBox {
-        let panel = self.panel_rect;
-        surf.paste_rect(
-            panel.x0 as usize,
-            panel.y0 as usize,
-            panel.width() as usize,
-            panel.height() as usize,
-            &self.saved,
-        );
-        self.region
     }
 }
 

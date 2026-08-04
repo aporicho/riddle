@@ -9,7 +9,7 @@ use crate::fonts::FontBook;
 use crate::platform::{InputMode, PenFrame, PenPhase, PenTool};
 use crate::qtfb;
 use crate::surface::Surface;
-use crate::ui::pointer::{Gesture, GesturePolicy, HitRect, Point, PointerTool, PreviewBacking};
+use crate::ui::pointer::{Gesture, GesturePolicy, HitRect, Point, PointerTool};
 use crate::ui::{font_settings, help, paper_list, pi_settings, settings};
 
 /// A new pressure-bearing event after this silence closes an orphaned qtfb
@@ -100,40 +100,32 @@ impl ModalPreview {
 
 pub(super) struct ActiveModalPreview {
     target: ModalPreview,
-    backing: PreviewBacking,
+    rect: HitRect,
 }
 
 impl ActiveModalPreview {
-    fn new(target: ModalPreview, surface: &mut Surface, fonts: &FontBook) -> Option<Self> {
-        let backing = PreviewBacking::capture(surface, target.rect())?;
-        target.render(surface, fonts);
-        Some(Self { target, backing })
+    fn new(target: ModalPreview) -> Option<Self> {
+        let rect = target.rect();
+        (rect.width() > 0 && rect.height() > 0).then_some(Self { target, rect })
     }
 
     fn initial_damage(&self) -> Option<HitRect> {
-        self.target.is_visible().then(|| self.backing.rect())
+        self.target.is_visible().then_some(self.rect)
     }
 
-    fn update(&mut self, point: Point, surface: &mut Surface, fonts: &FontBook) -> Option<HitRect> {
+    fn update(&mut self, point: Point) -> Option<HitRect> {
         if !self.target.update(point) {
             return None;
         }
-        self.backing.restore(surface);
-        self.target.render(surface, fonts);
-        Some(self.backing.rect())
+        Some(self.rect)
     }
 
-    fn finish(
-        self,
-        end: Point,
-        classified: Option<Gesture>,
-        surface: &mut Surface,
-    ) -> (Gesture, HitRect) {
-        self.backing.restore(surface);
-        (
-            self.target.release_gesture(end, classified),
-            self.backing.rect(),
-        )
+    fn render(&self, surface: &mut Surface, fonts: &FontBook) {
+        self.target.render(surface, fonts);
+    }
+
+    fn finish(self, end: Point, classified: Option<Gesture>) -> (Gesture, HitRect) {
+        (self.target.release_gesture(end, classified), self.rect)
     }
 }
 
@@ -177,33 +169,29 @@ impl ModalContact {
         GesturePolicy::default().classify(self.tool, &self.points, self.started_at.elapsed())
     }
 
-    pub(super) fn attach_preview(
-        &mut self,
-        target: ModalPreview,
-        surface: &mut Surface,
-        fonts: &FontBook,
-    ) -> Option<HitRect> {
-        let preview = ActiveModalPreview::new(target, surface, fonts)?;
+    pub(super) fn attach_preview(&mut self, target: ModalPreview) -> Option<HitRect> {
+        let preview = ActiveModalPreview::new(target)?;
         let damage = preview.initial_damage();
         self.preview = Some(preview);
         damage
     }
 
-    pub(super) fn update_preview(
-        &mut self,
-        point: Point,
-        surface: &mut Surface,
-        fonts: &FontBook,
-    ) -> Option<HitRect> {
-        self.preview.as_mut()?.update(point, surface, fonts)
+    pub(super) fn update_preview(&mut self, point: Point) -> Option<HitRect> {
+        self.preview.as_mut()?.update(point)
     }
 
-    pub(super) fn finish_preview(&mut self, surface: &mut Surface) -> Option<(Gesture, HitRect)> {
+    pub(super) fn render_preview(&self, surface: &mut Surface, fonts: &FontBook) {
+        if let Some(preview) = &self.preview {
+            preview.render(surface, fonts);
+        }
+    }
+
+    pub(super) fn finish_preview(&mut self) -> Option<(Gesture, HitRect)> {
         let classified = self.classified();
         let end = self.last_point();
         self.preview
             .take()
-            .map(|preview| preview.finish(end, classified, surface))
+            .map(|preview| preview.finish(end, classified))
     }
 }
 

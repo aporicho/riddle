@@ -17,6 +17,7 @@ impl Engine<'_> {
                 task_store: &mut self.task_store,
                 todo_store: &mut self.todo_store,
                 next_heartbeat: &mut self.next_heartbeat,
+                modal_layers: &mut self.modal_layers,
                 surf: &mut self.surf,
                 font: &mut self.font,
                 disp: self.disp,
@@ -62,6 +63,7 @@ impl Engine<'_> {
                                     );
                                     crate::app::pi_settings_controller::set_status(
                                         &mut self.state,
+                                        &mut self.modal_layers,
                                         &mut self.surf,
                                         &self.font,
                                         self.disp,
@@ -76,6 +78,7 @@ impl Engine<'_> {
                 };
                 crate::app::pi_settings_controller::set_status(
                     &mut self.state,
+                    &mut self.modal_layers,
                     &mut self.surf,
                     &self.font,
                     self.disp,
@@ -129,11 +132,10 @@ impl Engine<'_> {
             _ => None,
         };
         let mut contact = ModalContact::begin(tool, x, y);
-        let damage =
-            preview.and_then(|preview| contact.attach_preview(preview, &mut self.surf, &self.font));
+        let damage = preview.and_then(|preview| contact.attach_preview(preview));
         self.modal_contact = Some(contact);
         if let Some(rect) = damage {
-            self.present_modal_preview(rect);
+            self.render_modal_preview(rect);
         }
     }
 
@@ -143,14 +145,26 @@ impl Engine<'_> {
             if !contact.push(tool, x, y) {
                 return None;
             }
-            contact.update_preview(point, &mut self.surf, &self.font)
+            contact.update_preview(point)
         });
         if let Some(rect) = damage {
-            self.present_modal_preview(rect);
+            self.render_modal_preview(rect);
         }
     }
 
-    fn present_modal_preview(&self, rect: HitRect) {
+    fn render_modal_preview(&mut self, rect: HitRect) {
+        let Some(contact) = self.modal_contact.as_ref() else {
+            return;
+        };
+        let font = &self.font;
+        let Some(rect) = self
+            .modal_layers
+            .render_preview(&mut self.surf, rect, |surface| {
+                contact.render_preview(surface, font);
+            })
+        else {
+            return;
+        };
         self.disp.present_region(
             rect.x0,
             rect.y0,
@@ -168,7 +182,18 @@ impl Engine<'_> {
             self.modal_contact = Some(contact);
             return true;
         }
-        let preview = contact.finish_preview(&mut self.surf);
+        let preview = contact.finish_preview();
+        if let Some((_, rect)) = preview.as_ref() {
+            if let Some(rect) = self.modal_layers.clear_preview(&mut self.surf, *rect) {
+                self.disp.present_region(
+                    rect.x0,
+                    rect.y0,
+                    rect.width(),
+                    rect.height(),
+                    RefreshIntent::Ink,
+                );
+            }
+        }
         let gesture = preview
             .map(|(gesture, _)| gesture)
             .or_else(|| contact.classify());
@@ -186,7 +211,17 @@ impl Engine<'_> {
     /// page during a lifecycle or non-pointer state transition.
     pub(crate) fn cancel_modal_contact(&mut self) {
         if let Some(mut contact) = self.modal_contact.take() {
-            let _ = contact.finish_preview(&mut self.surf);
+            if let Some((_, rect)) = contact.finish_preview() {
+                if let Some(rect) = self.modal_layers.clear_preview(&mut self.surf, rect) {
+                    self.disp.present_region(
+                        rect.x0,
+                        rect.y0,
+                        rect.width(),
+                        rect.height(),
+                        RefreshIntent::Ink,
+                    );
+                }
+            }
         }
     }
 
@@ -209,10 +244,10 @@ impl Engine<'_> {
             until,
         } = old
         {
-            let region = panel.dismiss(&mut self.surf);
-            let (x, y, width, height) = region.rect();
+            let _ = panel;
+            self.modal_layers.dismiss(&mut self.surf);
             self.disp
-                .present_region(x, y, width, height, RefreshIntent::Ui);
+                .present_all(self.surf.w, self.surf.h, RefreshIntent::Content);
             self.state = State::Help { panel: None, until };
         } else {
             self.state = old;

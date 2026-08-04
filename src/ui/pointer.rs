@@ -82,46 +82,8 @@ impl HitRect {
     }
 }
 
-/// Save-under buffer for transient modal feedback. It deliberately keeps the
-/// framebuffer's native bytes rather than reconstructing the control, which
-/// prevents preview feedback from accumulating or losing gray pixels.
-pub struct PreviewBacking {
-    rect: HitRect,
-    pixels: Vec<u8>,
-}
-
-impl PreviewBacking {
-    pub fn capture(surface: &Surface, rect: HitRect) -> Option<Self> {
-        let rect = rect.clipped_to(surface.w, surface.h)?;
-        Some(Self {
-            rect,
-            pixels: surface.copy_rect(
-                rect.x0 as usize,
-                rect.y0 as usize,
-                rect.width() as usize,
-                rect.height() as usize,
-            ),
-        })
-    }
-
-    pub const fn rect(&self) -> HitRect {
-        self.rect
-    }
-
-    pub fn restore(&self, surface: &mut Surface) {
-        surface.paste_rect(
-            self.rect.x0 as usize,
-            self.rect.y0 as usize,
-            self.rect.width() as usize,
-            self.rect.height() as usize,
-            &self.pixels,
-        );
-    }
-}
-
-/// High-contrast pressed feedback for monochrome controls. The corresponding
-/// [`PreviewBacking`] restores the exact original pixels when the pointer
-/// leaves or lifts.
+/// High-contrast pressed feedback for monochrome controls. Runtime software
+/// layers restore the clean UI pixels when the pointer leaves or lifts.
 pub fn invert_mono(surface: &mut Surface, rect: HitRect) {
     let Some(rect) = rect.clipped_to(surface.w, surface.h) else {
         return;
@@ -295,28 +257,6 @@ impl GesturePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn preview_backing_restores_inverted_pixels_exactly() {
-        let mut pixels = vec![0xFF; 64 * 64 * 4];
-        let mut surface = Surface::new(
-            pixels.as_mut_ptr(),
-            pixels.len(),
-            64,
-            64,
-            64 * 4,
-            crate::surface::PixFmt::Rgb32,
-        );
-        surface.fill_rect(12, 12, 4, 4, BLACK);
-        let rect = HitRect::from_xywh(8, 8, 16, 16);
-        let before = surface.copy_rect(8, 8, 16, 16);
-        let backing = PreviewBacking::capture(&surface, rect).unwrap();
-        invert_mono(&mut surface, rect);
-        assert_eq!(surface.luma(9, 9), 0);
-        assert_eq!(surface.luma(13, 13), 255);
-        backing.restore(&mut surface);
-        assert_eq!(surface.copy_rect(8, 8, 16, 16), before);
-    }
 
     #[test]
     fn temporary_line_is_clipped_to_component_geometry() {

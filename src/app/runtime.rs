@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::input::{InputPriority, ModalContact, PenSequence, PenTrace, QtfbPenState};
+use super::layers::ModalLayers;
 use super::lifecycle::{LifecycleClient, LifecycleStage};
 use super::oracle_controller::{OracleController, SpeculativeRequest};
 use super::refresh_controller::RefreshController;
@@ -61,6 +62,7 @@ struct Stores {
 pub(super) struct Engine<'a> {
     disp: &'a display::Display,
     surf: crate::surface::Surface,
+    modal_layers: ModalLayers,
     font: fonts::FontBook,
     lifecycle: LifecycleClient,
     lifecycle_frame_sequence: u64,
@@ -212,9 +214,11 @@ impl<'a> Engine<'a> {
             .then(|| heartbeat_deadline(&stores.tasks))
             .flatten();
         log_display(disp, &surf, takeover);
+        let modal_layers = ModalLayers::new(&surf);
         Self {
             disp,
             live_ink: display::LegacyLiveInkAdapter::new(disp),
+            modal_layers,
             surf,
             font,
             lifecycle,

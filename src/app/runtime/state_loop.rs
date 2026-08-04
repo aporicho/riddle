@@ -22,6 +22,7 @@ impl Engine<'_> {
         if let Some(status) = self.oracle.poll_agent_control() {
             super::super::pi_settings_controller::set_status(
                 &mut self.state,
+                &mut self.modal_layers,
                 &mut self.surf,
                 &self.font,
                 self.disp,
@@ -180,10 +181,12 @@ impl Engine<'_> {
         self.disp
             .present_region(x, y, width, height, RefreshIntent::Content);
         self.user_ink.clear();
-        let panel = ui::help::show(&mut self.surf, &self.font, self.takeover);
-        let (x, y, width, height) = panel.region.rect();
+        let panel = self.modal_layers.replace_ui(&mut self.surf, |surface| {
+            ui::help::show(surface, &self.font, self.takeover)
+        });
+        self.modal_layers.compose_all(&mut self.surf);
         self.disp
-            .present_region(x, y, width, height, RefreshIntent::Ui);
+            .present_all(self.surf.w, self.surf.h, RefreshIntent::Content);
         eprintln!("magicpaper: guide shown");
         State::Help {
             panel: Some(panel),
@@ -384,6 +387,7 @@ impl Engine<'_> {
                         task_store: &mut self.task_store,
                         todo_store: &mut self.todo_store,
                         next_heartbeat: &mut self.next_heartbeat,
+                        modal_layers: &mut self.modal_layers,
                         surface: &mut self.surf,
                         display: self.disp,
                         refresh: &mut self.refresh,
@@ -431,10 +435,10 @@ impl Engine<'_> {
             Some(panel)
                 if Instant::now() >= until && !self.stylus_on && self.modal_contact.is_none() =>
             {
-                let region = panel.dismiss(&mut self.surf);
-                let (x, y, width, height) = region.rect();
+                let _ = panel;
+                self.modal_layers.dismiss(&mut self.surf);
                 self.disp
-                    .present_region(x, y, width, height, RefreshIntent::Ui);
+                    .present_all(self.surf.w, self.surf.h, RefreshIntent::Content);
                 eprintln!("magicpaper: guide dismissed");
                 State::Help { panel: None, until }
             }

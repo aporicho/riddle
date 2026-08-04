@@ -8,6 +8,7 @@ use crate::surface::Surface;
 use crate::ui::pointer::Gesture;
 use crate::{display, fonts, memory, reader, tasks, todos, ui};
 
+use super::layers::ModalLayers;
 use super::pi_settings_controller::{self, PiAgentAction};
 use super::state::{State, TurnKind};
 use super::timing::{heartbeat_deadline, unix_now};
@@ -20,6 +21,7 @@ pub(super) struct PaperListContext<'a> {
     pub task_store: &'a mut Option<tasks::TaskStore>,
     pub todo_store: &'a mut Option<todos::TodoStore>,
     pub next_heartbeat: &'a mut Option<Instant>,
+    pub modal_layers: &'a mut ModalLayers,
     pub surf: &'a mut Surface,
     pub font: &'a mut fonts::FontBook,
     pub disp: &'a display::Display,
@@ -42,13 +44,22 @@ pub(super) fn finish_paper_list_stroke(
         task_store,
         todo_store,
         next_heartbeat,
+        modal_layers,
         surf,
         font,
         disp,
         refresh,
     } = context;
     if matches!(state, State::Settings { .. }) {
-        settings_controller::finish_settings_stroke(state, surf, font, disp, refresh, gesture);
+        settings_controller::finish_settings_stroke(
+            state,
+            modal_layers,
+            surf,
+            font,
+            disp,
+            refresh,
+            gesture,
+        );
         return if matches!(state, State::PiSettings { .. }) {
             PaperListOutcome::PiAction(PiAgentAction::TestConnection)
         } else {
@@ -56,15 +67,22 @@ pub(super) fn finish_paper_list_stroke(
         };
     }
     if matches!(state, State::PiSettings { .. }) {
-        return pi_settings_controller::finish_stroke(state, surf, font, disp, gesture)
-            .map_or(PaperListOutcome::None, PaperListOutcome::PiAction);
+        return pi_settings_controller::finish_stroke(
+            state,
+            modal_layers,
+            surf,
+            font,
+            disp,
+            gesture,
+        )
+        .map_or(PaperListOutcome::None, PaperListOutcome::PiAction);
     }
     if matches!(state, State::FontList { .. }) {
-        finish_font_stroke(state, surf, font, disp, refresh, gesture);
+        finish_font_stroke(state, modal_layers, surf, font, disp, refresh, gesture);
         return PaperListOutcome::None;
     }
     if matches!(state, State::ReaderList { .. }) {
-        return finish_reader_stroke(state, surf, font, disp, gesture)
+        return finish_reader_stroke(state, modal_layers, surf, font, disp, gesture)
             .map_or(PaperListOutcome::None, PaperListOutcome::OpenReader);
     }
     let mut stores = ListStores {
@@ -73,7 +91,16 @@ pub(super) fn finish_paper_list_stroke(
         todos: todo_store,
         next_heartbeat,
     };
-    if finish_stored_list_stroke(state, &mut stores, surf, font, disp, refresh, gesture) {
+    if finish_stored_list_stroke(
+        state,
+        &mut stores,
+        modal_layers,
+        surf,
+        font,
+        disp,
+        refresh,
+        gesture,
+    ) {
         PaperListOutcome::PiAction(PiAgentAction::RestartAgent)
     } else {
         PaperListOutcome::None
@@ -89,6 +116,7 @@ struct ListStores<'a> {
 
 fn finish_font_stroke(
     state: &mut State,
+    modal_layers: &mut ModalLayers,
     surf: &mut Surface,
     font: &mut fonts::FontBook,
     disp: &display::Display,
@@ -104,14 +132,14 @@ fn finish_font_stroke(
             if let Err(error) = font.select(id) {
                 eprintln!("magic-paper: could not persist font selection: {error}");
             }
-            redraw_font_list(state, surf, font, disp);
+            redraw_font_list(state, modal_layers, surf, font, disp);
             eprintln!("magic-paper: selected font {}", id.stable_id());
         }
         Some(ui::font_settings::Action::SetScale(id, percent)) => {
             if let Err(error) = font.set_scale_percent(id, percent) {
                 eprintln!("magic-paper: could not persist font size calibration: {error}");
             }
-            redraw_font_list(state, surf, font, disp);
+            redraw_font_list(state, modal_layers, surf, font, disp);
             eprintln!(
                 "magic-paper: calibrated font {} to {}%",
                 id.stable_id(),
@@ -121,37 +149,49 @@ fn finish_font_stroke(
         Some(ui::font_settings::Action::Dismiss) => {
             let old = std::mem::replace(state, State::Listening { last_pen: None });
             if let State::FontList { panel, origin } = old {
-                panel.dismiss(surf);
+                let _ = panel;
                 *state = match origin {
-                    super::state::FontOrigin::Paper => State::Listening { last_pen: None },
+                    super::state::FontOrigin::Paper => {
+                        modal_layers.dismiss(surf);
+                        State::Listening { last_pen: None }
+                    }
                     super::state::FontOrigin::Settings(mut panel) => {
-                        panel.redraw(surf, font, refresh.values());
+                        let values = refresh.values();
+                        let _ = modal_layers.with_ui(|surface| {
+                            panel.redraw(surface, font, values);
+                        });
                         State::Settings { panel }
                     }
                 };
             }
+            modal_layers.compose_all(surf);
             disp.present_all(surf.w, surf.h, RefreshIntent::Content);
             eprintln!("magic-paper: font list dismissed");
         }
-        Some(ui::font_settings::Action::Redraw) => redraw_font_list(state, surf, font, disp),
+        Some(ui::font_settings::Action::Redraw) => {
+            redraw_font_list(state, modal_layers, surf, font, disp)
+        }
         None => {}
     }
 }
 
 fn redraw_font_list(
     state: &mut State,
+    modal_layers: &mut ModalLayers,
     surf: &mut Surface,
     font: &fonts::FontBook,
     disp: &display::Display,
 ) {
     if let State::FontList { panel, .. } = state {
-        panel.redraw(surf, font);
+        let _ = modal_layers.with_ui(|surface| panel.redraw(surface, font));
     }
+    modal_layers.compose_all(surf);
     disp.present_all(surf.w, surf.h, RefreshIntent::Content);
 }
 
 fn finish_reader_stroke(
     state: &mut State,
+    modal_layers: &mut ModalLayers,
     surf: &mut Surface,
     font: &fonts::FontBook,
     disp: &display::Display,
@@ -176,19 +216,18 @@ fn finish_reader_stroke(
                 );
                 return Some(path);
             }
-            redraw_reader_list(state, surf, font);
+            redraw_reader_list(state, modal_layers, surf, font);
             disp.present_all(surf.w, surf.h, RefreshIntent::Content);
         }
         Some(ui::paper_list::Action::Dismiss) => {
             let old = std::mem::replace(state, State::Listening { last_pen: None });
-            if let State::ReaderList { panel, .. } = old {
-                panel.dismiss(surf);
-            }
+            let _ = old;
+            modal_layers.dismiss(surf);
             disp.present_all(surf.w, surf.h, RefreshIntent::Content);
             eprintln!("magic-paper: reader candidates dismissed");
         }
         Some(_) => {
-            redraw_reader_list(state, surf, font);
+            redraw_reader_list(state, modal_layers, surf, font);
             disp.present_all(surf.w, surf.h, RefreshIntent::Content);
         }
         None => {}
@@ -199,6 +238,7 @@ fn finish_reader_stroke(
 fn finish_stored_list_stroke(
     state: &mut State,
     stores: &mut ListStores<'_>,
+    modal_layers: &mut ModalLayers,
     surf: &mut Surface,
     font: &fonts::FontBook,
     disp: &display::Display,
@@ -215,27 +255,39 @@ fn finish_stored_list_stroke(
     match action {
         ui::paper_list::Action::Delete(number) => {
             let history_changed = delete_stored_row(state, stores, number);
-            redraw_stored_list(state, stores, surf, font, disp, refresh, true);
+            redraw_stored_list(state, stores, modal_layers, surf, font, disp, refresh, true);
             return history_changed;
         }
         ui::paper_list::Action::Toggle(number) => {
             toggle_task(stores, number);
-            redraw_stored_list(state, stores, surf, font, disp, refresh, false);
+            redraw_stored_list(
+                state,
+                stores,
+                modal_layers,
+                surf,
+                font,
+                disp,
+                refresh,
+                false,
+            );
         }
         ui::paper_list::Action::Dismiss => {
             let old = std::mem::replace(state, State::Listening { last_pen: None });
-            if let State::TaskList { panel }
-            | State::TodoList { panel }
-            | State::HistoryList { panel } = old
-            {
-                panel.dismiss(surf);
-            }
+            let _ = old;
+            modal_layers.dismiss(surf);
             disp.present_all(surf.w, surf.h, RefreshIntent::Content);
             eprintln!("magic-paper: paper list dismissed");
         }
-        ui::paper_list::Action::Redraw => {
-            redraw_stored_list(state, stores, surf, font, disp, refresh, false)
-        }
+        ui::paper_list::Action::Redraw => redraw_stored_list(
+            state,
+            stores,
+            modal_layers,
+            surf,
+            font,
+            disp,
+            refresh,
+            false,
+        ),
         ui::paper_list::Action::Select(_) => {}
     }
     false
@@ -306,13 +358,21 @@ fn toggle_task(stores: &mut ListStores<'_>, number: usize) {
 fn redraw_stored_list(
     state: &mut State,
     stores: &ListStores<'_>,
+    modal_layers: &mut ModalLayers,
     surf: &mut Surface,
     font: &fonts::FontBook,
     disp: &display::Display,
     refresh: &RefreshController,
     cleanup: bool,
 ) {
-    redraw_paper_list(state, stores.memory, stores.tasks, stores.todos, surf, font);
+    redraw_paper_list(
+        state,
+        stores.memory,
+        stores.tasks,
+        stores.todos,
+        modal_layers,
+        font,
+    );
     if cleanup {
         let region = match state {
             State::TaskList { panel }
@@ -320,26 +380,44 @@ fn redraw_stored_list(
             | State::HistoryList { panel } => panel.refresh_region(),
             _ => return,
         };
+        modal_layers.compose_rect(
+            surf,
+            crate::ui::pointer::HitRect::from_xywh(
+                region.x0,
+                region.y0,
+                region.x1.saturating_sub(region.x0).saturating_add(1),
+                region.y1.saturating_sub(region.y0).saturating_add(1),
+            ),
+        );
         refresh.present_cleanup(disp, region);
     } else {
+        modal_layers.compose_all(surf);
         disp.present_all(surf.w, surf.h, RefreshIntent::Content);
     }
 }
 
-fn redraw_reader_list(state: &mut State, surf: &mut Surface, font: &fonts::FontBook) {
+fn redraw_reader_list(
+    state: &mut State,
+    modal_layers: &mut ModalLayers,
+    surf: &mut Surface,
+    font: &fonts::FontBook,
+) {
     if let State::ReaderList { panel, books } = state {
         let lines: Vec<String> = books.iter().map(reader::Book::panel_label).collect();
-        panel.redraw(
-            surf,
-            font,
-            ui::paper_list::Content {
-                title: "选择要阅读的书",
-                empty_text: "没有相符书籍",
-                footer: "用笔点书名打开 · 点空白退出",
-                entries: &lines,
-                enabled: None,
-            },
-        );
+        let _ = modal_layers.with_ui(|surface| {
+            panel.redraw(
+                surface,
+                font,
+                ui::paper_list::Content {
+                    title: "选择要阅读的书",
+                    empty_text: "没有相符书籍",
+                    footer: "用笔点书名打开 · 点空白退出",
+                    entries: &lines,
+                    enabled: None,
+                },
+            );
+        });
+        modal_layers.compose_all(surf);
     }
 }
 
@@ -348,7 +426,7 @@ fn redraw_paper_list(
     memory_store: &Option<memory::MemoryStore>,
     task_store: &Option<tasks::TaskStore>,
     todo_store: &Option<todos::TodoStore>,
-    surf: &mut Surface,
+    modal_layers: &mut ModalLayers,
     font: &fonts::FontBook,
 ) {
     match state {
@@ -361,51 +439,57 @@ fn redraw_paper_list(
                 .as_ref()
                 .map(|store| store.panel_enabled())
                 .unwrap_or_default();
-            panel.redraw(
-                surf,
-                font,
-                ui::paper_list::Content {
-                    title: "任务列表",
-                    empty_text: "尚无任务",
-                    footer: "横划可删除 · 点右侧方框启用或停用 · 点空白退出",
-                    entries: &lines,
-                    enabled: Some(&enabled),
-                },
-            );
+            let _ = modal_layers.with_ui(|surface| {
+                panel.redraw(
+                    surface,
+                    font,
+                    ui::paper_list::Content {
+                        title: "任务列表",
+                        empty_text: "尚无任务",
+                        footer: "横划可删除 · 点右侧方框启用或停用 · 点空白退出",
+                        entries: &lines,
+                        enabled: Some(&enabled),
+                    },
+                );
+            });
         }
         State::TodoList { panel } => {
             let lines = todo_store
                 .as_ref()
                 .map(|store| store.panel_lines())
                 .unwrap_or_default();
-            panel.redraw(
-                surf,
-                font,
-                ui::paper_list::Content {
-                    title: "TODO 列表",
-                    empty_text: "尚无 TODO",
-                    footer: "横划 TODO 可删除 · 点击空白处退出",
-                    entries: &lines,
-                    enabled: None,
-                },
-            );
+            let _ = modal_layers.with_ui(|surface| {
+                panel.redraw(
+                    surface,
+                    font,
+                    ui::paper_list::Content {
+                        title: "TODO 列表",
+                        empty_text: "尚无 TODO",
+                        footer: "横划 TODO 可删除 · 点击空白处退出",
+                        entries: &lines,
+                        enabled: None,
+                    },
+                );
+            });
         }
         State::HistoryList { panel } => {
             let lines = memory_store
                 .as_ref()
                 .map(|store| store.panel_lines(HISTORY_VISIBLE))
                 .unwrap_or_default();
-            panel.redraw(
-                surf,
-                font,
-                ui::paper_list::Content {
-                    title: "对话历史",
-                    empty_text: "尚无历史",
-                    footer: "横划一段历史可删除 · 点击空白处退出",
-                    entries: &lines,
-                    enabled: None,
-                },
-            );
+            let _ = modal_layers.with_ui(|surface| {
+                panel.redraw(
+                    surface,
+                    font,
+                    ui::paper_list::Content {
+                        title: "对话历史",
+                        empty_text: "尚无历史",
+                        footer: "横划一段历史可删除 · 点击空白处退出",
+                        entries: &lines,
+                        enabled: None,
+                    },
+                );
+            });
         }
         _ => {}
     }
