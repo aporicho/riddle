@@ -8,9 +8,7 @@ use crate::fb::{screen_h, screen_w};
 use crate::fonts::FontBook;
 use crate::surface::{Surface, FADED, WHITE};
 
-use super::pointer::{
-    draw_clipped_line, invert_mono, Gesture, GesturePolicy, HitRect, Point, PointerTool,
-};
+use super::pointer::{draw_line, invert_mono, Gesture, HitRect, Point, PointerTool};
 
 mod geometry;
 pub(in crate::ui) mod render;
@@ -41,7 +39,7 @@ pub enum Hit {
 /// Component-owned transient feedback. Runtime only snapshots [`Self::rect`]
 /// and delegates drawing/release semantics back to this component, so hit
 /// geometry never has to be duplicated outside the list.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Preview {
     Press {
         tool: PointerTool,
@@ -51,35 +49,29 @@ pub enum Preview {
         pressed: bool,
     },
     Strike {
-        row: usize,
-        card: HitRect,
-        text: HitRect,
+        tool: PointerTool,
         start: Point,
-        line_to: Option<Point>,
+        points: Vec<Point>,
     },
 }
 
 impl Preview {
-    pub const fn rect(self) -> HitRect {
+    pub fn rect(&self) -> HitRect {
         match self {
-            Self::Press { rect, .. } => rect,
-            Self::Strike { card, .. } => card,
+            Self::Press { rect, .. } => *rect,
+            Self::Strike { .. } => modal_canvas_rect(),
         }
     }
 
-    pub const fn is_visible(self) -> bool {
-        matches!(
-            self,
-            Self::Press { pressed: true, .. }
-                | Self::Strike {
-                    line_to: Some(_),
-                    ..
-                }
-        )
+    pub fn is_visible(&self) -> bool {
+        match self {
+            Self::Press { pressed, .. } => *pressed,
+            Self::Strike { points, .. } => points.len() > 1,
+        }
     }
 
-    /// Update only the visual state. Returns true when the save-under must be
-    /// restored and this preview rendered again.
+    /// Update only the visual state. Returns true when the clean modal layer
+    /// must be restored and this preview rendered again.
     pub fn update(&mut self, point: Point) -> bool {
         match self {
             Self::Press { rect, pressed, .. } => {
@@ -88,48 +80,35 @@ impl Preview {
                 *pressed = next;
                 changed
             }
-            Self::Strike {
-                text,
-                start,
-                line_to,
-                ..
-            } => {
-                let dx = (point.x - start.x).abs();
-                let dy = (point.y - start.y).abs();
-                const PREVIEW_DISTANCE_PX: i32 = 32;
-                let dominance = GesturePolicy::default().pen.axis_dominance;
-                let next = (dx >= PREVIEW_DISTANCE_PX
-                    && dx >= dy.saturating_mul(dominance)
-                    && segment_intersects_rect(*start, point, *text))
-                .then_some(point);
-                let changed = *line_to != next;
-                *line_to = next;
-                changed
+            Self::Strike { points, .. } => {
+                if points.last().copied() == Some(point) {
+                    return false;
+                }
+                points.push(point);
+                true
             }
         }
     }
 
-    pub fn render(self, surface: &mut Surface) {
+    pub fn render(&self, surface: &mut Surface) {
         match self {
             Self::Press {
                 rect,
                 pressed: true,
                 ..
-            } => invert_mono(surface, rect),
-            Self::Strike {
-                card,
-                start,
-                line_to: Some(to),
-                ..
-            } => draw_clipped_line(surface, start, to, card, 3),
+            } => invert_mono(surface, *rect),
+            Self::Strike { points, .. } => {
+                for segment in points.windows(2) {
+                    draw_line(surface, segment[0], segment[1], 3);
+                }
+            }
             _ => {}
         }
     }
 
     /// Convert a completed preview back into the component's existing
-    /// gesture/action path. A released-outside press becomes a zero-distance
-    /// no-op swipe, while a slider-like accidental drag can never dismiss the
-    /// page underneath.
+    /// gesture/action path. Drag drawing is intentionally permissive here:
+    /// visual feedback is not used to decide whether deletion is valid.
     pub fn release_gesture(self, end: Point, classified: Option<Gesture>) -> Gesture {
         match self {
             Self::Press {
@@ -137,33 +116,16 @@ impl Preview {
                 pressed: true,
                 ..
             } => Gesture::Tap { tool, at: end },
-            Self::Strike {
-                row: _,
-                card,
-                text,
-                start,
-                ..
-            } => match classified {
-                Some(
-                    gesture @ Gesture::Strike {
-                        tool: PointerTool::Pen,
-                        from,
-                        to,
-                        ..
-                    },
-                ) if from == start
-                    && card.contains(from)
-                    && segment_intersects_rect(from, to, text) =>
-                {
-                    gesture
-                }
-                Some(Gesture::Tap { tool, .. }) => Gesture::Tap { tool, at: end },
-                Some(gesture @ Gesture::Swipe { .. }) => gesture,
-                _ => no_op_gesture(PointerTool::Pen, start),
-            },
+            Self::Strike { tool, start, .. } => {
+                classified.unwrap_or_else(|| no_op_gesture(tool, start))
+            }
             Self::Press { tool, start, .. } => no_op_gesture(tool, start),
         }
     }
+}
+
+fn modal_canvas_rect() -> HitRect {
+    HitRect::from_xywh(0, 0, i32::MAX, i32::MAX)
 }
 
 fn no_op_gesture(tool: PointerTool, at: Point) -> Gesture {
@@ -385,17 +347,13 @@ impl PaperList {
                         pressed: true,
                     })
             }
-            _ if tool == PointerTool::Pen && !self.selectable => self
-                .rows
-                .iter()
-                .find(|row| row.card.contains(point))
-                .map(|row| Preview::Strike {
-                    row: row.number,
-                    card: row.card,
-                    text: row.text,
+            _ if tool == PointerTool::Pen && !self.selectable => {
+                (!self.rows.is_empty()).then(|| Preview::Strike {
+                    tool,
                     start: point,
-                    line_to: None,
-                }),
+                    points: vec![point],
+                })
+            }
             _ => None,
         }
     }

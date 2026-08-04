@@ -100,9 +100,23 @@ pub fn invert_mono(surface: &mut Surface, rect: HitRect) {
     }
 }
 
-/// Draw a temporary line without ever escaping the component-provided text
-/// hit rectangle. In particular this avoids turning modal pen contacts into
+/// Draw a temporary line without clipping to component geometry. The target
+/// surface still clips at the framebuffer boundary.
+pub fn draw_line(surface: &mut Surface, from: Point, to: Point, radius: i32) {
+    let dx = (to.x - from.x).abs();
+    let dy = (to.y - from.y).abs();
+    let steps = dx.max(dy).max(1);
+    for step in 0..=steps {
+        let x = from.x + (to.x - from.x) * step / steps;
+        let y = from.y + (to.y - from.y) * step / steps;
+        surface.stamp(x, y, radius, BLACK);
+    }
+}
+
+/// Draw a temporary line without ever escaping the component-provided hit
+/// rectangle. In particular this avoids turning clipped modal feedback into
 /// page ink.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn draw_clipped_line(
     surface: &mut Surface,
     from: Point,
@@ -275,6 +289,22 @@ mod tests {
         assert_eq!(surface.luma(20, 25), 0);
         assert_eq!(surface.luma(39, 25), 0);
         assert_eq!(surface.luma(40, 25), 255);
+    }
+
+    #[test]
+    fn temporary_free_line_crosses_component_geometry() {
+        let mut pixels = vec![0xFF; 64 * 64 * 4];
+        let mut surface = Surface::new(
+            pixels.as_mut_ptr(),
+            pixels.len(),
+            64,
+            64,
+            64 * 4,
+            crate::surface::PixFmt::Rgb32,
+        );
+        draw_line(&mut surface, Point::new(5, 25), Point::new(55, 25), 2);
+        assert_eq!(surface.luma(5, 25), 0);
+        assert_eq!(surface.luma(55, 25), 0);
     }
 
     #[test]
